@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CartBack · 引导式邮件挽回</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body>
+
+  <!-- ======================= 顶栏 ======================= -->
+  <header class="topbar">
+    <div class="logo">
+      <img class="mark" src="/logo.svg" alt="CartBack" />
+      <span class="logo-name">Cart<b>Back</b></span>
+    </div>
+    <span class="crumb" id="crumb">/ 助手</span>
+    <div class="hint-pill" id="hintPill">
+      <span class="hp-n"><b id="hpCur">0</b><small>/4</small></span>
+      <span class="hp-t" id="hpText">跟助手聊聊想挽回谁、为啥、要什么结果，信息齐了自动出方案。</span>
+      <span class="hp-actions"><button class="hp-skip" id="hpSkip">收起</button></span>
+    </div>
+    <span class="spacer"></span>
+    <span class="mode-pill" id="modeBadge">演示</span>
+    <button class="tbtn" id="userBtn">登录</button>
+    <div class="t-avatar" id="tAvatar" style="display:none" title="">S</div>
+    <button class="tbtn" id="resetData">重置</button>
+  </header>
+
+  <div class="shell">
+    <!-- ======================= 侧栏 ======================= -->
+    <aside class="sidebar">
+      <div class="nav active" data-nav="chat" role="tab" aria-selected="true">
+        <span class="nav-ic"><svg viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H5.5a2 2 0 0 1-2-2V11a8 8 0 0 1 8-8h1.5a8 8 0 0 1 8 8z"/><path d="M8.5 10h7M8.5 13.5h4.5"/></svg></span>
+        <span class="txt">助手</span>
+      </div>
+      <div class="nav" data-nav="mail" role="tab" aria-selected="false">
+        <span class="nav-ic"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3.5 7l8.5 6 8.5-6"/></svg></span>
+        <span class="txt">邮件配置</span>
+        <span class="badge" id="navBadge">0</span>
+      </div>
+      <div class="nav" data-nav="data" role="tab" aria-selected="false">
+        <span class="nav-ic"><svg viewBox="0 0 24 24"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg></span>
+        <span class="txt">数据看板</span>
+      </div>
+      <div class="nav" data-nav="aud" role="tab" aria-selected="false">
+        <span class="nav-ic"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><circle cx="17.5" cy="9" r="2.5"/><path d="M16 14.2c2.6.5 4.5 2.6 4.8 5.3"/></svg></span>
+        <span class="txt">受众</span>
+      </div>
+      <div class="nav" data-nav="set" role="tab" aria-selected="false">
+        <span class="nav-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1"/></svg></span>
+        <span class="txt">设置</span>
+      </div>
+      <div class="foot">
+        <div class="foot-brand"><span class="fl"><svg viewBox="0 0 24 24"><path d="M4 12h11" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round"/><path d="M12 6l6 6-6 6" stroke="#fff" stroke-width="2.4" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></span><b>CartBack</b></div>
+        把逛了没买的人<br />变成回头客
+      </div>
+    </aside>
+
+    <!-- ======================= 主区 ======================= -->
+    <main class="main">
+
+      <!-- 助手（对话） -->
+      <section class="view active" id="view-chat">
+        <div class="view-body" style="padding-bottom:0">
+          <div id="oppCard" class="opp-card hidden"></div>
+          <div class="chat-shell">
+            <div class="chat-wrap">
+              <div class="chat-head">
+                <div class="ch-av"><svg viewBox="0 0 24 24"><path d="M4 12h11M12 6l6 6-6 6"/></svg></div>
+                <span class="ch-t">运营助手</span>
+                <span class="ch-s"><span class="dot"></span><span id="chInfo">Agent 在线 · 已记录 0 项信息</span></span>
+              </div>
+              <div class="chat-area" id="chat" aria-live="polite" aria-label="对话消息区"></div>
+              <div class="compose">
+                <input id="chatInput" type="text" placeholder="说清楚你想挽回谁、为啥、要什么结果…" />
+                <button class="btn primary" id="chatSend">
+                  <svg viewBox="0 0 24 24"><path d="M4.5 11.5l15-7-4.5 15-4-6z"/><path d="M11 13.5l9-9"/></svg>
+                  发送
+                </button>
+              </div>
+              <div class="compose-hint">开放式对话 · 信息后台静默采集 · 齐了才弹确认</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 邮件配置 -->
+      <section class="view" id="view-mail">
+        <div class="view-body">
+          <div class="phead">
+            <h2>邮件配置</h2>
+            <span class="desc">每封独立生命周期 · 草稿 → 发送中 → 已发送 → 回流中</span>
+          </div>
+          <div class="stat-strip">
+            <div class="stat glass-card"><div class="s-ic brand"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M3.5 7l8.5 6 8.5-6"/></svg></div><div><div class="s-n num" id="stCount">0</div><div class="s-l">封邮件活动</div></div></div>
+            <div class="stat glass-card"><div class="s-ic ok"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6"/><path d="M17 9l2 2 4-4"/></svg></div><div><div class="s-n num" id="stReach">0</div><div class="s-l">累计触达</div></div></div>
+            <div class="stat glass-card"><div class="s-ic brand"><svg viewBox="0 0 24 24"><path d="M4 12h11M12 6l6 6-6 6"/></svg></div><div><div class="s-n num brand" id="stGmv">¥0</div><div class="s-l">已捞回 · 预估</div></div></div>
+          </div>
+          <div class="mail-grid" id="mailGrid"></div>
+        </div>
+      </section>
+
+      <!-- 数据看板 -->
+      <section class="view" id="view-data">
+        <div class="view-body">
+          <div class="phead">
+            <h2>数据看板</h2>
+            <span class="desc" id="dataModeHint"></span>
+          </div>
+          <div class="alert-bar" id="alertBar">
+            <svg viewBox="0 0 24 24"><path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18.5v.5"/></svg>
+            <span id="alertText"></span>
+          </div>
+          <div class="narrative">
+            <div class="nv-ic"><svg viewBox="0 0 24 24"><path d="M4 12h11M12 6l6 6-6 6"/></svg></div>
+            <div>
+              <div class="nv-t">本周回流营收 <span class="big num" id="nvGmv">¥0</span> · ROI <span class="big num" id="nvRoi">0×</span></div>
+              <div class="nv-s" id="nvSub">0 封邮件 · 触达 0 人 · 花费 ¥0 · 净赚 ¥0</div>
+            </div>
+            <span class="tag tag-brand nv-tag"><span class="tdot"></span><span id="nvModeTag">演示数据</span></span>
+          </div>
+          <div class="kpi-grid" id="kpis"></div>
+          <div class="charts-row">
+            <div class="glass-card" style="padding:17px 19px">
+              <div class="card-title"><span class="tline"></span>转化漏斗</div>
+              <div class="funnel" id="funnel"></div>
+            </div>
+            <div class="glass-card" style="padding:17px 19px">
+              <div class="card-title"><span class="tline"></span>7 日趋势 · 回流 GMV</div>
+              <div class="trend-chart" id="trendChart"></div>
+              <div class="legend">
+                <span class="lg"><span class="sw" style="background:linear-gradient(90deg,#FF7F4D,#FFB380)"></span>回流 GMV</span>
+                <span class="lg"><span class="sw" style="background:#EEF2F6;border:.5px solid #DDE2E8"></span>发送量</span>
+              </div>
+            </div>
+          </div>
+          <div class="metrics" id="metrics"></div>
+        </div>
+      </section>
+
+      <!-- 受众 -->
+      <section class="view" id="view-aud">
+        <div class="view-body">
+          <div class="phead">
+            <h2>高意向流失受众</h2>
+            <span class="desc">按预估回流价值排序 · 谁最值得捞一眼可见</span>
+          </div>
+          <div class="aud-tools">
+            <button class="btn grad" id="showImport">
+              <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+              导入真实名单
+            </button>
+            <div class="note">
+              <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 8v4M12 16h.01"/></svg>
+              当前为演示名单 · 接入店铺后自动拉取真实顾客（邮件语种跟随客户地区）
+            </div>
+          </div>
+          <div class="opp-list" id="oppList"></div>
+        </div>
+      </section>
+
+      <!-- 设置 -->
+      <section class="view" id="view-set">
+        <div class="view-body">
+          <div class="phead">
+            <h2>设置</h2>
+            <span class="desc">一次性接好 · 之后只负责聊天和点确认</span>
+          </div>
+          <div class="setup-wrap">
+            <div class="setup-card glass-card done">
+              <div class="s-no">✓</div>
+              <div class="s-body">
+                <div class="s-head"><h3>连接 AI 助手</h3><span class="tag tag-intent" id="aiTag">已连接</span></div>
+                <div class="s-desc">开放式对话引擎（IGDE）在线 · 密钥仅存本机。</div>
+                <div class="row">
+                  <input type="password" id="aiKey" placeholder="sk-…（已保存，输入新值可替换）" />
+                  <input type="text" id="aiModel" placeholder="deepseek-chat" style="max-width:200px" />
+                  <button class="btn ghost sm save-cfg">保存</button>
+                </div>
+              </div>
+            </div>
+            <div class="setup-card glass-card">
+              <div class="s-no">2</div>
+              <div class="s-body">
+                <div class="s-head"><h3>连接发信服务（ESP）</h3><span class="tag tag-price" id="espTag">待配置</span></div>
+                <div class="s-desc">配置后「确认发送」= 真实送达；未配置时走仿真发送，流程可完整体验。</div>
+                <div class="row">
+                  <input type="password" id="espKey" placeholder="re_…（Resend 密钥）" />
+                  <input type="text" id="espFrom" placeholder="onear@yourdomain.com" style="max-width:225px" />
+                  <button class="btn ghost sm save-cfg">保存</button>
+                </div>
+                <div class="config-status" id="configStatus"></div>
+                <span id="configMsg" class="msg-ok"></span>
+              </div>
+            </div>
+            <div class="setup-card glass-card">
+              <div class="s-no">3</div>
+              <div class="s-body">
+                <div class="s-head"><h3>连接店铺（真实收件人源）</h3><span class="tag tag-default">即将支持</span></div>
+                <div class="s-desc">Shopify / 店匠 / 通用 REST 统一连接器 · 接入后自动拉取真实顾客，语种跟随客户 locale。</div>
+                <div class="row">
+                  <button class="btn ghost sm" id="storeCta">暂用 CSV 导入代替</button>
+                </div>
+              </div>
+            </div>
+            <div class="setup-card glass-card">
+              <div class="s-no">4</div>
+              <div class="s-body">
+                <div class="s-head"><h3>运行模式</h3><span class="tag tag-gray" id="modeTag">演示</span></div>
+                <div class="s-desc">演示模式用仿真数据先看效果；真实模式只显示真实归因结果。</div>
+                <div class="row">
+                  <div class="seg">
+                    <button class="seg-btn active" data-mode="demo" id="segDemo">演示（仿真回流）</button>
+                    <button class="seg-btn" data-mode="real" id="segReal">真实（需 ESP 密钥）</button>
+                  </div>
+                </div>
+                <div class="mode-warn" id="modeWarn">切换到真实模式后，看板只显示真实归因数据；ESP 未配置前「确认发送」仅生成草稿。</div>
+              </div>
+            </div>
+            <div class="danger-zone">
+              <span>重置全部数据（清空对话 / 邮件 / 看板）</span>
+              <button class="btn ghost sm js-reset" style="color:var(--danger);border-color:var(--danger-bg)">重置数据</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- 受众画像抽屉 -->
+  <div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="受众画像">
+    <div class="d-head">
+      <div class="av" id="dAv">?</div>
+      <div>
+        <div class="nm" id="dName"></div>
+        <div class="em" id="dEmail"></div>
+      </div>
+      <button class="d-close" id="drawerClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+    </div>
+    <div class="d-body" id="drawerBody"></div>
+  </div>
+
+  <!-- 导入弹窗 -->
+  <div class="overlay" id="importModal" role="dialog" aria-modal="true" aria-labelledby="importTitle">
+    <div class="modal">
+      <div class="m-head">
+        <h3 id="importTitle">导入高意向访客</h3>
+        <button class="x" id="importClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="m-body">
+        <p>粘贴访客清单，每行一个，格式：<b>姓名,邮箱,意向,风险,价格敏,弃购额</b>。</p>
+        <textarea id="csvInput" spellcheck="false" placeholder="name,email,intent,risk,price,abandoned_value&#10;张三,zhang@x.com,弃购,高,中,860"></textarea>
+      </div>
+      <div class="m-foot">
+        <button class="btn primary" id="doImport">解析并导入</button>
+        <span class="msg" id="importMsg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 邮件编辑弹窗 -->
+  <div class="overlay" id="editModal" role="dialog" aria-modal="true" aria-labelledby="editTitle">
+    <div class="modal">
+      <div class="m-head">
+        <h3 id="editTitle">编辑邮件</h3>
+        <button class="x" id="editClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="m-body">
+        <p>主题与正文可直接微调，保存并发送时以最新内容为准。</p>
+        <input id="editSubj" type="text" placeholder="邮件主题" style="margin-bottom:9px" />
+        <textarea id="editBody" spellcheck="false" placeholder="邮件正文…"></textarea>
+      </div>
+      <div class="m-foot">
+        <button class="btn primary" id="editSend">保存并发送</button>
+        <span class="msg" id="editMsg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 登录/注册弹窗 -->
+  <div class="overlay" id="authModal" role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <div class="modal" style="width:min(380px,100%)">
+      <div class="m-head">
+        <h3 id="authTitle">登录 / 注册</h3>
+        <button class="x" id="authClose" aria-label="关闭"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+      <div class="m-body">
+        <div class="auth-field">
+          <input id="authEmail" type="email" placeholder="邮箱" />
+          <input id="authPassword" type="password" placeholder="密码（≥8 位含字母和数字）" />
+          <input id="authName" type="text" placeholder="昵称（仅注册时填）" />
+        </div>
+      </div>
+      <div class="m-foot">
+        <button class="btn primary" id="authSubmit">登录</button>
+        <button class="btn ghost" id="authToggle">切到注册</button>
+        <span class="msg" id="authMsg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div class="toast" id="toast"><span class="td"></span><span id="toastText"></span></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

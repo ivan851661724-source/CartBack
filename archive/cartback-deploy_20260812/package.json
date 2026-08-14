@@ -1,0 +1,14 @@
+{
+  "name": "cartback",
+  "version": "3.0.0",
+  "description": "CartBack v3 — IGDE 引导式对话驱动的邮件挽回增长助手（本地部署）",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  },
+  "license": "MIT"
+}

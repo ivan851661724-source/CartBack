@@ -1,0 +1,60 @@
+# ──────────────────────────────────────────────
+# CartBack — Next.js 前端 + 零依赖 Node 后端 + SQLite + Docker
+# ──────────────────────────────────────────────
+
+# ===== 运行时数据 / 密钥（绝不入库）=====
+server-data/
+backend/.server/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+
+# ===== 本地环境变量 / 密钥 =====
+.env
+.env.local
+.env.*.local
+**/.env
+**/.env.local
+
+# ===== 依赖 =====
+node_modules/
+**/node_modules/
+
+# ===== Next.js 构建产物 =====
+.next/
+out/
+next-env.d.ts
+*.tsbuildinfo
+
+# ===== 通用构建产物 / 分发 =====
+dist/
+build/
+*.tar
+*.tgz
+
+# ===== 日志 =====
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===== macOS =====
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+# ===== IDE / 编辑器 =====
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ===== Claude Code 本机配置 =====
+.claude/settings.local.json
+
+# ===== Docker 本地覆盖（保留 docker-compose.yml 作为源码）=====
+docker-compose.override.yml

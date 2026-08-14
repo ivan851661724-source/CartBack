@@ -1,0 +1,19 @@
+services:
+  cartback:
+    build: .
+    image: cartback:latest
+    container_name: cartback
+    restart: unless-stopped
+    ports:
+      - "4180:4180"
+    environment:
+      - PORT=4180
+    # 密钥与数据持久化到宿主机 ./server-data，容器重建不丢
+    volumes:
+      - ./server-data:/app/.server
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4180/api/bootstrap').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -1,0 +1,35 @@
+# CartBack v3 —— 前后端双容器编排
+# 唯一对外入口：前端 ${PUBLIC_PORT:-3000}（Next 反代 /api/* 到 backend）。
+# 数据 / 密钥落宿主机 ./server-data，绝不进镜像。
+#
+# 启动：  docker compose up -d --build
+# 访问：  http://localhost:3000
+# 注入key： ./backend/deploy/init-key.sh sk-xxxx
+
+services:
+  backend:
+    build: ./backend
+    image: cartback-backend:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    expose:
+      - "4180"                 # 仅容器网络内可见，不发布到宿主机
+    volumes:
+      - ./server-data:/app/.server
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:4180/api/bootstrap').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: "30s"
+      timeout: "5s"
+      retries: 3
+      start_period: "10s"
+
+  frontend:
+    build: ./frontend
+    image: cartback-frontend:${IMAGE_TAG:-local}
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${BIND_ADDRESS:-0.0.0.0}:${PUBLIC_PORT:-3000}:3000" # 唯一对外入口
+    environment:
+      - BACKEND_URL=http://backend:4180

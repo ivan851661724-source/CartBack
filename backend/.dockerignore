@@ -1,0 +1,33 @@
+# —— 密钥 / 数据：绝不能进镜像层 ——
+.server/
+.preview4180/
+.preview4173/
+.smoke_*/
+data.sqlite
+
+# —— 工作记忆 / 临时脚本 ——
+.workbuddy/
+.verify_*.js
+.setkey.js
+.testkey.js
+*.log
+
+# —— 运行时 / 依赖缓存 ——
+node_modules/
+npm-debug.log*
+
+# —— 测试（运行镜像不需要）——
+test/
+
+# —— VCS / 编辑器 ——
+.git/
+.gitignore
+.idea/
+.vscode/
+
+# —— 自身 / 部署产物 ——
+Dockerfile
+.dockerignore
+docker-compose.yml
+deploy/
+README_部署.md
