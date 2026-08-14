@@ -580,6 +580,8 @@ const server = http.createServer(async (req, res) => {
       const finalReply = result.reply || '';
       if (!streamed) {
         // 未流出任何 token（桩 / 边界 / 护栏重生成 / 模型没按 JSON 输出）→ 3 字打字机兜底
+        // 注：3 字分块在中文语境下可能切断词语（如"挽回"→"挽"+"回"），但在打字机效果场景下
+        // 可接受——优先保证逐字上屏的即时感，而非词边界完整性。西文 3 字符通常仍在词边界内。
         for (let i = 0; i < finalReply.length; i += 3) {
           send({ type: 'token', value: finalReply.slice(i, i + 3) });
         }

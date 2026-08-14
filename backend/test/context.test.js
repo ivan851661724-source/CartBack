@@ -154,6 +154,34 @@ test('memory patch only admits facts grounded in the current user message', () =
   assert.equal(act.memory.decisions[0].value, '包邮');
 });
 
+test('evidence grounding rejects partial word matches but allows CJK particle 的', () => {
+  // "卖雨伞" in "卖雨伞生意" - "雨伞" followed by "生" (CJK, not particle) → reject
+  const result1 = applyAgentProfilePatch({}, {
+    product: { value: '雨伞', evidence: '卖雨伞' }
+  }, { userText: '我卖雨伞生意很好' });
+  assert.equal(result1.profile.product, undefined, '"卖雨伞" followed by CJK "生" should be rejected');
+  assert.equal(result1.stats.rejected, 1);
+
+  // "卖跑鞋" in "我店主要是卖跑鞋的" - "跑鞋" followed by "的" (CJK particle) → accept
+  const result2 = applyAgentProfilePatch({}, {
+    product: { value: '跑鞋', evidence: '卖跑鞋' }
+  }, { userText: '我店主要是卖跑鞋的' });
+  assert.equal(result2.profile.product, '跑鞋', '"卖跑鞋" followed by particle "的" should be accepted');
+  assert.equal(result2.stats.accepted, 1);
+
+  // "德国" in "我们主攻德国市场" - followed by "市" (CJK) → should reject
+  const result3 = applyAgentProfilePatch({}, {
+    market: { value: '德国', evidence: '德国' }
+  }, { userText: '我们主攻德国市场' });
+  assert.equal(result3.profile.market, undefined, '"德国" followed by CJK "市" should be rejected');
+
+  // Basic substring match still works
+  const result4 = applyAgentProfilePatch({}, {
+    market: { value: '德国', evidence: '德国' }
+  }, { userText: '我们主攻德国。' });
+  assert.equal(result4.profile.market, '德国', '"德国" followed by punctuation should be accepted');
+});
+
 test('corrections replace facts only when the user explicitly corrects them', () => {
   const act = { memory: createEmptyMemory() };
   applyMemoryPatch(act, {

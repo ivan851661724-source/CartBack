@@ -204,7 +204,21 @@ function normalizeMemory(memory) {
 function evidenceIsGrounded(userText, evidence) {
   const source = String(userText || '').replace(/\s+/g, ' ').trim();
   const quote = String(evidence || '').replace(/\s+/g, ' ').trim();
-  return quote.length >= 2 && quote.length <= 160 && source.includes(quote);
+  // 长度校验 + 子串存在性 + 词边界约束（避免前缀截断：如"卖鞋"误匹配"卖鞋子"）
+  if (quote.length < 2 || quote.length > 160) return false;
+  const idx = source.indexOf(quote);
+  if (idx === -1) return false;
+  // 若引证内容结尾后紧跟 CJK 字符，需判断是否截断更长词：
+  // - 若下一字符是 "的" 等结构助词，引证内容通常是完整语义单元，放行
+  // - 若下一字符是其他 CJK（名词/动词），则可能是更长词的前缀，拒绝
+  const afterIdx = idx + quote.length;
+  if (afterIdx < source.length) {
+    const next = source[afterIdx];
+    if (/[㐀-鿿豈-﫿]/.test(next) && next !== '的') {
+      return false;
+    }
+  }
+  return true;
 }
 
 function applyMemoryPatch(act, patch, options = {}) {

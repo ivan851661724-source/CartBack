@@ -104,6 +104,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     toast: { msg: '', shown: false },
   });
 
+  // 多会话 #2 性能：act 索引 Map（O(1) 查找，避免 O(n) scans on every loadState）
+  const actIndexRef = useRef<Map<string, Act>>(new Map());
+  const buildActIndex = useCallback((acts: Act[]) => {
+    const m = new Map<string, Act>();
+    for (const a of acts) m.set(a.id, a);
+    actIndexRef.current = m;
+    return m;
+  }, []);
+
   // 局部 patch 辅助
   const patch = useCallback((p: Partial<AppState>) => setState(s => ({ ...s, ...p })), []);
   const toast_ = useCallback((msg: string) => {
@@ -116,13 +125,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const loadState = useCallback(async () => {
     const s = await api<any>('/api/state');
     const acts: Act[] = (s.acts || []) as Act[];
+    const actIndex = buildActIndex(acts);
     patch({
       status: s.status, kpis: s.kpis, trend: s.trend,
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
       acts,
-      // 多会话 #2：保持当前选中；不存在（被重置/首次）才取第一个
-      act: acts.find(a => a.id === state.act?.id) || acts[0] || state.act,
+      // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个
+      act: actIndex.get(state.act?.id) || acts[0] || state.act,
     });
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {
@@ -131,7 +141,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       return prev;
     });
-  }, [patch, state.act]);
+  }, [patch, state.act, buildActIndex]);
 
   const ensureAct = useCallback(async () => {
     if (!state.act) {
@@ -188,17 +198,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     patch({ activeTab: t, drawerAud: null });
   }, [patch]);
 
-  // —— 多会话 #2：切换会话（streaming 中阻止；重置卡片/输入等会话级状态，仿 jumpToConfig） ——
+  // —— 多会话 #2：切换会话（streaming 中阻止；O(1) Map 查找）——
   const switchAct = useCallback((id: string) => {
     if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
-    const next = state.acts.find(a => a.id === id);
+    const next = actIndexRef.current.get(id);
     if (!next || next.id === state.act?.id) { patch({ historyOpen: false }); return; }
     patch({
       act: next, historyOpen: false, activeTab: 'chat',
       planPushed: false, planShown: null,
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     });
-  }, [state.streaming, state.acts, state.act, patch, toast_]);
+  }, [state.streaming, state.act, patch, toast_]);
 
   // —— 多会话 #2：新建会话（新建 act 置顶并直接进入对话） ——
   const newConversation = useCallback(async () => {
