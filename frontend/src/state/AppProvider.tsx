@@ -210,11 +210,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
     };
 
+    let got = false;       // 是否已收到 token 帧（= 服务端已开始交付，本轮 LLM 已计费）
+    let last = '';         // 最近一帧累计文本（流中断时保留已到内容）
     try {
-      const result = await streamMessage(state.act.id, t, (full) => patch({ streamingText: full }));
+      const result = await streamMessage(state.act.id, t, (full) => { got = true; last = full; patch({ streamingText: full }); });
       finalize(result);
     } catch {
-      // 降级：一次性 /message
+      if (got) {
+        // 已收到部分内容：服务端已完成并落库，不再降级重发（避免二次计费 + 重复回复），保留已到文本
+        finalize({ reply: last });
+        toast_('网络中断，以上为已接收到的部分回复');
+        return;
+      }
+      // 降级：一次性 /message（未收到任何 token，本轮未交付，可安全重试）
       try {
         const r = await api<any>(`/api/act/${state.act.id}/message`, {
           method: 'POST', body: JSON.stringify({ message: t }),

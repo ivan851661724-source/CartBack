@@ -53,9 +53,9 @@ export async function streamMessage(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (authToken) headers['x-local-token'] = authToken;
 
-  // 60s 超时（与 app.js 一致），可与外部 signal 合并
+  // 120s 超时（IGDE 一轮可含多次 LLM 调用 + critic；调用方仅在未收到任何 token 时才降级重发）
   const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 60000);
+  const timer = setTimeout(() => ctrl.abort(), 120000);
   if (signal) signal.addEventListener('abort', () => ctrl.abort());
 
   try {

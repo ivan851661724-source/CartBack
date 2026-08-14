@@ -37,7 +37,7 @@ test('agent context configuration and metrics work through the HTTP API', async 
   const port = await freePort();
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(port), EY_SERVER_DIR: dir },
+    env: { ...process.env, PORT: String(port), EY_SERVER_DIR: dir, CARTBACK_OPEN_LOCAL: '1' },
     stdio: 'ignore'
   });
   t.after(async () => {

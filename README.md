@@ -86,6 +86,11 @@ docker compose up -d --build
 # 或直接在「设置」页填 AI 密钥
 ```
 
+> **鉴权（安全默认）**：Docker 部署默认要求注册/登录后使用——`/api/bootstrap` 不再向访客下发本地令牌。
+> 单机自用想免登录：`CARTBACK_OPEN_LOCAL=1 docker compose up -d`（本地令牌将对所有访客开放，仅限本机）。
+> HTTPS 反代后建议 `COOKIE_SECURE=1` 给会话 cookie 加 `Secure` 属性。
+> `init-key.sh` 会优先直读宿主机 `./server-data/config.json` 里的 `localToken`，安全模式下无需开放 bootstrap。
+
 数据 / 密钥落宿主机 `./server-data/`（即 backend 容器的 `/app/.server/`）。
 
 ## 本地开发（前后端分离）
@@ -127,6 +132,7 @@ npm run dev                                          # :3000，.env.local 指向
 1. **rewrites 构建期执行**：standalone 生产模式下 `rewrites()` 仅在 `next build` 时执行一次，`process.env.BACKEND_URL` 被烤进 `routes-manifest.json`。因此 `frontend/Dockerfile` 在 builder 阶段、`npm run build` 之前用 `ENV BACKEND_URL=http://backend:4180` 烤入（compose 内 `backend` 主机名稳定）。
 2. **SSE 穿透代理**：`/api/act/:id/message/stream` 经 Next 反代逐 token 流式；若代理缓冲导致不流式，前端自动降级到一次性 `/message`。
 3. **密钥隔离**：AI/ESP 密钥只在 `backend/.server/config.json`，绝不进前端、绝不进镜像层。
+4. **鉴权安全默认**：`/api/bootstrap` 默认不下发 `localToken`（防任意访客拿到令牌即管理员）；`x-local-token` 鉴权仅在 `CARTBACK_OPEN_LOCAL=1` 时启用。`start_local_dev.sh` 已默认注入该变量保持本地免登录体验；webhook/本地令牌比较均为常量时间（`timingSafeEqual`）。
 4. **后端逻辑零改动**：IGDE 引擎、护栏、FSM、鉴权、全部 `/api/*` 逻辑逐字节保留，仅剥离静态托管。
 
 ## 双容器运维

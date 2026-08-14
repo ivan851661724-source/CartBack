@@ -11,6 +11,11 @@ services:
     build: ./backend
     image: cartback-backend:${IMAGE_TAG:-local}
     restart: unless-stopped
+    # 默认安全模式：需注册/登录使用；单机自用想免登录时设 CARTBACK_OPEN_LOCAL=1（本地令牌将对访客开放）
+    # HTTPS 反代后设 COOKIE_SECURE=1，给会话 cookie 加 Secure 属性
+    environment:
+      - CARTBACK_OPEN_LOCAL=${CARTBACK_OPEN_LOCAL:-0}
+      - COOKIE_SECURE=${COOKIE_SECURE:-0}
     expose:
       - "4180"                 # 仅容器网络内可见，不发布到宿主机
     volumes:

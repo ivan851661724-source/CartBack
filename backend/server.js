@@ -183,19 +183,35 @@ async function callCritic(text) {
 }
 
 // —— ESP 适配器（Resend 真发 + 仿真回退） ——
+// 隐私：Batch API 每封独立 to，收件人互不可见（修复 To 群发泄露收件人列表）；
+// 送达率：≤100 封/请求分批（Resend batch 上限；单收件人走普通端点——batch 最少 2 封）。
+const RESEND_BATCH_SIZE = 100;
 async function fetchResend(draft, recipients, c) {
-  const resp = await fetch(c.espApiUrl, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.espKey },
-    body: JSON.stringify({
-      from: c.espFrom,
-      to: recipients.map(r => r.email),
-      subject: draft.subject,
-      text: draft.body
-    })
+  const base = String(c.espApiUrl || 'https://api.resend.com/emails').replace(/\/emails?\/?$/, '');
+  const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.espKey };
+  const message = r => ({
+    from: c.espFrom,
+    to: [r.email],                       // 每封独立收件人，无 To 群发
+    subject: draft.subject,
+    text: draft.body
   });
-  if (!resp.ok) throw new Error('ESP HTTP ' + resp.status);
-  return await resp.json();
+  const post = async (url, body) => {
+    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!resp.ok) throw new Error('ESP HTTP ' + resp.status);
+    return resp.json();
+  };
+  const ids = [];
+  if (recipients.length === 1) {
+    const r = await post(base + '/emails', message(recipients[0]));
+    if (r && r.id) ids.push(r.id);
+    return { id: ids.join(','), batches: 1 };
+  }
+  for (let i = 0; i < recipients.length; i += RESEND_BATCH_SIZE) {
+    const batch = recipients.slice(i, i + RESEND_BATCH_SIZE);
+    const r = await post(base + '/emails/batch', batch.map(message));   // 整批原子成败 → 失败由 sendDraft 整体重试
+    if (Array.isArray(r)) for (const m of r) if (m && m.id) ids.push(m.id);
+  }
+  return { id: ids.join(','), batches: ids.length };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -267,16 +283,33 @@ async function sendDraft(draft) {
   return { real: true, error: String(lastErr && lastErr.message || lastErr), recipients: recipients.length, cost: draft.cost || 0, estGmv: draft.estGmv };   // UI v4 整改 4
 }
 
-// —— CSV 导入解析 ——
+// —— CSV 导入解析（RFC 4180：支持 "引用字段" 内含逗号/换行/转义引号 ""） ——
+function splitCsvLine(line) {
+  const out = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQ) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') { cur += '"'; i++; }   // 转义引号 ""
+        else inQ = false;
+      } else cur += ch;
+    } else if (ch === '"') inQ = true;
+    else if (ch === ',') { out.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
 function parseCsv(text) {
   const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
   if (!lines.length) return [];
-  const header = lines[0].split(',').map(h => h.trim().toLowerCase());
+  const header = splitCsvLine(lines[0]).map(h => h.trim().toLowerCase());
   const hasHeader = header.includes('email');
   const start = hasHeader ? 1 : 0;
   const out = [];
   for (let i = start; i < lines.length; i++) {
-    const cols = lines[i].split(',');
+    const cols = splitCsvLine(lines[i]);
     const row = {};
     header.forEach((h, idx) => { row[h] = (cols[idx] || '').trim(); });
     if (!hasHeader) { row.name = (cols[0] || '').trim(); row.email = (cols[1] || '').trim(); }
@@ -337,9 +370,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    // —— bootstrap：下发本地令牌 + 配置状态 ——
+    // —— bootstrap：配置状态；token 仅本地开放模式（CARTBACK_OPEN_LOCAL=1）下发 ——
     if (pathname === '/api/bootstrap' && method === 'GET') {
-      return sendJson(res, 200, { token: config.localToken, status: cfg.status(config) });
+      return sendJson(res, 200, { token: authMod.OPEN_LOCAL ? config.localToken : null, status: cfg.status(config) });
     }
 
     // —— 用户认证（架构方案 v4 D7；会话 cookie 优先，x-local-token 兼容过渡）——
@@ -460,12 +493,14 @@ const server = http.createServer(async (req, res) => {
       const sent = store.getDraftsByUser(req.userId).filter(d => ['sent', 'recovering'].includes(d.status));
       const targeted = new Set(sent.map(d => (d.audience || '').toLowerCase()));
       const untargeted = high.filter(a => !targeted.has((a.intent || '').toLowerCase()));
-      const lastSeen = parseInt(store.getMeta('opp_last_seen') || '0', 10);
+      // 「新流失」计数按用户隔离（audience 为店铺级共享，但上次看过的基数是各用户自己的）
+      const oppKey = 'opp_last_seen:' + (req.userId || 'anon');
+      const lastSeen = parseInt(store.getMeta(oppKey) || '0', 10);
       const newCount = Math.max(0, aud.length - lastSeen);
       const opportunities = untargeted.slice(0, 5).map(a => ({
         id: a.id, name: a.name, intent: a.intent, estGmv: a.estGmv, urgencyDays: a.urgencyDays
       }));
-      store.setMeta('opp_last_seen', String(aud.length));
+      store.setMeta(oppKey, String(aud.length));
       const message = newCount > 0
         ? `又有 ${newCount} 个高意向快丢了，捞吗？`
         : (untargeted.length ? `还有 ${untargeted.length} 拨高意向人群没发过挽回，捞吗？` : '当前高意向人群都已覆盖，稳。');
@@ -694,7 +729,7 @@ const server = http.createServer(async (req, res) => {
     // —— 归因回执（webhook，真实模式 ESP 回调；支持 open/click + 优惠码核销订单 convert；整改 2：webhook secret 校验）——
     if (pathname === '/api/attribution' && method === 'POST') {
       const whSecret = req.headers['x-webhook-secret'];
-      if (!config.webhookSecret || whSecret !== config.webhookSecret) {
+      if (!config.webhookSecret || !authMod.secretEqual(whSecret, config.webhookSecret)) {
         return sendJson(res, 401, { error: 'bad webhook secret' });
       }
       const body = await readBody(req);

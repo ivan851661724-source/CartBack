@@ -6,9 +6,10 @@
  * - 会话：登录签发随机 token → 库中只存 SHA-256 哈希（库泄露不泄会话）
  * - 会话策略：云存档永久保存（用户 2026-08-11 拍板）——sessions 无过期字段，
  *   Cookie Max-Age 10 年；唯一失效途径 = 登出删行 / 退出所有设备
- * - Cookie：HttpOnly + SameSite=Lax（Secure 由 HTTPS 反代层保证，本地 http 可跑）
+ * - Cookie：HttpOnly + SameSite=Lax；HTTPS 反代后设 COOKIE_SECURE=1 追加 Secure（本地 http 保持可跑）
  * - 登录限流：同邮箱连续 5 次失败锁 15 分钟（防爆破）
- * - 过渡兼容：resolveUser 优先会话 cookie，其次 x-local-token（老前端零破坏）
+ * - 过渡兼容：resolveUser 优先会话 cookie，其次 x-local-token（仅 CARTBACK_OPEN_LOCAL=1 显式开启；
+ *   默认关闭——否则 /api/bootstrap 向任意访客下发 token = 无鉴权）
  */
 const crypto = require('crypto');
 
@@ -18,6 +19,10 @@ const SESSION_COOKIE = 'cb_session';
 const COOKIE_MAX_AGE = 10 * 365 * 24 * 3600; // 秒；云存档永久（浏览器上限兜底）
 const LOGIN_MAX_FAILS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
+
+// 本地开放模式：显式开启后 /api/bootstrap 下发 localToken、x-local-token 可鉴权。
+// 默认关闭（安全默认）——公开部署时下发 token 给任意访客等于无鉴权。
+const OPEN_LOCAL = process.env.CARTBACK_OPEN_LOCAL === '1';
 
 /* ---------------- 密码哈希 ---------------- */
 function hashPassword(password) {
@@ -41,6 +46,14 @@ function verifyPassword(password, stored) {
 function newToken() { return crypto.randomBytes(32).toString('hex'); }
 function hashToken(token) { return crypto.createHash('sha256').update(String(token)).digest('hex'); }
 
+/** 定长秘密的常量时间比较（避免时序旁路；与密码校验 timingSafeEqual 一致） */
+function secretEqual(a, b) {
+  const sa = Buffer.from(String(a || ''));
+  const sb = Buffer.from(String(b || ''));
+  if (sa.length !== sb.length) return false;
+  try { return crypto.timingSafeEqual(sa, sb); } catch (e) { return false; }
+}
+
 /* ---------------- Cookie ---------------- */
 function parseCookies(req) {
   const out = {};
@@ -52,12 +65,14 @@ function parseCookies(req) {
   return out;
 }
 
+const COOKIE_SECURE = process.env.COOKIE_SECURE === '1'; // HTTPS 反代后置 1（Secure 属性；本地 http 保持可跑）
+
 function setSessionCookie(res, token) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${COOKIE_MAX_AGE}${COOKIE_SECURE ? '; Secure' : ''}`);
 }
 
 function clearSessionCookie(res) {
-  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0${COOKIE_SECURE ? '; Secure' : ''}`);
 }
 
 /* ---------------- 登录限流（内存计数，重启清零可接受） ---------------- */
@@ -91,7 +106,7 @@ function resolveUser(req, store, config) {
     }
   }
   const local = req.headers['x-local-token'];
-  if (local && config.localToken && local === config.localToken) {
+  if (OPEN_LOCAL && local && config.localToken && secretEqual(local, config.localToken)) {
     const owner = ensureLocalOwner(store);
     return { userId: owner.id, authMode: 'local' };
   }
@@ -109,9 +124,9 @@ function ensureLocalOwner(store) {
 }
 
 module.exports = {
-  SESSION_COOKIE, COOKIE_MAX_AGE,
+  SESSION_COOKIE, COOKIE_MAX_AGE, OPEN_LOCAL,
   hashPassword, verifyPassword,
-  newToken, hashToken,
+  newToken, hashToken, secretEqual,
   parseCookies, setSessionCookie, clearSessionCookie,
   isLoginLocked, noteLoginFail, noteLoginOk,
   resolveUser, ensureLocalOwner

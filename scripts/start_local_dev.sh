@@ -85,9 +85,10 @@ echo
 (
   cd "$BACKEND_DIR"
   if [[ " ${NODE_OPTIONS:-} " == *" --experimental-sqlite "* ]]; then
-    exec env PORT="$BACKEND_PORT" node --watch --watch-preserve-output server.js
+    exec env PORT="$BACKEND_PORT" CARTBACK_OPEN_LOCAL="${CARTBACK_OPEN_LOCAL:-1}" node --watch --watch-preserve-output server.js
   else
-    exec env PORT="$BACKEND_PORT" NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-sqlite" \
+    exec env PORT="$BACKEND_PORT" CARTBACK_OPEN_LOCAL="${CARTBACK_OPEN_LOCAL:-1}" \
+      NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-sqlite" \
       node --watch --watch-preserve-output server.js
   fi
 ) &
