@@ -58,3 +58,4 @@ yarn-error.log*
 
 # ===== Docker 本地覆盖（保留 docker-compose.yml 作为源码）=====
 docker-compose.override.yml
+backend/eval/reports/

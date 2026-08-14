@@ -36,7 +36,7 @@ function agentContextOptions() {
 // aiEnabled 由消息处理端点按「是否配了 key」动态置位（见 /api/act/:id/message）。
 const igde = new IGDE({
   aiEnabled: false,
-  callAI: async (messages) => llmCoach(messages),
+  callAI: async (messages, opts) => llmCoach(messages, opts),
   callCritic: async (text) => callCritic(text),
   contextOptions: agentContextOptions(),
   maxLlmCallsPerTurn: config.aiMaxCallsPerTurn,
@@ -144,10 +144,13 @@ function makeLlmClient() {
 }
 
 // 真实模型教练：一次返回回复、needs patch 与来源待校验的 memory patch。
-async function llmCoach(messages) {
+// opts.onReplyToken 存在时走真流式（边生成边上屏），否则保持一次性结构化调用。
+async function llmCoach(messages, opts) {
   if (!config.aiKey) throw new Error('AI 未配置');
   const client = makeLlmClient();
-  const r = await client.chatStructured({ messages, maxTokens: config.aiMaxOutputTokens });
+  const r = (opts && opts.onReplyToken)
+    ? await client.streamChatStructured({ messages, maxTokens: config.aiMaxOutputTokens, onReplyToken: opts.onReplyToken })
+    : await client.chatStructured({ messages, maxTokens: config.aiMaxOutputTokens });
   return {
     reply: r.reply,
     needs: r.needs,
@@ -531,7 +534,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, r);
     }
 
-    // —— 对话消息（SSE 交付）：先完成结构化结果与护栏，再逐帧推送；失败由前端降级一次性 /message ——
+    // —— 对话消息（SSE 交付 · 真流式）：头先写，IGDE 处理过程中逐 token 推帧；
+    //    未流出 token（桩模式 / 边界拒绝 / 护栏重生成）时保留 3 字打字机兜底；
+    //    护栏替换了乐观流出的预览时发 replace 校正帧；done 帧的 result 永远是权威结果。
+    //    失败（error 帧）由前端降级一次性 /message —— handle 抛错时未落库，重发安全。
     const sm2 = pathname.match(/^\/api\/act\/([\w-]+)\/message\/stream$/);
     if (sm2 && method === 'POST') {
       const act = store.getAct(sm2[1]);
@@ -540,14 +546,29 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       igde.aiEnabled = !!config.aiKey;
       syncAgentConfig();
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'   // 告知反向代理（Next/nginx）不要缓冲 SSE
+      });
+      res.write(`data: ${JSON.stringify({ type: 'start' })}\n\n`); // 立即冲一个字节，防代理攒包
+      let closed = false;
+      res.on('close', () => { closed = true; });                    // 客户端断连后停止写帧
+      const send = (frame) => { if (!closed && !res.writableEnded) res.write(`data: ${JSON.stringify(frame)}\n\n`); };
+      let streamed = '';      // 已乐观流出的 reply 增量累计
+      const onReplyToken = (piece) => { streamed += piece; send({ type: 'token', value: piece }); };
       let result;
       try {
         result = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
-          agentProfile: store.getAgentProfile(req.userId)
+          agentProfile: store.getAgentProfile(req.userId),
+          onReplyToken
         });
       } catch (e) {
-        return sendJson(res, 500, { error: String(e && e.message || e) });
+        send({ type: 'error', error: String(e && e.message || e) });
+        res.end();
+        return;
       }
       store.upsertAct(act);
       persistAgentProfile(result, req.userId);
@@ -556,17 +577,22 @@ const server = http.createServer(async (req, res) => {
         result.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
         logEvent('guardrail', { hits: result.guardrailHits });
       }
-      res.writeHead(200, {
-        'Content-Type': 'text/event-stream; charset=utf-8',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
-      });
-      const reply = result.reply || '';
-      const step = 3; // 每帧推 3 字，营造打字机节奏
-      for (let i = 0; i < reply.length; i += step) {
-        res.write(`data: ${JSON.stringify({ type: 'token', value: reply.slice(i, i + step) })}\n\n`);
+      const finalReply = result.reply || '';
+      if (!streamed) {
+        // 未流出任何 token（桩 / 边界 / 护栏重生成 / 模型没按 JSON 输出）→ 3 字打字机兜底
+        for (let i = 0; i < finalReply.length; i += 3) {
+          send({ type: 'token', value: finalReply.slice(i, i + 3) });
+        }
+      } else if (finalReply !== streamed) {
+        // 流出过预览但与权威 reply 不一致：前缀关系 → 补齐尾部；否则护栏替换 → 整段校正
+        if (finalReply.startsWith(streamed)) {
+          const rest = finalReply.slice(streamed.length);
+          for (let i = 0; i < rest.length; i += 3) send({ type: 'token', value: rest.slice(i, i + 3) });
+        } else {
+          send({ type: 'replace', value: finalReply });
+        }
       }
-      res.write(`data: ${JSON.stringify({ type: 'done', result })}\n\n`);
+      send({ type: 'done', result });
       res.end();
       return;
     }

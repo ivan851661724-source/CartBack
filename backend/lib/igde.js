@@ -254,7 +254,8 @@ class IGDE {
     return p;
   }
 
-  /** 主入口：处理一条用户消息 */
+  /** 主入口：处理一条用户消息；opts.onReplyToken：真模型首轮 coach 的 reply 增量回调
+   *  （仅乐观预览，未经护栏；权威 reply 一律以返回值为准，由交付层做 replace 校正）。 */
   async handle(act, userText, opts = {}) {
     const guardrailHits = [];
     act.needs = act.needs || {};
@@ -317,7 +318,7 @@ class IGDE {
     let profilePatch = null;
     if (this.aiEnabled && this.callAI) {
       try {
-        const r = await this._aiCoach(act, userText, runtime); // 一次对话同时抽取 needs + 生成话术
+        const r = await this._aiCoach(act, userText, runtime, opts.onReplyToken); // 一次对话同时抽取 needs + 生成话术
         // 抽取合并：AI 抽取优先；AI 漏抽的字段用关键词启发式补缺（保证四要素迟早集齐，确认标签能弹出）
         extracted = { ...(r.needs || {}) };
         const kw = extractNeeds(userText);
@@ -579,7 +580,7 @@ class IGDE {
     runtime.usage = current;
   }
 
-  async _callAI(messages, runtime) {
+  async _callAI(messages, runtime, streamOpts) {
     if (runtime.llmCalls >= this.maxLlmCallsPerTurn) {
       const error = new Error('单轮 LLM 调用预算已用完');
       error.code = 'CALL_BUDGET';
@@ -587,7 +588,7 @@ class IGDE {
     }
     runtime.llmCalls++;
     runtime.providerRequests++;
-    const result = await this.callAI(messages);
+    const result = await this.callAI(messages, streamOpts);
     runtime.providerRequests += result && Number(result.requestCount) > 1
       ? Number(result.requestCount) - 1
       : 0;
@@ -595,8 +596,9 @@ class IGDE {
     return result;
   }
 
-  /** 真实模型：一次对话同时完成话术、needs patch 与来源可校验的 memory patch。 */
-  async _aiCoach(act, userText, runtime) {
+  /** 真实模型：一次对话同时完成话术、needs patch 与来源可校验的 memory patch。
+   *  onReplyToken 仅流给首轮 coach 调用（critic / 重生成不流，护栏前的预览以返回值为权威）。 */
+  async _aiCoach(act, userText, runtime, onReplyToken) {
     const promptNeeds = { ...act.needs };
     if (!promptNeeds.offer && runtime.agentProfile.default_offer) {
       promptNeeds.offer = runtime.agentProfile.default_offer;
@@ -615,7 +617,7 @@ class IGDE {
     act.summary_cursor = context.summaryCursor;
     act.context_version = 1;
 
-    const res = await this._callAI(context.messages, runtime);
+    const res = await this._callAI(context.messages, runtime, onReplyToken ? { onReplyToken } : undefined);
     let reply = '', needs = {}, memoryPatch = { facts: [], decisions: [], corrections: [] }, profilePatch = {};
     if (typeof res === 'string') {
       try {

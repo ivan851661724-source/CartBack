@@ -24,6 +24,7 @@ interface AppState {
   token: string | null;
   status: Status | null;
   act: Act | null;
+  acts: Act[];          // 多会话 #2：全量会话（/api/state 的 acts），act 为当前选中
   kpis: Kpis | null;
   trend: TrendPoint[] | null;
   metrics: Metrics;
@@ -45,6 +46,7 @@ interface AppState {
   editingDraft: Draft | null;
   drawerAud: Audience | null;
   importOpen: boolean;
+  historyOpen: boolean; // 多会话 #2：历史会话弹窗
   editOpen: boolean;
   authOpen: boolean;
   authMode: 'login' | 'register';
@@ -54,6 +56,8 @@ interface AppState {
 interface AppContextValue extends AppState {
   // 动作
   switchTab: (t: Tab) => void;
+  switchAct: (id: string) => void;        // 多会话 #2：切换会话（重置卡片/输入等会话级状态）
+  newConversation: () => Promise<void>;   // 多会话 #2：新建会话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
   saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string }) => Promise<void>;
@@ -72,6 +76,7 @@ interface AppContextValue extends AppState {
   setEditingDraft: (d: Draft | null) => void;
   setDrawerAud: (a: Audience | null) => void;
   setImportOpen: (v: boolean) => void;
+  setHistoryOpen: (v: boolean) => void;
   setEditOpen: (v: boolean) => void;
   setAuthOpen: (v: boolean) => void;
   setAuthMode: (m: 'login' | 'register') => void;
@@ -90,12 +95,12 @@ const toastTimer = { current: null as ReturnType<typeof setTimeout> | null };
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState>({
-    token: null, status: null, act: null, kpis: null, trend: null, metrics: {},
+    token: null, status: null, act: null, acts: [], kpis: null, trend: null, metrics: {},
     drafts: [], audience: [], opportunities: null,
     planPushed: false, planShown: null, lastSent: null, me: null,
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
-    importOpen: false, editOpen: false, authOpen: false, authMode: 'register',
+    importOpen: false, historyOpen: false, editOpen: false, authOpen: false, authMode: 'register',
     toast: { msg: '', shown: false },
   });
 
@@ -110,11 +115,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 数据加载 ——
   const loadState = useCallback(async () => {
     const s = await api<any>('/api/state');
+    const acts: Act[] = (s.acts || []) as Act[];
     patch({
       status: s.status, kpis: s.kpis, trend: s.trend,
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
-      act: (s.acts && s.acts[0]) ? s.acts[0] : state.act,
+      acts,
+      // 多会话 #2：保持当前选中；不存在（被重置/首次）才取第一个
+      act: acts.find(a => a.id === state.act?.id) || acts[0] || state.act,
     });
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {
@@ -128,9 +136,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const ensureAct = useCallback(async () => {
     if (!state.act) {
       const act = await createAct();
-      patch({ act });
+      patch({ act, acts: [act, ...state.acts] });
     }
-  }, [state.act, patch]);
+  }, [state.act, state.acts, patch]);
 
   const loadOpportunities = useCallback(async () => {
     try {
@@ -180,6 +188,33 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     patch({ activeTab: t, drawerAud: null });
   }, [patch]);
 
+  // —— 多会话 #2：切换会话（streaming 中阻止；重置卡片/输入等会话级状态，仿 jumpToConfig） ——
+  const switchAct = useCallback((id: string) => {
+    if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
+    const next = state.acts.find(a => a.id === id);
+    if (!next || next.id === state.act?.id) { patch({ historyOpen: false }); return; }
+    patch({
+      act: next, historyOpen: false, activeTab: 'chat',
+      planPushed: false, planShown: null,
+      chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
+    });
+  }, [state.streaming, state.acts, state.act, patch, toast_]);
+
+  // —— 多会话 #2：新建会话（新建 act 置顶并直接进入对话） ——
+  const newConversation = useCallback(async () => {
+    try {
+      const act = await createAct();
+      patch({
+        act, acts: [act, ...state.acts],
+        historyOpen: false, activeTab: 'chat',
+        planPushed: false, planShown: null,
+        chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
+      });
+    } catch (e: any) {
+      toast_('新建会话失败：' + (e?.message || e));
+    }
+  }, [state.acts, patch, toast_]);
+
   // —— 发消息（SSE 流式 + 一次性降级） ——
   const sendMsg = useCallback(async (text: string) => {
     const t = text.trim();
@@ -204,6 +239,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const pushConfirm = !!r.planCard && !prev.planPushed;
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
+          // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
+          acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
           planShown: pushConfirm ? 'confirm' : prev.planShown,
         };
@@ -258,7 +295,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 重置 ——
   const resetData = useCallback(async () => {
     await api('/api/reset', { method: 'POST' });
-    patch({ act: null, planPushed: false, planShown: null, lastSent: null });
+    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null });
     await loadState();
     await ensureAct();
     toast_('数据已重置');
@@ -304,11 +341,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const jumpToConfig = useCallback(async (intent: string, aud?: Audience) => {
     const act = await createAct({ audience: intentToAudience(intent) });
     patch({
-      act, planPushed: false, planShown: null, activeTab: 'chat',
+      act, acts: [act, ...state.acts], planPushed: false, planShown: null, activeTab: 'chat',
       chatInput: aud ? `帮我挽回 ${aud.intent || ''} 的人，弃购额约 ¥${+aud.abandoned_value || 0}` : '',
       chatPlaceholder: CHAT_PLACEHOLDER,
     });
-  }, [patch]);
+  }, [state.acts, patch]);
 
   // —— 方案卡「确认发送」→ 生成草稿 + 发送 + 进对话流 sent banner ——
   const confirmSendPlan = useCallback(async (card: PlanCard) => {
@@ -348,7 +385,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const value: AppContextValue = {
     ...state,
-    switchTab, sendMsg, setMode, saveConfig, resetData, doImport,
+    switchTab, switchAct, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
     authSubmit, authLogout, jumpToConfig, confirmSendPlan, sendEditedDraft,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
@@ -357,6 +394,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setEditingDraft: (d) => patch({ editingDraft: d }),
     setDrawerAud: (a) => patch({ drawerAud: a }),
     setImportOpen: (v) => patch({ importOpen: v }),
+    setHistoryOpen: (v) => patch({ historyOpen: v }),
     setEditOpen: (v) => patch({ editOpen: v }),
     setAuthOpen: (v) => patch({ authOpen: v }),
     setAuthMode: (m) => patch({ authMode: m }),

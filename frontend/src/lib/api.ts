@@ -86,6 +86,13 @@ export async function streamMessage(
         if (data.type === 'token') {
           full += data.value;
           onToken(full);
+        } else if (data.type === 'replace') {
+          // 服务端护栏/兜底替换了乐观流出的预览 → 全文重置为权威值
+          full = data.value;
+          onToken(full);
+        } else if (data.type === 'error') {
+          clearTimeout(timer);
+          throw new Error(data.error || 'stream error');
         } else if (data.type === 'done') {
           clearTimeout(timer);
           return data.result as StreamDone;

@@ -5,7 +5,8 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "eval:offline": "node eval/runner.js"
   },
   "engines": {
     "node": ">=22.5.0"

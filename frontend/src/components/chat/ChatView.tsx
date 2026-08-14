@@ -14,9 +14,9 @@ const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时�
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
   const {
-    act, opportunities, streaming, streamingText, planShown, lastSent,
+    act, acts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
-    setPlanShown, setPlanPushed, confirmSendPlan, switchTab,
+    setPlanShown, setPlanPushed, confirmSendPlan, switchTab, setHistoryOpen,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -53,6 +53,13 @@ export default function ChatView() {
               <span className="ch-t">挽回策略助手</span>
             </div>
             <span className="ch-s"><span className="dot" /><span>在线 · 已记录 {n}/4 项</span></span>
+            <button
+              className="btn ghost sm ch-hist"
+              onClick={() => setHistoryOpen(true)}
+              title="历史会话"
+            >
+              会话 {acts.length > 0 ? acts.length : ''}
+            </button>
           </div>
 
           <div className="chat-area" ref={areaRef} aria-live="polite" aria-label="对话消息区">

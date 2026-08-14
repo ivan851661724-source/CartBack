@@ -14,6 +14,7 @@ import AudienceDrawer from '@/components/audience/AudienceDrawer';
 import ImportModal from '@/components/audience/ImportModal';
 import EditModal from '@/components/mail/EditModal';
 import AuthModal from '@/components/auth/AuthModal';
+import HistoryModal from '@/components/chat/HistoryModal';
 
 function Shell() {
   const { activeTab } = useApp();
@@ -43,6 +44,7 @@ function Shell() {
       <ImportModal />
       <EditModal />
       <AuthModal />
+      <HistoryModal />
       <Toast />
     </>
   );

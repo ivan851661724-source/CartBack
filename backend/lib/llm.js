@@ -258,6 +258,54 @@ class LLMClient {
   }
 
   /**
+   * 流式结构化对话（真流式）：复用 streamChat 读 SSE 流，边收边把 JSON envelope 中
+   * "reply" 字符串的可见文本经 onReplyToken 增量抛出（打字机实时上屏）；流结束后与
+   * chatStructured 同款映射（_extractJson + 兜底 _cleanReply）。
+   * 流式不走 json_mode（逐 token 无法构成 JSON），故无「json_mode 空白重试」一步 ——
+   * 解析失败时原文即 reply（jsonOk=false），引擎照常走关键词兜底抽取，不中断。
+   * @param {object} o { messages, temperature, maxTokens, onReplyToken(textPiece) }
+   */
+  async streamChatStructured({ messages, temperature = 0.8, maxTokens = 512, onReplyToken } = {}) {
+    if (!this.apiKey) {
+      const e = new Error('AI 未配置：缺少 apiKey');
+      e.code = 'NO_KEY';
+      throw e;
+    }
+    const extractor = onReplyToken ? createReplyStreamExtractor(onReplyToken) : null;
+    let full = '';
+    const res = await this.streamChat({
+      messages, temperature, maxTokens,
+      onToken: (chunk) => { full += chunk; if (extractor) extractor.feed(chunk); },
+      onDone: (f) => { if (f) full = f; }
+    });
+    const parsed = this._extractJson(full);
+    if (!parsed) {
+      return {
+        reply: this._cleanReply(full) || '',
+        needs: {},
+        memoryPatch: { facts: [], decisions: [], corrections: [] },
+        profilePatch: {},
+        raw: { content: full },
+        usage: res.usage, jsonOk: false, requestCount: 1,
+        contextMeta: res.contextMeta || null
+      };
+    }
+    return {
+      reply: typeof parsed.reply === 'string' ? parsed.reply : (this._cleanReply(full) || ''),
+      needs: (parsed.needs && typeof parsed.needs === 'object') ? parsed.needs : {},
+      memoryPatch: (parsed.memory_patch && typeof parsed.memory_patch === 'object')
+        ? parsed.memory_patch
+        : { facts: [], decisions: [], corrections: [] },
+      profilePatch: (parsed.profile_patch && typeof parsed.profile_patch === 'object')
+        ? parsed.profile_patch
+        : {},
+      raw: { content: full },
+      usage: res.usage, jsonOk: true, requestCount: 1,
+      contextMeta: res.contextMeta || null
+    };
+  }
+
+  /**
    * 流式对话（打字机效果，消除「等一圈再啪一块字」的机械感）。
    * @param {object} o { messages, temperature, maxTokens, onToken(contentChunk), onDone(fullText, usage) }
    * 说明：流式不使用 json_mode（逐 token 无法构成完整 JSON），由上层在 onDone 后做结构化解析。
@@ -450,10 +498,97 @@ class LLMClient {
  *   });
  */
 
+/**
+ * 增量提取流式 JSON envelope 中 "reply" 字符串的可见文本（真流式核心）。
+ * COACH_SYSTEM_PROMPT 要求 reply 在前，因此模型一开聊就能边收边上屏：
+ * 逐 chunk feed()，把已反转义的正文片段经 onReplyToken 推给上层，无需等整个 JSON 收完。
+ *
+ * 容错：
+ *  - 正文/代码块里出现 "reply" 字样但后面不是字符串 → 回到扫描态继续找真键；
+ *  - JSON 转义（\n \" \\ \/ \uXXXX）按语义反转义，\u 跨 chunk 拆分安全（代理对分半
+ *    各自成 lone surrogate，JS 字符串拼接时自然复合）；
+ *  - 输出根本不含 "reply" 字符串（模型跑飞）→ 一个 token 都不流，上层走全量解析兜底。
+ *
+ * @param {(textPiece: string) => void} onReplyToken 已反转义的正文增量回调
+ */
+function createReplyStreamExtractor(onReplyToken) {
+  if (typeof onReplyToken !== 'function') throw new Error('createReplyStreamExtractor 需要 onReplyToken 函数');
+  const PHASE_SEEK_KEY = 0;   // 找 "reply" 键
+  const PHASE_COLON = 1;      // 键后找冒号
+  const PHASE_OPEN = 2;       // 冒号后找开引号
+  const PHASE_BODY = 3;       // 字符串体内，边扫边反转义
+  const PHASE_END = 4;        // 闭引号已见，reply 完整
+  const UNESC = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '"': '"', '\\': '\\', '/': '/' };
+  let phase = PHASE_SEEK_KEY;
+  let buf = '';
+  let esc = false;   // 已见反斜杠，等待转义字符
+  let hex = null;    // \uXXXX 的 hex 累计（null = 不在 \u 转义中）
+  return {
+    /** reply 是否已完整流出（之后可不再 feed） */
+    get done() { return phase === PHASE_END; },
+    feed(chunk) {
+      if (phase === PHASE_END || !chunk) return;
+      buf += chunk;
+      let out = '';
+      let i = 0;
+      while (i < buf.length) {
+        const c = buf[i];
+        if (phase === PHASE_SEEK_KEY) {
+          const idx = buf.indexOf('"reply"', i);
+          if (idx === -1) {
+            // 保留末尾 7 字符（"reply" 可能被 chunk 边界切断），其余可丢弃
+            i = Math.max(i, buf.length - 7);
+            break;
+          }
+          i = idx + 7;
+          phase = PHASE_COLON;
+          continue;
+        }
+        if (phase === PHASE_COLON) {
+          if (c === ' ' || c === '\n' || c === '\t' || c === '\r') { i++; continue; }
+          if (c === ':') { i++; phase = PHASE_OPEN; continue; }
+          // "reply" 只是正文里被引用的字样，不是键 → 从当前位置继续找下一个
+          phase = PHASE_SEEK_KEY;
+          continue;
+        }
+        if (phase === PHASE_OPEN) {
+          if (c === ' ' || c === '\n' || c === '\t' || c === '\r') { i++; continue; }
+          if (c === '"') { i++; phase = PHASE_BODY; continue; }
+          // reply 不是字符串（异常输出）→ 放弃流式，交给上层全量解析
+          phase = PHASE_SEEK_KEY;
+          continue;
+        }
+        // PHASE_BODY：字符串体内，按 JSON 转义语义反转义后增量抛出
+        if (esc) {
+          if (hex !== null) {
+            hex += c; i++;
+            if (hex.length >= 4) {
+              const code = parseInt(hex, 16);
+              out += Number.isNaN(code) ? '' : String.fromCharCode(code);
+              hex = null; esc = false;
+            }
+            continue;
+          }
+          if (c === 'u') { hex = ''; i++; continue; }
+          out += Object.prototype.hasOwnProperty.call(UNESC, c) ? UNESC[c] : c;
+          esc = false; i++;
+          continue;
+        }
+        if (c === '\\') { esc = true; i++; continue; }
+        if (c === '"') { phase = PHASE_END; i++; break; }
+        out += c; i++;
+      }
+      buf = buf.slice(i);
+      if (out) onReplyToken(out);
+    }
+  };
+}
+
 module.exports = {
   LLMClient,
   buildCoachContext,
   buildCoachMessages,
   COACH_SYSTEM_PROMPT,
-  MAX_HISTORY_MESSAGES
+  MAX_HISTORY_MESSAGES,
+  createReplyStreamExtractor
 };

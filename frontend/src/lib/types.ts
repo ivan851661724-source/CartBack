@@ -62,6 +62,8 @@ export interface Act {
   needs: Needs;
   messages: Message[];
   planCard?: PlanCard | null;
+  created_at?: number;
+  updated_at?: number;
 }
 
 /** 邮件草稿 / 已发送（生命周期状态机） */
