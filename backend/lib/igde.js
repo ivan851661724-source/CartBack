@@ -515,7 +515,7 @@ class IGDE {
       if (deny) return '好，哪点要改？告诉我，其它对的我留着。';
       if (this.missingFields(act).length === 0) {
         const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
-        if (confirm) return '好，我按这个帮你把邮件配置生成好了，右边确认标签你可以看一眼再发。';
+        if (confirm) return '好，我按这个帮你把邮件配置生成好了，下面确认标签你可以看一眼再发。';
         return this._replyFresh(act, this._readyLine(), FALLBACK_POOL);
       }
       return this._probe(act, this.missingFields(act)[0]);
@@ -529,11 +529,11 @@ class IGDE {
       if (wantAdjust) {
         cand = '好，回到前面。你想先调哪一项？受众、痛点、目标还是钩子？';
       } else if (wantSend) {
-        cand = '好，点右边「确认发送」就行；发完我会帮你盯送达和回流数据。';
+        cand = '好，点下面「确认发送」就行；发完我会帮你盯送达和回流数据。';
       } else if (/生成|方案|配置|看卡|卡片|确认|行不|可以吗/.test(t)) {
-        cand = '配置一直都在右边确认标签里，随时能看。确认好了就点「确认发送」。';
+        cand = '配置一直都在下面确认标签里，随时能看。确认好了就点「确认发送」。';
       } else {
-        cand = '方案已经帮你整理好了，右边确认标签里能看到，点「确认发送」就发。还想针对别的人群再聊一轮也可以。';
+        cand = '方案已经帮你整理好了，下面确认标签里能看到，点「确认发送」就发。还想针对别的人群再聊一轮也可以。';
       }
       // 防复读：若与上一句助手回复完全相同则换一种说法
       const last = act.messages[act.messages.length - 1];
@@ -547,7 +547,7 @@ class IGDE {
 
   /** 主要信息收集完时的自然收口话术（不在对话里列字段 — 字段只在确认标签里出现） */
   _readyLine() {
-    return '我大概摸清了，帮你整理成一封邮件营销配置，右边弹出确认标签啦，你瞅瞅这样行不？';
+    return '我大概摸清了，帮你整理成一封邮件营销配置，下面弹出确认标签啦，你瞅瞅这样行不？';
   }
 
   _criticRequired(text) {

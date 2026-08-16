@@ -23,7 +23,7 @@ const SCHEMA = {
     discount: 'TEXT', coupon: 'TEXT', posters: 'JSON', status: 'TEXT',
     estGmv: 'REAL', matchedCount: 'INTEGER', sendTiming: 'TEXT',
     created_at: 'INTEGER', sent_at: 'INTEGER', esp_message_id: 'TEXT', cost: 'REAL',
-    user_id: 'TEXT'   // 归属用户（整改 1b）
+    user_id: 'TEXT', locale: 'TEXT', html: 'TEXT', image_path: 'TEXT'
   },
   audience: {
     id: 'TEXT', name: 'TEXT', email: 'TEXT', intent: 'TEXT', risk: 'TEXT',

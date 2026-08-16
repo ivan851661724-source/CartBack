@@ -8,7 +8,7 @@ const NAVS: { key: Tab; label: string; Icon: () => ReactNode }[] = [
   { key: 'chat', label: '助手', Icon: NavChat },
   { key: 'mail', label: '邮件配置', Icon: NavMail },
   { key: 'data', label: '数据看板', Icon: NavData },
-  { key: 'aud', label: '受众', Icon: NavAud },
+  { key: 'aud', label: '用户', Icon: NavAud },
   { key: 'set', label: '设置', Icon: NavSet },
 ];
 

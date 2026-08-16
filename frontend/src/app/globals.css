@@ -2,6 +2,9 @@
 @tailwind components;
 @tailwind utilities;
 
+@import url('https://cdn.jsdelivr.net/npm/alibaba-puhuiti-2.0@1.0.0/AlibabaPuHuiTi-2-55-Regular.css');
+@import url('https://cdn.jsdelivr.net/npm/alibaba-puhuiti-2.0@1.0.0/AlibabaPuHuiTi-2-85-Bold.css');
+
 /* ============================================================================
  * CartBack v4 · Elegance 高级质感版（落地实现版）—— Next.js / Tailwind 移植
  * 设计源：docs/design/CartBack_UI_v4_Elegance.html
@@ -47,16 +50,15 @@
   --beige:#D6CFC6; --beige2:#B0A99F;
 
   /* —— 字体（系统栈兜底，不引外部 CDN） —— */
-  --font-disp:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,sans-serif;
-  --font-ui:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
-
-  --topbar-h:52px; --sidebar-w:172px;
-  /* —— v4：精致分层阴影 —— */
-  --shadow-card:0 1px 2px rgba(16,24,40,.04), 0 4px 12px rgba(16,24,40,.05), 0 12px 40px rgba(16,24,40,.04);
-  --shadow-card-hover:0 2px 4px rgba(16,24,40,.05), 0 10px 24px rgba(16,24,40,.08), 0 24px 64px rgba(16,24,40,.07);
-  --shadow-topbar:0 1px 0 rgba(255,255,255,.8) inset, 0 1px 8px rgba(16,24,40,.05);
+  --font-disp: "Outfit", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, sans-serif;
+  --font-ui: "Outfit", "Inter", "PingFang SC", "Microsoft YaHei", "Hiragino Sans GB", system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  --topbar-h:52px; --sidebar-w:180px;
+  /* —— v4：精致分层阴影（对齐 Figma 设计稿） —— */
+  --shadow-card:0px 2px 24px rgba(0,0,0,.06),0px 1px 4px rgba(0,0,0,.04);
+  --shadow-card-hover:0px 2px 24px rgba(0,0,0,.08),0px 1px 4px rgba(0,0,0,.06);
+  --shadow-topbar:0px 2px 16px rgba(0,0,0,.06);
   --shadow-btn:0 1px 4px rgba(255,143,88,.28);
-  --shadow-btn-hover:0 4px 14px rgba(255,127,77,.38), 0 1px 3px rgba(255,127,77,.2);
+  --shadow-btn-hover:0 4px 14px rgba(255,127,77,.38),0 1px 3px rgba(255,127,77,.2);
   --ease:cubic-bezier(.22,.68,0,1);
 }
 *{box-sizing:border-box;margin:0;padding:0}
@@ -82,12 +84,11 @@ input,textarea{font-family:inherit}
 
 /* ============================ 顶栏 ============================ */
 .topbar{height:var(--topbar-h);display:flex;align-items:center;gap:14px;padding:0 18px;
-  background:rgba(255,255,255,.82);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);
-  box-shadow:var(--shadow-topbar);border-bottom:.5px solid rgba(221,226,232,.9);position:relative;z-index:40}
-.logo{display:flex;align-items:center;gap:9px;user-select:none}
+  background:var(--card);box-shadow:var(--shadow-topbar);border-bottom:.5px solid var(--line-2);position:relative;z-index:40}
+.logo{display:flex;align-items:center;gap:9px;user-select:none;width:calc(var(--sidebar-w) - 18px);flex-shrink:0}
 .logo .mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--brand),var(--brand2));
   display:flex;align-items:center;justify-content:center;padding:5px;box-sizing:border-box;object-fit:contain}
-.logo-name{font-family:var(--font-disp);font-size:17px;font-weight:800;letter-spacing:.2px;color:var(--text)}
+.logo-name{font-family:var(--font-disp);font-size:16px;font-weight:900;letter-spacing:.2px;color:var(--text)}
 .logo-name b{color:var(--brand)}
 .spacer{flex:1}
 .crumb{color:var(--muted);font-size:12px;flex-shrink:0}
@@ -96,7 +97,7 @@ input,textarea{font-family:inherit}
 .mode-pill.real{background:var(--ok-bg);color:var(--ok2);border-color:var(--ok-line)}
 /* 顶部进度提示条 */
 .hint-pill{display:flex;align-items:center;gap:9px;background:var(--card);border-radius:9px;
-  outline:2.5px solid rgba(255,127,77,.45);outline-offset:-2.5px;padding:4px 6px 4px 11px;max-width:480px;flex:1;min-width:0}
+  outline:2.5px solid rgba(255,127,77,.45);outline-offset:-2.5px;padding:4px 6px 4px 11px;max-width:640px;flex:1;min-width:0}
 .hint-pill .hp-n{font-family:var(--font-disp);font-size:12px;font-weight:700;color:var(--brand);white-space:nowrap}
 .hint-pill .hp-n small{color:var(--text);font-weight:700}
 .hint-pill .hp-t{flex:1;font-size:11.5px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -111,6 +112,7 @@ input,textarea{font-family:inherit}
 .hp-btn:hover{transform:translateY(-1px);box-shadow:0 3px 8px rgba(255,127,77,.35),inset 0 1px 0 rgba(255,255,255,.3)}
 .hp-skip{border-radius:7px;outline:.5px solid var(--line);outline-offset:-.5px;color:var(--muted);padding:5px 10px;font-size:11px;font-weight:600;font-family:var(--font-disp)}
 .hp-skip:hover{color:var(--brand);outline-color:var(--brand)}
+.hp-btn{border:0;cursor:pointer;background:var(--brand);color:#fff;border-radius:6px;padding:3px 9px;font-size:11px;font-weight:600;font-family:var(--font-disp)}
 .tbtn{background:transparent;border:.5px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 11px;font-size:12px;transition:.15s;flex-shrink:0}
 .tbtn:hover{border-color:var(--brand);color:var(--brand)}
 .t-avatar{width:31px;height:31px;border-radius:50%;background:linear-gradient(135deg,var(--indigo),var(--indigo2));
@@ -124,12 +126,13 @@ input,textarea{font-family:inherit}
 .sidebar{width:var(--sidebar-w);background:var(--card);border-right:.5px solid var(--line-2);padding:12px 9px;
   display:flex;flex-direction:column;gap:3px;z-index:30}
 .nav{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;color:var(--muted);
-  font-size:13.5px;font-weight:500;transition:.15s;cursor:pointer;user-select:none;border:.5px solid transparent;text-align:left;width:100%}
+  font-size:13.5px;font-weight:500;transition:.15s;cursor:pointer;user-select:none;border:.5px solid transparent;text-align:left;width:100%;white-space:nowrap}
 .nav:hover{background:var(--bg-hover);color:var(--text)}
 .nav.active{background:var(--brand);color:#fff;font-weight:600;box-shadow:var(--shadow-btn)}
 .nav.active .nav-ic{color:#fff}
 .nav-ic{width:17px;height:17px;flex-shrink:0;color:var(--muted)}
 .nav-ic svg{width:100%;height:100%;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.nav.active .nav-ic svg{stroke:#fff}
 .nav .badge{margin-left:auto;min-width:19px;height:19px;padding:0 6px;border-radius:999px;background:var(--brand);color:#fff;
   font-size:10px;font-weight:700;display:none;align-items:center;justify-content:center}
 .nav .badge.show{display:flex}
@@ -180,8 +183,8 @@ input,textarea{font-family:inherit}
 .tag-gray{background:var(--bg-hover);color:var(--muted);border:.5px solid rgba(221,226,232,.6)}
 .tag-brand{background:rgba(255,127,77,.1);border:.5px solid rgba(255,127,77,.35);color:var(--brand)}
 /* v4 卡片材质 */
-.glass-card{position:relative;background:linear-gradient(180deg,#FFFFFF 0%,#FDFDFE 100%);
-  border:.5px solid rgba(30,41,59,.06);border-radius:16px;box-shadow:var(--shadow-card);
+.glass-card{position:relative;background:var(--card);
+  border:.5px solid var(--line-2);border-radius:16px;box-shadow:var(--shadow-card);
   transition:box-shadow .28s var(--ease),transform .28s var(--ease),border-color .28s}
 .glass-card::before{content:"";position:absolute;inset:0;border-radius:16px;pointer-events:none;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.92)}
@@ -203,13 +206,13 @@ input,textarea{font-family:inherit}
   grid-template-columns:minmax(0,1fr) 304px;gap:16px;align-items:stretch}
 .chat-workspace:not(:has(.opportunity-rail)){grid-template-columns:minmax(0,1fr)}
 .chat-shell{display:flex;flex-direction:column;height:100%;min-height:0;min-width:0}
-.chat-wrap{background:var(--card);border:1px solid var(--line-2);border-radius:14px;
-  box-shadow:0 1px 2px rgba(16,24,40,.03),0 10px 32px rgba(16,24,40,.055);
+.chat-wrap{background:var(--card);border:.5px solid var(--line-2);border-radius:16px;
+  box-shadow:var(--shadow-card);
   display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
 .chat-head{display:flex;align-items:center;gap:11px;padding:14px 18px;border-bottom:1px solid var(--line-2);background:var(--card)}
 .chat-head .ch-av{width:34px;height:34px;border-radius:10px;background:var(--brand);
   display:flex;align-items:center;justify-content:center;box-shadow:var(--shadow-btn);flex-shrink:0;color:#fff}
-.chat-head .ch-av svg{width:16px;height:16px}
+.chat-head .ch-av svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .chat-head .ch-copy{display:flex;flex-direction:column;gap:1px;min-width:0}
 .chat-head .ch-kicker{font-size:9.5px;line-height:1.2;color:var(--soft);font-weight:700;letter-spacing:.09em;text-transform:uppercase}
 .chat-head .ch-t{font-size:14.5px;line-height:1.35;font-weight:700;font-family:var(--font-disp);color:var(--text)}
@@ -223,7 +226,7 @@ input,textarea{font-family:inherit}
   font-size:13px;font-weight:700;font-family:var(--font-disp);position:relative}
 .avatar::after{content:"";position:absolute;inset:0;border-radius:inherit;box-shadow:inset 0 0 0 .5px rgba(16,24,40,.08);pointer-events:none}
 .avatar.agent{background:var(--brand);color:#fff}
-.avatar.agent svg{width:16px;height:16px}
+.avatar.agent svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .avatar.user{background:var(--text);color:#fff}
 .bubble{padding:10px 14px;border-radius:10px;font-size:14px;line-height:1.75;white-space:pre-wrap;word-break:break-word;text-wrap:pretty}
 .msg.agent .bubble{background:var(--card);border:1px solid var(--line-2);border-top-left-radius:3px;color:var(--text);
@@ -237,7 +240,7 @@ input,textarea{font-family:inherit}
 @keyframes blink{0%,80%,100%{opacity:.25;transform:translateY(0)}40%{opacity:1;transform:translateY(-3px)}}
 
 /* —— 确认标签（需求收集卡） —— */
-.confirm{max-width:96%;background:var(--card);border:.5px solid var(--line-2);border-radius:14px;
+.confirm{max-width:96%;background:var(--card);border:.5px solid var(--line-2);border-radius:16px;
   box-shadow:var(--shadow-card);overflow:hidden;animation:confirmIn .5s var(--ease)}
 @keyframes confirmIn{from{opacity:0;transform:translateY(8px) scale(.985)}to{opacity:1;transform:none}}
 .confirm .c-head{display:flex;align-items:center;gap:9px;padding:13px 16px;border-bottom:.5px solid var(--line-2);background:var(--bg-sec)}
@@ -262,7 +265,7 @@ input,textarea{font-family:inherit}
 .confirm .c-actions .btn{padding:8px 16px;font-size:12.5px}
 
 /* —— 方案卡 —— */
-.plan{max-width:96%;background:var(--card);border:.5px solid var(--line-2);border-radius:14px;box-shadow:var(--shadow-card);overflow:hidden;animation:confirmIn .45s var(--ease)}
+.plan{max-width:96%;background:var(--card);border:.5px solid var(--line-2);border-radius:16px;box-shadow:var(--shadow-card);overflow:hidden;animation:confirmIn .45s var(--ease)}
 .plan .p-top{display:flex;align-items:center;gap:10px;padding:13px 16px;border-bottom:.5px solid var(--line-2);background:linear-gradient(135deg,rgba(255,127,77,.08),rgba(255,179,71,.05))}
 .plan .p-top .pt-ic{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--brand),var(--brand2));display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:var(--shadow-btn)}
 .plan .p-top .pt-ic svg{width:13px;height:13px;stroke:#fff;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
@@ -513,6 +516,35 @@ input,textarea{font-family:inherit}
   pointer-events:none;transition:.3s var(--ease);z-index:80;display:flex;align-items:center;gap:9px;max-width:80vw}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast .td{width:7px;height:7px;border-radius:50%;background:var(--brand);flex-shrink:0}
+
+/* ============================ 邮件配置面板（嵌入数据看板） ============================ */
+.email-config-panel{margin-top:18px}
+.ec-wrap{display:grid;grid-template-columns:256px 1fr;gap:14px;align-items:start}
+.ec-left{padding:18px 20px;display:flex;flex-direction:column;gap:0}
+.ec-left .card-title{margin-bottom:12px}
+.ec-list{display:flex;flex-direction:column}
+.ec-row{display:flex;justify-content:space-between;align-items:flex-start;padding:7px 0;gap:10px;border-bottom:.5px dashed var(--line);font-size:12px}
+.ec-row:last-child{border-bottom:0}
+.ec-k{color:var(--muted);flex-shrink:0;width:66px}
+.ec-v{color:var(--text);text-align:right;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:130px}
+.ec-footnote{font-size:11px;color:var(--soft);padding-top:8px;margin-top:auto}
+.ec-right{padding:18px 20px;display:flex;flex-direction:column;gap:14px}
+.ec-field{display:flex;flex-direction:column;gap:0}
+.ec-field label{font-size:12px;color:var(--muted);padding-bottom:6px}
+.ec-field-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.ec-half{min-width:0}
+.ec-input{background:var(--bg-input);border:.5px solid #EDEFF3;border-radius:10px;padding:9px 13px;font-size:13px;color:var(--text);display:flex;align-items:center}
+.ec-input-row{background:var(--bg-input);border:.5px solid #EDEFF3;border-radius:10px;padding:9px 13px;display:flex;align-items:center;justify-content:space-between}
+.ec-value{font-size:13px;color:var(--text)}
+.ec-matched{font-size:11px;color:var(--soft)}
+.ec-textarea{background:var(--bg-input);border:.5px solid #EDEFF3;border-radius:10px;padding:9px 13px;font-size:13px;color:var(--text);min-height:110px;white-space:pre-wrap;line-height:1.65}
+.ec-code{background:var(--bg-input);border:.5px solid #EDEFF3;border-radius:10px;padding:9px 13px;font-family:\"Cousine\",\"SF Mono\",Consolas,monospace;font-size:13px;font-weight:700;letter-spacing:.65px;color:var(--brand)}
+.ec-posters{display:flex;gap:10px}
+.ec-poster{flex:1;background:var(--bg-input);border:.5px solid var(--line);border-radius:10px;padding:9px 13px;font-size:12px;font-weight:500;color:var(--text);text-align:center;cursor:pointer;transition:.15s;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+.ec-poster:hover{border-color:var(--brand)}
+.ec-poster.sel{background:var(--brand);border-color:var(--brand);color:#fff;box-shadow:0 1px 4px rgba(0,0,0,.1)}
+.ec-actions{display:flex;gap:9px;padding-top:5px}
+.ec-actions .btn{min-height:37px;padding:8px 15px;font-size:13px}
 
 @media (max-width:1150px){
   .kpi-grid{grid-template-columns:repeat(3,minmax(0,1fr))}

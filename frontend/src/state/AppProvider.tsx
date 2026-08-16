@@ -51,12 +51,16 @@ interface AppState {
   authOpen: boolean;
   authMode: 'login' | 'register';
   toast: ToastState;
+  // 初始引导
+  onboardingStep: number; // 0=未开始, 1-4=当前步骤, 4=完成
+  onboardingSkipped: boolean;
 }
 
 interface AppContextValue extends AppState {
   // 动作
   switchTab: (t: Tab) => void;
-  switchAct: (id: string) => void;        // 多会话 #2：切换会话（重置卡片/输入等会话级状态）
+  switchAct: (id: string) => void;
+  loadState: () => Promise<void>;        // 多会话 #2：切换会话（重置卡片/输入等会话级状态）
   newConversation: () => Promise<void>;   // 多会话 #2：新建会话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
@@ -75,6 +79,8 @@ interface AppContextValue extends AppState {
   setPlanPushed: (v: boolean) => void;
   setEditingDraft: (d: Draft | null) => void;
   setDrawerAud: (a: Audience | null) => void;
+  setOnboardingStep: (s: number) => void;
+  skipOnboarding: () => void;
   setImportOpen: (v: boolean) => void;
   setHistoryOpen: (v: boolean) => void;
   setEditOpen: (v: boolean) => void;
@@ -102,6 +108,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
     importOpen: false, historyOpen: false, editOpen: false, authOpen: false, authMode: 'register',
     toast: { msg: '', shown: false },
+    onboardingStep: 0, onboardingSkipped: false,
   });
 
   // 多会话 #2 性能：act 索引 Map（O(1) 查找，避免 O(n) scans on every loadState）
@@ -395,7 +402,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const value: AppContextValue = {
     ...state,
-    switchTab, switchAct, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
+    switchTab, switchAct, loadState, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
     authSubmit, authLogout, jumpToConfig, confirmSendPlan, sendEditedDraft,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
@@ -403,6 +410,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setPlanPushed: (v) => patch({ planPushed: v }),
     setEditingDraft: (d) => patch({ editingDraft: d }),
     setDrawerAud: (a) => patch({ drawerAud: a }),
+    setOnboardingStep: (s) => patch({ onboardingStep: s }),
+    skipOnboarding: () => patch({ onboardingStep: 4, onboardingSkipped: true }),
     setImportOpen: (v) => patch({ importOpen: v }),
     setHistoryOpen: (v) => patch({ historyOpen: v }),
     setEditOpen: (v) => patch({ editOpen: v }),

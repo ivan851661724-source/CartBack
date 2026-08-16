@@ -8,8 +8,9 @@ import KpiGrid from './KpiGrid';
 import Funnel from './Funnel';
 import TrendChart from './TrendChart';
 import MetricsStrip from './MetricsStrip';
+import EmailConfigPanel from './EmailConfigPanel';
 
-/** 数据看板视图 —— 对应 flow.html #view-data + app.js renderData 全段。 */
+/** 数据看板视图 */
 export default function DataView() {
   const { status, kpis, trend, metrics, demoAnchorRoi } = useApp();
   const real = !!status && status.mode === 'real';
@@ -42,6 +43,7 @@ export default function DataView() {
         </div>
       </div>
       <MetricsStrip k={k} m={metrics} demoAnchorRoi={demoAnchorRoi} />
+      <EmailConfigPanel />
     </div>
   );
 }

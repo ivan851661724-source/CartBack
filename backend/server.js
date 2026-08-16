@@ -108,6 +108,71 @@ function logEvent(type, data) {
   console.log(JSON.stringify({ t: 'ey', ts: Date.now(), type, ...data }));
 }
 
+// —— 异步生成 HTML 邮件 + 营销图片（调用 Python mailgen.py） ——
+async function generateMailHtml(draft, card) {
+  const { spawn } = require('child_process');
+  const path = require('path');
+  const script = path.join(__dirname, 'scripts', 'mailgen.py');
+
+  const input = JSON.stringify({
+    subject: card.subject || '',
+    body: card.body || '',
+    discount: parseFloat(card.discount) || 8,
+    brand: 'CartBack',
+    audience: card.audience || '',
+    cart_url: 'https://cartback.demo',
+    cta: 'Shop Now',
+  });
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn('python3', [script], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    const timer = setTimeout(() => {
+      proc.kill();
+      reject(new Error('mailgen timeout after 120s'));
+    }, 120000);
+
+    let stdout = '', stderr = '';
+    proc.stdout.on('data', d => stdout += d);
+    proc.stderr.on('data', d => stderr += d);
+
+    proc.on('error', (err) => {
+      clearTimeout(timer);
+      console.error('[mailgen] spawn error:', err.message);
+      reject(err);
+    });
+
+    proc.on('close', (code) => {
+      clearTimeout(timer);
+      if (code !== 0) {
+        return reject(new Error('mailgen failed: ' + stderr.slice(0, 100)));
+      }
+      try {
+        // 提取 stdout 中最后一个 JSON 对象（跳过 print 日志）
+        const lines = stdout.trim().split('\n');
+        const jsonLine = [...lines].reverse().find(l => l.trim().startsWith('{'));
+        if (!jsonLine) throw new Error('no JSON found in stdout');
+        const result = JSON.parse(jsonLine);
+        if (result.success) {
+          draft.html = result.html || '';
+          draft.image_path = result.image_path || '';
+          store.upsertDraft(draft);
+          resolve(result);
+        } else {
+          reject(new Error(result.error || 'mailgen unknown error'));
+        }
+      } catch (e) {
+        reject(new Error('mailgen parse error: ' + e.message));
+      }
+    });
+
+    proc.stdin.write(input);
+    proc.stdin.end();
+  });
+}
+
 // —— 速率限制（架构 §6 P0-3：/send 速率限制防域名声誉滥用）——
 const rateBucket = { start: Date.now(), count: 0 };
 function rateLimitOk() {
@@ -192,12 +257,19 @@ const RESEND_BATCH_SIZE = 100;
 async function fetchResend(draft, recipients, c) {
   const base = String(c.espApiUrl || 'https://api.resend.com/emails').replace(/\/emails?\/?$/, '');
   const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.espKey };
-  const message = r => ({
-    from: c.espFrom,
-    to: [r.email],                       // 每封独立收件人，无 To 群发
-    subject: draft.subject,
-    text: draft.body
-  });
+  const message = r => {
+    const msg = {
+      from: c.espFrom,
+      to: [r.email],
+      subject: draft.subject,
+      text: draft.body
+    };
+    // 如果有 HTML 邮件，使用 HTML（带 CID 图片）
+    if (draft.html) {
+      msg.html = draft.html;
+    }
+    return msg;
+  };
   const post = async (url, body) => {
     const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
     if (!resp.ok) throw new Error('ESP HTTP ' + resp.status);
@@ -365,7 +437,7 @@ const server = http.createServer(async (req, res) => {
 
   // 鉴权：bootstrap 与 /api/auth/* 豁免；业务端点解析会话 cookie，回退 x-local-token（老前端零破坏，整改 1a）
   // /api/attribution 为真实 ESP webhook 回执，豁免全局鉴权、端点内用 webhook secret 校验（整改 2）
-  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution') {
+  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution' && !pathname.startsWith('/api/image/')) {
     const who = authMod.resolveUser(req, store, config);
     if (!who) return sendJson(res, 403, { error: 'unauthorized' });
     req.userId = who.userId;
@@ -604,7 +676,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readBody(req);
       const card = body.planCard;
       if (!card) return sendJson(res, 400, { error: 'missing planCard' });
-      // 预估可挽回 GMV（PRD §5① / 算法 v1 环节①：匹配受众 × 类目挽回率基准，标注预估）
+      // 预估可挽回 GMV
       const matched = matchAudienceByDesc(card.audience);
       const estGmv = +matched.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
       const draft = {
@@ -613,10 +685,24 @@ const server = http.createServer(async (req, res) => {
         discount: card.discount, coupon: card.coupon, posters: card.posters,
         estGmv, matchedCount: matched.length, sendTiming: card.sendTiming || null,
         status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
-        user_id: req.userId || null,   // 整改 1c：打归属
-        locale: card.locale || null    // UI v4 整改 1 备注：邮件语种跟收件人 locale
+        user_id: req.userId || null,
+        locale: card.locale || null,
+        html: '', image_path: ''  // 待异步生成
       };
       store.upsertDraft(draft);
+
+      // 同步生成 HTML 邮件 + 营销图片
+      try {
+        await generateMailHtml(draft, card);
+        draft.html = draft.html || 'FALLBACK_HTML';
+        draft.image_path = draft.image_path || 'FALLBACK_IMAGE';
+        store.upsertDraft(draft);
+      } catch (err) {
+        draft.html = 'ERROR: ' + (err.message || err);
+        draft.image_path = '';
+        store.upsertDraft(draft);
+      }
+
       return sendJson(res, 200, { draft, estGmv, matchedCount: matched.length });
     }
 
@@ -803,6 +889,22 @@ const server = http.createServer(async (req, res) => {
         acts: store.getActsByUser(req.userId), drafts: store.getDraftsByUser(req.userId),
         audience: store.getAudience(), events: store.getEvents(), kpis: store.getKpis(config.mode, req.userId)
       });
+    }
+
+    // —— 图片服务（邮件预览用） ——
+    const imgMatch = pathname.match(/^\/api\/image\/(.+)$/);
+    if (imgMatch && method === 'GET') {
+      const imgPath = decodeURIComponent(imgMatch[1]);
+      const fs = require('fs');
+      const path = require('path');
+      const fullPath = path.resolve(imgPath);
+      console.log('[image] requested:', imgPath, 'resolved:', fullPath, 'exists:', fs.existsSync(fullPath));
+      if (!fs.existsSync(fullPath)) return sendJson(res, 404, { error: 'image not found', path: fullPath });
+      const ext = path.extname(fullPath).toLowerCase();
+      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif' }[ext] || 'image/png';
+      res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'max-age=3600' });
+      fs.createReadStream(fullPath).pipe(res);
+      return;
     }
 
     return sendJson(res, 404, { error: 'route not found' });
