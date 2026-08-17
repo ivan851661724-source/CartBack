@@ -552,10 +552,15 @@ const server = http.createServer(async (req, res) => {
       };
       const op = igde.opening();
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
-      if (body.preset && body.preset.audience) {
-        igde.applyNeeds(act, { audience: body.preset.audience });
-        act.stage = 'S1';
-        act.messages.push({ role: 'assistant', content: `收到，这次针对【${act.needs.audience}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
+      // 注入防御：preset.audience 是不可信输入 —— 收口（去控制符/折叠空白/限长），
+      // 疑似注入话术（忽略指令/角色切换/索要系统提示词）直接忽略该预选，走正常开场。
+      if (body.preset && typeof body.preset.audience === 'string' && body.preset.audience.trim()) {
+        const presetAud = igdeMod.clampNeedValue(body.preset.audience);
+        if (presetAud && !igdeMod.looksLikeInjection(presetAud)) {
+          igde.applyNeeds(act, { audience: presetAud });
+          act.stage = 'S1';
+          act.messages.push({ role: 'assistant', content: `收到，这次针对【${act.needs.audience}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
+        }
       }
       store.upsertAct(act);
       return sendJson(res, 200, { act });

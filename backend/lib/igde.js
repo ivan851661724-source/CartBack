@@ -180,6 +180,22 @@ function shouldCriticReview(reply) {
 
 // 注意：旧 SAFE_TEMPLATE 复读机已废除（P0-2），统一改用 FALLBACK_POOL 轮换兜底（见 _pickFallback）。
 
+/** 注入防御：needs 值收口 —— 控制字符替换、空白折叠、限长，防止超长文本把指令带进后续 prompt 与邮件插值。 */
+function clampNeedValue(value, max = 24) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, max)
+    .trim();
+}
+
+/** 注入防御：识别常见提示词注入话术（忽略/无视指令、角色切换、索要系统提示词），用于不可信输入的直接拒绝。 */
+function looksLikeInjection(value) {
+  const t = clampNeedValue(value, 200);
+  return /(忽略|无视|disregard|ignore)[^\n]{0,20}(指令|规则|提示|以上|上述|之前|instruction|prompt|rule)|(你现在是|假装你是|扮演|act as|enter (developer |dev )?mode|开发者模式)|(系统提示|初始指令|system prompt|initial instruction)/i.test(t);
+}
+
 /**
  * IGDE 引擎
  * @param {object} opts
@@ -213,8 +229,9 @@ class IGDE {
     if (correction && /(优惠|折|券|包邮|免邮|钩子|满减|赠品)/.test(correctionTail)) explicitCorrection.offer = explicitCorrection.offer || true;
     for (const f of NEEDED_FIELDS) {
       if (extracted && extracted[f] != null && String(extracted[f]).trim()) {
-        const next = String(extracted[f]).trim();
-        if (!act.needs[f] || act.needs[f] === next || (correction && explicitCorrection[f])) act.needs[f] = next;
+        // 注入防御：needs 值收口后再入库，防超长/带控制符文本把指令带进后续 prompt 与邮件插值
+        const next = clampNeedValue(extracted[f]);
+        if (next && (!act.needs[f] || act.needs[f] === next || (correction && explicitCorrection[f]))) act.needs[f] = next;
       }
     }
     return act.needs;
@@ -866,5 +883,6 @@ class IGDE {
 module.exports = {
   IGDE, extractNeeds, isNonInfo, scopeBoundary,
   guardrailL0, guardrailL1, guardrailL2, guardrailL3, guardrailL4,
-  NEEDED_FIELDS, FIELD_LABEL, PREACH_PATTERNS, D_REDIRECT_POOL, FALLBACK_POOL
+  NEEDED_FIELDS, FIELD_LABEL, PREACH_PATTERNS, D_REDIRECT_POOL, FALLBACK_POOL,
+  clampNeedValue, looksLikeInjection
 };
