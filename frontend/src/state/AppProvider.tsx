@@ -138,8 +138,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
       acts,
-      // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个
-      act: actIndex.get(state.act?.id) || acts[0] || state.act,
+      // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）
+      act: actIndex.get(state.act?.id ?? '') || acts[0] || state.act,
     });
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {

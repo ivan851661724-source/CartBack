@@ -15,6 +15,7 @@ cartback/
 │   ├── product/                # PRD
 │   ├── design/                 # UI 设计源
 │   └── architecture/           # Agent / 后端架构设计
+├── scripts/                    # quickstart 一键部署（.sh/.bat/.ps1）+ 构建/部署/本地开发脚本
 ├── archive/
 │   └── cartback-deploy_20260812/ # 原单体快照（对照，勿改）
 ├── backend/                    # 纯 API 服务（IGDE 引擎 / 鉴权 / 存储）
@@ -43,7 +44,24 @@ cartback/
 - **同源 Cookie 鉴权零改动**：反代后浏览器始终同源，`cb_session` 自动随请求带。
 - SSE 流式（`/api/act/:id/message/stream`）穿透 Next 反代，打字机效果保留；前端有一次性 `/message` 降级兜底。
 
-## 快速开始（Docker，推荐）
+## 一键部署（第一次使用，推荐）
+
+脚本会自动完成：**检测系统环境 → 缺 Docker 就自动安装 → 拉起 Docker 引擎 → 构建前后端镜像 → 启动服务 → 健康检查通过后自动打开浏览器**。全程中文提示，无需任何技术背景。
+
+| 平台 | 用法 |
+|---|---|
+| **Windows** | 双击 `scripts/quickstart.bat`（UAC 弹窗点「是」；启用 WSL2 后如提示重启，重启完再双击一次会从断点继续） |
+| **Linux** | 终端执行 `./scripts/quickstart.sh`（自动用官方脚本装 Docker Engine + compose + systemd 自启） |
+| **macOS** | 终端执行 `./scripts/quickstart.sh`（自动装 Homebrew + colima；已装 OrbStack / Docker Desktop 则直接复用） |
+
+说明：
+
+- **幂等可重跑**：每步先检测再执行，已装过的组件自动跳过，绝不重复安装、不动已有数据（`server-data/` 保留）。装一半中断 / 重启过电脑，再跑一次即可从断点继续。
+- **自动处理权限**：Linux 上自动 `usermod -aG docker` 并临时借道 sudo 让首次部署跑通（重新登录后免 sudo）。
+- 换端口：`PUBLIC_PORT=3001 ./scripts/quickstart.sh`（Windows：cmd 里 `set PUBLIC_PORT=3001` 后再运行 bat）。
+- 不想自动开浏览器：`NO_BROWSER=1 ./scripts/quickstart.sh`。
+
+## 手动部署（进阶）
 
 一键构建前后端镜像：
 
