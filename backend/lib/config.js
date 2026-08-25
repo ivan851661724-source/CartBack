@@ -43,6 +43,16 @@ const DEFAULTS = {
   sendRateLimitPerMin: 20,
   // —— 店后台连接器（架构 §2 B1）：邮件语种跟「收件人 locale」走，不是跟商家聊天语言 ——
   shopDefaultLocale: 'en',      // 店铺主客群语种（预览/默认）；逐收件人仍按其自身 locale 本地化
+  shopBrand: 'CartBack',        // 品牌名（邮件头部 / 营销图叠加 / 文案品牌位）
+  shopCartUrl: 'https://cartback.demo', // 邮件 CTA 跳转默认购物车 URL
+  // —— 视觉 / 邮件图像 AI（复用 emailgen；未单独配时可留空，内部走 Pollinations 免费兜底）——
+  visionKey: '',
+  visionBaseUrl: '',
+  visionModel: 'wan2.7-image-pro',
+  // 旧字段别名（兼容已有商家配置 import / 环境变量名）
+  wanxKey: '',
+  wanxBaseUrl: '',
+  wanxModel: '',
   shopify: { shopDomain: '', apiVersion: '2024-04', accessToken: '' }, // Shopify 自定义应用 Admin Token
   stores: []                    // 多个独立站：[{ type:'rest', baseUrl, apiKey, fieldMap }]
 };

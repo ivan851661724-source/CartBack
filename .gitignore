@@ -59,3 +59,20 @@ yarn-error.log*
 # ===== Docker 本地覆盖（保留 docker-compose.yml 作为源码）=====
 docker-compose.override.yml
 backend/eval/reports/
+
+# ===== 邮件生成子系统（emailgen） =====
+# 运行时生成的营销图片绝不入库（文件大且可重生成）
+backend/output/images/
+backend/output/
+# YAML 里的密钥可与模板分离；带 .local 后缀为本地密钥覆盖，不入库
+backend/emailgen/emailgen_config.local.yaml
+backend/emailgen/emailgen_config.local.yml
+# Python 虚拟环境 / 缓存
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.pytest_cache/
+.venv/
+venv/
+backend/venv/
+backend/.venv/

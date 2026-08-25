@@ -1,0 +1,56 @@
+# CartBack 邮件生成子系统配置（可选 — 未配置时由 Node.js 通过 stdin 注入 ai_config 即可）
+#
+# 优先顺序：Node 注入 > 环境变量 > 本 YAML > 默认值
+# 环境变量见 emailgen/config.py（CARTBACK_DEEPSEEK_KEY / CARTBACK_WANX_KEY / …）
+
+# —— AI 文案（推荐通过 Node /api/config 设置页面录入，这里只是 YAML 兜底）——
+deepseek:
+  api_key: ""
+  model: "deepseek-chat"
+  base_url: "https://api.deepseek.com"
+
+minimax:
+  api_key: ""
+  model: "MiniMax-M2.7"
+  base_url: "https://api.minimax.chat/v1"
+
+# —— 营销图片生成（万相，高质量定制图；不填则自动降级 Pollinations 免费兜底）——
+qianwen_vision:
+  api_key: ""
+  model: "wan2.7-image-pro"
+  base_url: ""
+  image_size: "768*1152"
+
+# —— SMTP 发送（批量脚本直邮场景，与 Node 端 Resend 真实发送相互独立）——
+email:
+  smtp_host: ""
+  smtp_port: 465
+  smtp_user: ""
+  smtp_password: ""
+  sender_email: ""
+  sender_name: "CartBack"
+  use_ssl: true
+  use_tls: false
+  cart_url: "https://cartback.demo"
+
+brevo:
+  api_key: ""
+  sender_email: "hello@example.com"
+  sender_name: "CartBack"
+
+# —— 营销规则（影响图片风格 / Prompt / 叠加内容）——
+marketing:
+  abandonment_recovery:
+    discount_priority: true
+    urgency_cta: true
+    send_window:
+      start: "10:30"
+      end: "21:00"
+    image_requirements:
+      main_text: "discount_percentage"
+      cta_button: "Shop Now"
+      style: "tech"           # tech | premium_masculine | feminine_youth | general
+      overlay_text: false     # false=让万相把字直接画在图里；true=用 Pillow 后期叠加（Pollinations 必自动叠加）
+
+data:
+  input_file: "user_data.jsonl"

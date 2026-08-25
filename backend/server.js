@@ -108,20 +108,51 @@ function logEvent(type, data) {
   console.log(JSON.stringify({ t: 'ey', ts: Date.now(), type, ...data }));
 }
 
-// —— 异步生成 HTML 邮件 + 营销图片（调用 Python mailgen.py） ——
+// —— 异步生成 HTML 邮件 + 营销图片（调用 Python mailgen.py v2，走 emailgen 子系统） ——
 async function generateMailHtml(draft, card) {
   const { spawn } = require('child_process');
   const path = require('path');
   const script = path.join(__dirname, 'scripts', 'mailgen.py');
 
+  // 把 Node 端持有的 AI 密钥同步下发给 Python（同机可信边界，不跨网络，不落盘）
+  // 这样商家只需在 UI 设置页录入一次即可，后端 LLM 与邮件图像复用同一套 Key。
+  const ai_config = {
+    provider: config.aiProvider || 'deepseek',
+    apiKey:   config.aiKey || '',
+    baseUrl:  config.aiBaseUrl || '',
+    model:    config.aiModel || '',
+    // 图像/万相模型 Key：优先用显式独立配置；若未单独填则与文案 AI 共享（兜底）
+    visionKey:     config.visionKey || config.wanxKey || '',
+    visionBaseUrl: config.visionBaseUrl || config.wanxBaseUrl || '',
+    visionModel:   config.visionModel || config.wanxModel || 'wan2.7-image-pro',
+  };
+
   const input = JSON.stringify({
+    // IGDE 方案卡字段（邮件主题/正文优先复用 Agent 产出，避免重复花 Token）
     subject: card.subject || '',
     body: card.body || '',
     discount: parseFloat(card.discount) || 8,
-    brand: 'CartBack',
+    brand: (card.brand || config.shopBrand || 'CartBack') + '',
     audience: card.audience || '',
-    cart_url: 'https://cartback.demo',
-    cta: 'Shop Now',
+    cart_url: card.cart_url || config.shopCartUrl || 'https://cartback.demo',
+    cta: card.cta || 'Shop Now',
+    locale: card.locale || config.shopDefaultLocale || 'en',
+    product_en: card.product_en || card.product || '',
+    product_cn: card.product_cn || '',
+    coupon: card.coupon || '',
+    posters: Array.isArray(card.posters) ? card.posters : [],
+    // 新能力开关
+    force_regen_copy: Boolean(card.force_regen_copy),  // 若商家点了「换一批文案」则用 LLM 重写
+    skip_image:        Boolean(card.skip_image),        // 纯文案调试时跳过图片生成
+    product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
+    // 配置注入（零重复录入）
+    ai_config,
+    draft: {
+      id: draft.id || null,
+      brand: config.shopBrand || 'CartBack',
+      cart_url: config.shopCartUrl || 'https://cartback.demo',
+      locale: card.locale || config.shopDefaultLocale || 'en',
+    },
   });
 
   return new Promise((resolve, reject) => {
@@ -129,14 +160,15 @@ async function generateMailHtml(draft, card) {
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    // v2 支持万相生成（可能 60-120s）+ 文案失败重试，总超时放宽到 240s
     const timer = setTimeout(() => {
       proc.kill();
-      reject(new Error('mailgen timeout after 120s'));
-    }, 120000);
+      reject(new Error('mailgen timeout after 240s'));
+    }, 240000);
 
     let stdout = '', stderr = '';
     proc.stdout.on('data', d => stdout += d);
-    proc.stderr.on('data', d => stderr += d);
+    proc.stderr.on('data', d => { stderr += d; process.stderr.write(d); /* 透传日志到后端 */ });
 
     proc.on('error', (err) => {
       clearTimeout(timer);
@@ -146,25 +178,48 @@ async function generateMailHtml(draft, card) {
 
     proc.on('close', (code) => {
       clearTimeout(timer);
-      if (code !== 0) {
-        return reject(new Error('mailgen failed: ' + stderr.slice(0, 100)));
-      }
       try {
         // 提取 stdout 中最后一个 JSON 对象（跳过 print 日志）
         const lines = stdout.trim().split('\n');
         const jsonLine = [...lines].reverse().find(l => l.trim().startsWith('{'));
-        if (!jsonLine) throw new Error('no JSON found in stdout');
+        if (!jsonLine) {
+          throw new Error('no JSON found in stdout; stderr tail: ' + stderr.slice(-300));
+        }
         const result = JSON.parse(jsonLine);
+
+        // 结构化日志：把 copy_provider / image_method / warnings 写入结构化事件，方便回测
+        logEvent('mailgen_result', {
+          draft_id: draft.id || null,
+          success: Boolean(result.success),
+          copy_provider: result.copy_provider || null,
+          image_method: result.image_method || null,
+          html_len: (result.html || '').length,
+          image_path_len: (result.image_path || '').length,
+          config_source: result.config_source || null,
+          warning_count: Array.isArray(result.warnings) ? result.warnings.length : 0,
+          stderr_tail: code !== 0 ? stderr.slice(-300) : undefined,
+        });
+
         if (result.success) {
           draft.html = result.html || '';
           draft.image_path = result.image_path || '';
+          // Python 端可能重写了 subject/body（fallback_template 或 force_regen）
+          // 这里仅在 Agent 原本是空串时才回填，避免覆盖 Agent 已精心润色的文案
+          if (result.subject && !(card && card.subject)) draft.subject = result.subject;
+          if (result.body    && !(card && card.body))    draft.body    = result.body;
+          draft.mailgen_meta = {
+            copy_provider: result.copy_provider,
+            image_method:  result.image_method,
+            warnings:      result.warnings || null,
+            config_source: result.config_source,
+          };
           store.upsertDraft(draft);
           resolve(result);
         } else {
           reject(new Error(result.error || 'mailgen unknown error'));
         }
       } catch (e) {
-        reject(new Error('mailgen parse error: ' + e.message));
+        reject(new Error('mailgen parse error: ' + e.message + ' (stderr=' + stderr.slice(-200) + ')'));
       }
     });
 
@@ -830,6 +885,20 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.espKey === 'string') config.espKey = body.espKey.trim();
       if (typeof body.espFrom === 'string') config.espFrom = body.espFrom.trim();
       if (typeof body.aiModel === 'string') config.aiModel = body.aiModel.trim();
+      if (typeof body.aiProvider === 'string') config.aiProvider = body.aiProvider.trim();
+      if (typeof body.aiBaseUrl === 'string') config.aiBaseUrl = body.aiBaseUrl.trim();
+      // 邮件图像 AI（emailgen 复用）
+      if (typeof body.visionKey === 'string') config.visionKey = body.visionKey.trim();
+      if (typeof body.visionBaseUrl === 'string') config.visionBaseUrl = body.visionBaseUrl.trim();
+      if (typeof body.visionModel === 'string') config.visionModel = body.visionModel.trim();
+      // 兼容别名（wanx*）
+      if (typeof body.wanxKey === 'string') config.wanxKey = body.wanxKey.trim();
+      if (typeof body.wanxBaseUrl === 'string') config.wanxBaseUrl = body.wanxBaseUrl.trim();
+      if (typeof body.wanxModel === 'string') config.wanxModel = body.wanxModel.trim();
+      // 店铺品牌 / 默认跳转
+      if (typeof body.shopBrand === 'string') config.shopBrand = body.shopBrand.trim();
+      if (typeof body.shopCartUrl === 'string') config.shopCartUrl = body.shopCartUrl.trim();
+      if (typeof body.shopDefaultLocale === 'string') config.shopDefaultLocale = body.shopDefaultLocale.trim();
       if (Number.isFinite(body.aiContextWindowTokens)) config.aiContextWindowTokens = Math.max(2048, Math.min(1000000, body.aiContextWindowTokens | 0));
       if (Number.isFinite(body.aiMaxOutputTokens)) config.aiMaxOutputTokens = Math.max(64, Math.min(32768, body.aiMaxOutputTokens | 0));
       if (Number.isFinite(body.aiContextSafetyMargin)) config.aiContextSafetyMargin = Math.max(128, Math.min(65536, body.aiContextSafetyMargin | 0));
