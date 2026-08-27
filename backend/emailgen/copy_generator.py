@@ -69,28 +69,50 @@ def generate_copy(
 def _build_prompt(user: UserRecord) -> str:
     gender_map = {"M": "male", "F": "female", "O": "other"}
     gender_desc = gender_map.get(user.gender, "other")
-    locale_short = (user.locale or "en").lower()[:2]
-    write_in = (
-        "English" if locale_short in ("en", "in", "de", "fr", "es", "it", "pt")
-        else "Simplified Chinese" if locale_short == "zh"
-        else "English"
-    )
+    # 语言选择：优先用户声明的习惯语言 preferred_language（权威，支持欧美多元文化背景，
+    # 如 US 西语裔、加拿大魁北克法语、澳洲意裔），否则按 locale 推断兜底
+    if user.preferred_language:
+        write_in = user.preferred_language
+    else:
+        locale_short = (user.locale or "en").lower()[:2]
+        write_in = (
+            "English" if locale_short in ("en", "in", "de", "fr", "es", "it", "pt")
+            else "Simplified Chinese" if locale_short == "zh"
+            else "English"
+        )
+    # 标签池预留维度（price_sensitivity / customer_segment）：非空才注入并给话术引导，空则不影响输出
+    # （from_plan_card 不采集这两维 → 初次用户设置不显示；JSONL/批量/测试可填）
+    user_extras = []
+    if user.price_sensitivity:
+        user_extras.append(f"price sensitivity: {user.price_sensitivity}")
+    if user.customer_segment:
+        user_extras.append(f"customer segment: {user.customer_segment}")
+    extras_str = (", " + ", ".join(user_extras)) if user_extras else ""
+    tone_hint = ""
+    if user_extras:
+        tone_hint = (
+            "5. Adapt tone to the shopper tags: "
+            "value-sensitive → lead with savings/deal urgency; premium → lead with quality/exclusivity; "
+            "new customer → welcoming; returning → \"glad to have you back\"; VIP → exclusive VIP offer.\n"
+        )
     return (
         "You are an expert e-commerce email copywriter. Write a recovery email for an abandoned cart.\n\n"
         f"BRAND: {user.brand}\n"
-        f"TARGET USER: {gender_desc}, age {user.age_range}, Tier-{user.city_tier} city, {user.device} user\n"
+        f"TARGET USER: {gender_desc}, age {user.age_range}, {user.device} user{extras_str}\n"
         f"PRODUCT: {user.product_en or user.product or 'premium product'}"
         + (f" ({user.product_cn})" if user.product_cn else "")
         + f"\n"
         f"DISCOUNT: {user.discount:g}% OFF\n"
         f"GOAL: {user.goal or 'abandonment_recovery'}\n"
-        f"LOCALE: {user.locale}\n\n"
+        f"LOCALE: {user.locale} (market region — for currency/cultural tone, NOT for language)\n"
+        f"WRITE IN: {write_in} (recipient's preferred language — write the ENTIRE email in this language)\n\n"
         "REQUIREMENTS:\n"
         "1. Email subject line (under 50 characters, urgent and compelling)\n"
-        f'2. Email body (friendly but urgent tone, {user.discount:g}% off as main hook, "Shop Now" CTA)\n'
+        f'2. Email body (friendly but urgent tone, {user.discount:g}% off as main hook, include a clear CTA phrase like "Shop Now", localized to the write-in language)\n'
         "3. Keep it concise and conversion-focused (3-6 short paragraphs max)\n"
-        f"4. Write in {write_in}\n\n"
-        "IMPORTANT: Output JSON only. No explanations, no thinking, no markdown. Just the raw JSON object.\n\n"
+        f"4. Write the entire email (subject + body + CTA) in {write_in}\n"
+        + tone_hint
+        + "\nIMPORTANT: Output JSON only. No explanations, no thinking, no markdown. Just the raw JSON object.\n\n"
         'OUTPUT FORMAT (JSON):\n{"subject": "...", "body": "..."}'
     )
 
@@ -168,9 +190,13 @@ def _extract_json(content: str) -> Dict[str, str]:
             json_str = content[first_brace : last_brace + 1]
         else:
             raise ValueError(f"响应中找不到 JSON，内容前 200 字: {content[:200]!r}")
-    # 去掉控制字符（避免 JSONDecodeError）
-    json_str = re.sub(r"[\x00-\x1f]", _escape_ctrl, json_str)
-    obj = json_lib.loads(json_str)
+    # 先直接解析（兼容结构化空白合法的 JSON，如 qwen/glm 系列的 pretty-print 多行输出）
+    try:
+        obj = json_lib.loads(json_str)
+    except json_lib.JSONDecodeError:
+        # 退回到控制字符转义（处理字符串值内含裸换行的非法 JSON）
+        json_str = re.sub(r"[\x00-\x1f]", _escape_ctrl, json_str)
+        obj = json_lib.loads(json_str)
     if not isinstance(obj, dict):
         raise ValueError(f"解析结果不是 dict: {type(obj)}")
     return {

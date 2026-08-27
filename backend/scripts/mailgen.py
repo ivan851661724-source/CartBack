@@ -46,6 +46,87 @@ from emailgen.data_loader import UserRecord  # noqa: E402
 OUTPUT_DIR = (BACKEND_ROOT / "output" / "images").as_posix()
 
 
+# ---------------------------------------------------------------------------
+# 5 套差异化虚拟用户画像（覆盖 12 维度 + 对应手机壳类型）
+# 用于 --selftest5：测试 LLM 文案对各画像维度的精确度
+# 维度: brand / gender / age_range / device / product / discount / goal / locale(市场区域)
+#       / preferred_language(用户习惯语言,权威覆盖 locale 语言)
+#       / price_sensitivity(价格敏感度: value/standard/premium)
+#       / customer_segment(客户分层: new/returning/vip) / cart_url
+# 欧美市场 + 多元文化背景；city_tier 已移除（欧美无语义）
+# price_sensitivity / customer_segment 为标签池预留维度（from_plan_card 不采集 → 初次用户设置不显示；
+#   JSONL/批量/测试可填，此处填入差异化值以验证话术精确度）
+# ---------------------------------------------------------------------------
+
+_SELFTEST5_PROFILES = [
+    {
+        "name": "P1 美国Z世代时尚女大学生 — 闪钻冰透壳",
+        "user_id": "st5_1", "email": "",
+        "brand": "Lumière", "gender": "F", "age_range": "18-24",
+        "device": "iPhone 15",
+        "product_en": "Glitter Rhinestone Clear Case",
+        "product_cn": "闪钻冰透手机壳",
+        "product": "Glitter Rhinestone Clear Case",
+        "discount": 15.0, "goal": "abandonment_recovery",
+        "locale": "en-US", "preferred_language": "English",
+        "price_sensitivity": "value", "customer_segment": "new",
+        "cart_url": "https://cartback.demo/u1",
+    },
+    {
+        "name": "P2 美国中年硬核科技男(西语裔) — 军工磁吸防摔壳",
+        "user_id": "st5_2", "email": "",
+        "brand": "AegisGuard", "gender": "M", "age_range": "35-44",
+        "device": "iPhone 15 Pro Max",
+        "product_en": "Rugged Armor MagSafe Case",
+        "product_cn": "军工磁吸防摔壳",
+        "product": "Rugged Armor MagSafe Case",
+        "discount": 12.0, "goal": "abandonment_recovery",
+        "locale": "en-US", "preferred_language": "Spanish",
+        "price_sensitivity": "premium", "customer_segment": "returning",
+        "cart_url": "https://cartback.demo/u2",
+    },
+    {
+        "name": "P3 德国商务男士 — 真皮卡包翻盖壳",
+        "user_id": "st5_3", "email": "",
+        "brand": "NordHülle", "gender": "M", "age_range": "25-34",
+        "device": "iPhone 14",
+        "product_en": "Premium Leather Wallet Case",
+        "product_cn": "真皮卡包翻盖壳",
+        "product": "Premium Leather Wallet Case",
+        "discount": 10.0, "goal": "abandonment_recovery",
+        "locale": "de-DE", "preferred_language": "German",
+        "price_sensitivity": "premium", "customer_segment": "vip",
+        "cart_url": "https://cartback.demo/u3",
+    },
+    {
+        "name": "P4 加拿大中年实用女(魁北克法语) — 简约透明软壳",
+        "user_id": "st5_4", "email": "",
+        "brand": "MapleShell", "gender": "F", "age_range": "45-54",
+        "device": "iPhone 13",
+        "product_en": "Simple Transparent Soft Case",
+        "product_cn": "简约透明软壳",
+        "product": "Simple Transparent Soft Case",
+        "discount": 20.0, "goal": "abandonment_recovery",
+        "locale": "en-CA", "preferred_language": "French",
+        "price_sensitivity": "value", "customer_segment": "returning",
+        "cart_url": "https://cartback.demo/u4",
+    },
+    {
+        "name": "P5 澳洲年轻户外男(意裔) — 防水户外防护壳",
+        "user_id": "st5_5", "email": "",
+        "brand": "OutbackGear AU", "gender": "M", "age_range": "18-24",
+        "device": "iPhone 15 Pro",
+        "product_en": "Waterproof Rugged Outdoor Case",
+        "product_cn": "防水户外防护壳",
+        "product": "Waterproof Rugged Outdoor Case",
+        "discount": 8.0, "goal": "abandonment_recovery",
+        "locale": "en-AU", "preferred_language": "Italian",
+        "price_sensitivity": "standard", "customer_segment": "new",
+        "cart_url": "https://cartback.demo/u5",
+    },
+]
+
+
 def _emit(result: dict) -> None:
     """权威输出：只在 stdout 打一行 JSON，Node 端解析最后一个 JSON 对象"""
     sys.stdout.write(json.dumps(result, ensure_ascii=False) + "\n")
@@ -185,10 +266,104 @@ def selftest() -> int:
     return 0
 
 
+def selftest5(with_image: bool = False) -> int:
+    """5 套差异化画像的邮件内容精确度测试。
+
+    - 绕过 from_plan_card，直接构造 UserRecord，让 gender/age_range/device/goal/preferred_language/price_sensitivity/customer_segment 全部生效
+    - force_regenerate=True → 绕过 IGDE pass-through，真正调用 LLM
+    - 默认 skip_image，聚焦文案精确度；--with-image 可启用
+    - AI 配置从环境变量 CARTBACK_AI_CONFIG（JSON 字符串）读取，避免密钥落盘 / 入 git
+      （走 ai_config 注入路径，绕过 _apply_env 的 None-deepseek latent bug）
+    """
+    ai_config = None
+    raw_cfg = os.environ.get("CARTBACK_AI_CONFIG")
+    if raw_cfg:
+        try:
+            ai_config = json.loads(raw_cfg)
+        except Exception as e:
+            print(f"[selftest5] CARTBACK_AI_CONFIG JSON 解析失败: {e}", file=sys.stderr)
+
+    cfg = load_config(ai_config=ai_config)
+    has_ai = bool((cfg.deepseek and cfg.deepseek.api_key) or cfg.minimax.api_key)
+    if not has_ai:
+        print("[selftest5] ⚠️ 未配置 AI 密钥，将走 _fallback_copy 模板（gender/age/device/goal/"
+              "preferred_language/price_sensitivity/customer_segment 不影响输出）。"
+              "请用环境变量 CARTBACK_AI_CONFIG 注入。", file=sys.stderr)
+    else:
+        prov = "deepseek" if (cfg.deepseek and cfg.deepseek.api_key) else "minimax"
+        mdl = cfg.deepseek.model if prov == "deepseek" else cfg.minimax.model
+        print(f"[selftest5] AI 已配置 (provider={prov}, model={mdl})，开始 5 套画像测试…", file=sys.stderr)
+
+    results = []
+    for i, p in enumerate(_SELFTEST5_PROFILES, 1):
+        name = p["name"]
+        user = UserRecord(**{k: v for k, v in p.items() if k != "name"})
+        print(f"[selftest5] ({i}/5) {name} — lang={user.preferred_language or user.locale} "
+              f"price={user.price_sensitivity or '-'} seg={user.customer_segment or '-'} disc={user.discount:g}%", file=sys.stderr)
+
+        # 文案：force_regenerate=True → 真正调 LLM（绕过 IGDE pass-through）
+        try:
+            copy = generate_copy(cfg, user, force_regenerate=True)
+            subject = copy.get("subject", "")
+            body = copy.get("body", "")
+            provider = copy.get("provider", "unknown")
+        except Exception as e:
+            subject, body, provider = "", "", f"error: {e}"
+            print(f"[selftest5]   文案生成失败: {e}", file=sys.stderr)
+
+        # 图片（默认跳过，聚焦文案精确度）
+        image_method, image_path = "skip", ""
+        if with_image:
+            try:
+                image_path = generate_product_image(cfg, user, skip=False, output_dir=OUTPUT_DIR)
+                qv = bool(cfg.qianwen_vision.api_key and cfg.qianwen_vision.base_url)
+                image_method = ("wanx" if qv else "pollinations") if image_path else "empty"
+            except Exception as e:
+                image_method = f"error: {e}"
+
+        # HTML
+        try:
+            html = build_email_html(
+                subject=subject, body=body, image_url=image_path,
+                cart_url=user.cart_url, brand_name=user.brand,
+                discount=user.discount,
+                cta_text=cfg.marketing.cta_button or "Shop Now",
+                use_cid=False,
+            )
+        except Exception as e:
+            html = f"<!-- HTML build failed: {e} -->"
+
+        results.append({
+            "name": name,
+            "tags": {
+                "gender": user.gender, "age_range": user.age_range,
+                "device": user.device,
+                "brand": user.brand, "product_en": user.product_en,
+                "product_cn": user.product_cn, "discount": user.discount,
+                "goal": user.goal, "locale": user.locale,
+                "preferred_language": user.preferred_language,
+                "price_sensitivity": user.price_sensitivity,
+                "customer_segment": user.customer_segment,
+            },
+            "subject": subject,
+            "body": body,
+            "copy_provider": provider,
+            "image_method": image_method,
+            "html_len": len(html),
+            "html": html,
+        })
+
+    _emit({"success": True, "ai_on": has_ai, "image_on": with_image, "profiles": results})
+    return 0
+
+
 def main() -> None:
-    # 允许命令行参数：--selftest
+    # 允许命令行参数：--selftest / --selftest5 [--with-image]
     if len(sys.argv) > 1 and sys.argv[1] == "--selftest":
         sys.exit(selftest())
+    if len(sys.argv) > 1 and sys.argv[1] == "--selftest5":
+        with_image = "--with-image" in sys.argv[2:]
+        sys.exit(selftest5(with_image=with_image))
 
     raw = sys.stdin.read()
     try:

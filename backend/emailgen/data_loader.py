@@ -1,6 +1,6 @@
 """用户/受众记录数据模型
 
-说明：原始 email-automation 的 data_loader 依赖 JSONL 文件 + 很多 CRM 字段（gender/age_range/city_tier...）。
+说明：原始 email-automation 的 data_loader 依赖 JSONL 文件 + 很多 CRM 字段（gender/age_range/device...）。
 集成进 CartBack 后，邮件草稿由 IGDE Agent 方案卡产出（subject/body/discount/audience/brand 等），
 受众画像信息可能不全，这里把所有字段都做成可空默认值，并新增 `from_plan_card()` 工厂函数，
 让 Node 传入的 plan card 可以不经 JSONL 直接送入后续文案/图片管线。
@@ -21,7 +21,6 @@ class UserRecord:
     brand: str = "CartBack"
     gender: str = "O"            # M / F / O
     age_range: str = "25-34"
-    city_tier: str = "1"
     device: str = "iPhone"
     product: str = ""
     product_cn: str = ""
@@ -30,6 +29,9 @@ class UserRecord:
     goal: str = "abandonment_recovery"
     send_window: str = "10:30-21:00"
     locale: str = "en-US"
+    preferred_language: str = ""   # 用户习惯语言（如 "German"/"French"/"Spanish"）；空=按 locale 推断，非空=权威覆盖 locale 语言猜测
+    price_sensitivity: str = ""    # 价格敏感度: value / standard / premium（标签池预留；from_plan_card 暂不采集 → 初次用户设置不显示）
+    customer_segment: str = ""     # 客户分层: new / returning / vip（标签池预留；from_plan_card 暂不采集 → 初次用户设置不显示）
     cart_url: str = "https://cartback.demo"
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -49,6 +51,7 @@ class UserRecord:
         locale = str(card.get("locale") or (draft or {}).get("locale") or "en").strip()
         if len(locale) == 2:
             locale = f"{locale}-{locale.upper()}"
+        preferred_language = str(card.get("preferred_language") or (draft or {}).get("preferred_language") or "").strip()
         # 从 audience 描述里猜一个产品词给 image prompt 用（兜底）
         product_en = str(card.get("product") or card.get("product_en") or "Premium Phone Case").strip()
         product_cn = str(card.get("product_cn") or "").strip()
@@ -64,6 +67,7 @@ class UserRecord:
             product=product_en,
             discount=discount,
             locale=locale,
+            preferred_language=preferred_language,
             cart_url=cart_url,
             raw={**dict(card), "draft": draft or {}},
         )
@@ -88,7 +92,6 @@ def load_user_data(file_path: str) -> Iterator[UserRecord]:
                     brand=data.get("brand", "CartBack"),
                     gender=data.get("gender", "O"),
                     age_range=data.get("age_range", "25-34"),
-                    city_tier=data.get("city_tier", "1"),
                     device=data.get("device", "iPhone"),
                     product=data.get("product", ""),
                     product_cn=data.get("product_cn", ""),
@@ -97,6 +100,9 @@ def load_user_data(file_path: str) -> Iterator[UserRecord]:
                     goal=data.get("goal", "abandonment_recovery"),
                     send_window=data.get("send_window", "10:30-21:00"),
                     locale=data.get("locale", "en-US"),
+                    preferred_language=data.get("preferred_language", ""),
+                    price_sensitivity=data.get("price_sensitivity", ""),
+                    customer_segment=data.get("customer_segment", ""),
                     cart_url=data.get("cart_url", "https://cartback.demo"),
                     raw=data,
                 )
