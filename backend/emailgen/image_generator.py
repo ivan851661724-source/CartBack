@@ -169,6 +169,7 @@ def generate_product_image(
                 discount=user.discount,
                 brand_name=user.brand,
                 cta_text=config.marketing.cta_button,
+                age_range=getattr(user, "age_range", None),
             )
         return str(Path(product_image_path).absolute())
 
@@ -205,6 +206,7 @@ def generate_product_image(
                     discount=user.discount,
                     brand_name=user.brand,
                     cta_text=config.marketing.cta_button,
+                    age_range=getattr(user, "age_range", None),
                 )
                 return final
             return str(Path(local).absolute())

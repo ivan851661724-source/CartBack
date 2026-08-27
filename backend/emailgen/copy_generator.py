@@ -244,22 +244,108 @@ def _fallback_copy(user: UserRecord) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+# 年龄+性别 → 核心视觉风格（主驱动）
+# 关键：每条都明确「手持手机壳近景 + 场景作为柔和虚化 bokeh 背景」，
+# 避免生成宽景环境照导致手机壳变小、主体离手机壳远。
+_STYLE_BY_AGE_GENDER: Dict[tuple, str] = {
+    ("18-24", "F"): (
+        "Instagram-style aesthetic, soft solid pastel gradient (blush pink / lavender / peach), "
+        "diverse young female hand holding the phone case close to camera, "
+        "trendy cafe / dorm scene softly blurred as background bokeh, bright natural lighting, vibrant"
+    ),
+    ("18-24", "M"): (
+        "Instagram-style vivid gradient (teal / sunset orange), "
+        "adventurous young male hand holding the phone case close to camera, "
+        "outdoor landscape (beach / trail) softly blurred as background bokeh, sunlit, social-media trend"
+    ),
+    ("25-34", "M"): (
+        "clean minimal luxury, dark charcoal with warm gold accents, "
+        "suited male hand holding the phone case close to camera, "
+        "modern office desk softly blurred as background bokeh, European elegance"
+    ),
+    ("25-34", "F"): (
+        "modern chic, soft neutral gradient, elegant female hand holding the phone case close to camera, "
+        "boutique / studio scene softly blurred as background bokeh, soft studio lighting, sophisticated"
+    ),
+    ("35-44", "M"): (
+        "rugged industrial aesthetic, dark gunmetal / matte black, "
+        "masculine hand holding the phone case close to camera, "
+        "workshop / gear scene softly blurred as background bokeh, dramatic lighting"
+    ),
+    ("35-44", "F"): (
+        "modern professional, clean neutral tones, confident female hand holding the phone case close to camera, "
+        "office scene softly blurred as background bokeh, soft studio lighting"
+    ),
+    ("45-54", "F"): (
+        "natural lifestyle, warm earthy tones, mature female hand holding the phone case close to camera, "
+        "cozy home / kitchen scene softly blurred as background bokeh, soft daylight, inviting"
+    ),
+    ("45-54", "M"): (
+        "classic premium, warm wood and leather tones, distinguished mature male hand holding the phone case close to camera, "
+        "study / library scene softly blurred as background bokeh, refined"
+    ),
+}
+
+# 语言/文化 → 模特特征（仅当核心风格含 model 时叠加）
+_LANG_MODEL: Dict[str, str] = {
+    "spanish": "Hispanic / Latino model, warm vibrant Latin cultural aesthetic",
+    "german": "European model, clean Bauhaus-inspired minimalism, precise",
+    "french": "French-style elegance, romantic soft tones, chic",
+    "italian": "Mediterranean warmth, passionate, Italian design flair",
+    "english": "diverse multicultural model, modern Western market",
+}
+
+
+def _build_image_style(user: UserRecord) -> str:
+    """根据用户标签（age/gender/price/segment/language）动态构建图片风格描述"""
+    parts: list = []
+
+    age = user.age_range or "25-34"
+    gender = (user.gender or "O").upper()
+    core = _STYLE_BY_AGE_GENDER.get((age, gender))
+    if core is None:
+        if gender == "F":
+            core = "clean modern, soft gradient, elegant female lifestyle, bright natural lighting"
+        elif gender == "M":
+            core = "clean modern, dark gradient, masculine product photography, dramatic lighting"
+        else:
+            core = "clean modern e-commerce style, neutral gradient, product-focused"
+    parts.append(core)
+
+    # 价格敏感度 → 质感
+    ps = (user.price_sensitivity or "").lower()
+    if ps == "value":
+        parts.append("bright cheerful approachable, colorful, deal-friendly savings vibe")
+    elif ps == "premium":
+        parts.append("luxury high-end, dark elegant, gold / platinum accents, exclusive")
+    elif ps == "standard":
+        parts.append("balanced practical, clean and honest, real-world usage")
+
+    # 客户分层 → 氛围
+    seg = (user.customer_segment or "").lower()
+    if seg == "new":
+        parts.append("fresh welcoming, bright inviting")
+    elif seg == "returning":
+        parts.append("warm familiar, appreciation and loyalty feel")
+    elif seg == "vip":
+        parts.append("ultra-exclusive VIP, black and gold, opulent prestige")
+
+    # 语言/文化 → 模特特征（当核心风格含人物 hand/model 时叠加，匹配模特族裔）
+    lang = (user.preferred_language or "").lower()
+    model_hint = _LANG_MODEL.get(lang)
+    if model_hint and ("hand" in core or "model" in core):
+        parts.append(model_hint)
+
+    return "; ".join(parts)
+
+
 def generate_image_prompt(user: UserRecord, config: Config) -> str:
-    style_map: Dict[str, str] = {
-        "tech": (
-            "futuristic sci-fi tech aesthetic, dark charcoal gradient background with subtle "
-            "neon cyan and electric blue glow accents, holographic grid lines, sleek modern "
-            "smartphone case product photography, dramatic studio rim lighting, glossy "
-            "reflective surface, depth of field, premium high-tech vibe, 8k product render"
-        ),
-        "premium_masculine": (
-            "clean, minimal, dark background with gold accents, luxury product photography "
-            "style, suitable for male 25-35"
-        ),
-        "feminine_youth": "soft gradient, warm tones, elegant, lifestyle-oriented",
-        "general": "clean white background, product-focused, modern e-commerce style",
-    }
-    style = style_map.get(config.marketing.image_style, style_map["general"])
+    style = _build_image_style(user)
+
+    # config.marketing.image_style 非空且非默认 "tech" 时作为手动覆盖
+    override = (config.marketing.image_style or "").strip()
+    if override and override.lower() != "tech":
+        style = override
 
     try:
         discount_pct = int(user.discount)
@@ -268,19 +354,87 @@ def generate_image_prompt(user: UserRecord, config: Config) -> str:
     cta = (config.marketing.cta_button or "Shop Now").strip()
     brand = (user.brand or "CartBack").strip()
     product = (user.product_en or user.product or "premium product").strip()
+    device = (user.device or "").strip()
+
+    # 主体描述：明确是手机壳，并对上画像里的手机型号（device）
+    if device:
+        subject = (
+            f"a {product} (a phone case) fitted on a {device} smartphone. "
+            "The phone case itself is the single, dominant, sharply-focused hero subject "
+            "of the image — centered, large in frame, fully visible with its texture, "
+            "material and design details clearly readable."
+        )
+    else:
+        subject = (
+            f"a {product} (a phone case). The phone case itself is the single, dominant, "
+            "sharply-focused hero subject of the image — centered, large in frame, fully "
+            "visible with its texture, material and design details clearly readable."
+        )
+
+    # 年龄判定：age_range 下限 >= 50 视为「>50 岁客群」，此时才允许 A/B 类文字背景增强
+    age = (user.age_range or "25-34").strip()
+    age_lo = 25
+    try:
+        # "18-24" -> 18；"55+" -> 55；"45-54" -> 45
+        m = re.match(r"\s*(\d+)", age)
+        if m:
+            age_lo = int(m.group(1))
+    except Exception:
+        pass
+    senior_users = age_lo >= 55  # 限制 A / B 只作用于 55+ 客群（按用户最新要求）
+
+    # 深色/浅色风格差异（主要影响白字 vs 深字 + 打光方式）
+    dark_bg = any(w in style.lower() for w in ("dark", "gunmetal", "charcoal", "matte black", "black and gold"))
+    light_hint = "dramatic studio lighting with rim light" if dark_bg else "bright natural lighting"
+
+    # B 项（文字下衬底条）：严格限制只在 >50 岁客群开启，与深/浅色背景风格解耦
+    if senior_users:
+        # >50岁：保留文字下的浅色/渐变衬底以保证中老年辨识度
+        if dark_bg:
+            text_hint = (
+                "high-contrast white text over a soft pale gradient band or translucent light strip "
+                "behind each line for mature-reader legibility; keep strips thin and subtle"
+            )
+        else:
+            text_hint = (
+                "high-contrast text (dark on a soft light band, or white on a soft gradient band) "
+                "to ensure legibility for mature readers; keep bands thin and low-opacity"
+            )
+    else:
+        # <=50岁：任何情况下不得出现文字固定背景条/块，只允许用投影提升字和图的对比
+        if dark_bg:
+            text_hint = (
+                "high-contrast white text placed directly on the dark blurred background with a "
+                "subtle drop shadow only if needed; NO solid box, NO gradient band, NO banner strip, NO light strip behind any lettering"
+            )
+        else:
+            text_hint = (
+                "high-contrast text placed directly on the blurred background with a subtle drop "
+                "shadow only if needed; NO solid box, NO gradient band, NO banner strip behind any lettering"
+            )
+
+    # A：只有 >50 岁客群才保留「底部渐变横条」以提高文字辨识度；其他客群一律禁止
+    if senior_users:
+        text_area = "Marketing text in the lower area over a subtle, low-opacity gradient band for senior-readability legibility — keep the band thin and non-intrusive so the phone case remains the hero. "
+    else:
+        text_area = "Marketing text sits cleanly in the lower area directly on the blurred background — NO banners, NO solid boxes, NO gradient bands, NO cards, NO strips behind any text; text floats freely with drop shadow only. "
 
     return (
         "海外电商邮件营销广告图。 "
-        f"Product: {product}. "
+        f"Subject: {subject} "
         f"Style: {style}. "
-        "Composition: premium e-commerce marketing hero banner, product centered in the upper "
-        "area, marketing text in the lower area over a subtle dark gradient band for legibility. "
+        "Composition: premium e-commerce marketing hero banner. CRITICAL FRAMING: "
+        "extreme close-up shot, the phone case is held in a hand and fills 60-70% of the frame, "
+        "centered in the upper area, sharply in focus. Shallow depth of field (f/1.8), "
+        "background heavily blurred into soft bokeh so the scene/model stays secondary and "
+        "never competes with the phone case. The phone case is the unmistakable hero. "
+        f"{text_area}"
         "Render these English texts accurately and crisply into the image: "
         f'a large bold discount badge reading "{discount_pct}% OFF", '
         f'a rounded CTA button labeled "{cta}", '
         f'and the brand name "{brand}". '
-        "Typography: clean modern sans-serif, high-contrast white text with subtle cyan glow, "
+        f"Typography: clean modern sans-serif, {text_hint}, "
         "perfect spelling, no gibberish, no extra or duplicated characters, no Chinese characters. "
-        "Lighting: dramatic studio lighting with neon rim light. "
+        f"Lighting: {light_hint}. "
         "High quality, photorealistic, 8k."
     )
