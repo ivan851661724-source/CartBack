@@ -9,6 +9,7 @@ BACKEND_PORT="${BACKEND_PORT:-4173}"
 FRONTEND_PORT="${FRONTEND_PORT:-3000}"
 BACKEND_PID=""
 FRONTEND_PID=""
+TSC_PID=""
 CLEANED_UP=0
 
 fail() {
@@ -53,6 +54,7 @@ cleanup() {
   echo "[dev] 正在停止前后端…"
   terminate_tree "$FRONTEND_PID" TERM
   terminate_tree "$BACKEND_PID" TERM
+  terminate_tree "$TSC_PID" TERM 2>/dev/null || true
   wait "$FRONTEND_PID" 2>/dev/null || true
   wait "$BACKEND_PID" 2>/dev/null || true
   echo "[dev] 已停止"
@@ -77,10 +79,24 @@ if [ ! -x "$FRONTEND_DIR/node_modules/.bin/next" ]; then
   (cd "$FRONTEND_DIR" && npm ci)
 fi
 
+# 后端：安装依赖 + 编译 TypeScript（mailgen 子系统）→ dist/
+# 旧版后端是零依赖纯 JS；迁移后 mailgen 用 TypeScript 编写，需先编译才能 require('./dist/mailgen')
+if [ ! -d "$BACKEND_DIR/node_modules" ] || [ ! -f "$BACKEND_DIR/dist/mailgen.js" ]; then
+  echo "[dev] 后端依赖或构建产物不存在，正在执行 npm install + npm run build…"
+  (cd "$BACKEND_DIR" && npm install && npm run build)
+fi
+
 echo "[dev] 后端：http://127.0.0.1:${BACKEND_PORT}（Node watch 热更新）"
 echo "[dev] 前端：http://127.0.0.1:${FRONTEND_PORT}（Next Fast Refresh）"
 echo "[dev] 按 Ctrl+C 同时停止"
 echo
+
+# TS 源码热编译：ts/ 改动 → dist/ → node --watch 自动重启后端
+(
+  cd "$BACKEND_DIR"
+  exec npm run build -- --watch --preserveWatchOutput
+) &
+TSC_PID=$!
 
 (
   cd "$BACKEND_DIR"

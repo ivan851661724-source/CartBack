@@ -132,6 +132,8 @@ BACKEND_PORT=14173 FRONTEND_PORT=13000 ./scripts/start_local_dev.sh
 ```bash
 # 1) 后端（默认 :4173，与原单体一致；Docker 内由 ENV PORT=4180 覆盖）
 cd backend
+npm install            # 安装 mailgen 子系统依赖（@napi-rs/canvas / js-yaml / zod + typescript）
+npm run build          # 编译 TypeScript → dist/（server.js 同进程 require('./dist/mailgen')）
 NODE_OPTIONS=--experimental-sqlite node server.js    # :4173
 
 # 2) 前端（另开终端）
@@ -151,7 +153,7 @@ npm run dev                                          # :3000，.env.local 指向
 2. **SSE 穿透代理**：`/api/act/:id/message/stream` 经 Next 反代逐 token 流式；若代理缓冲导致不流式，前端自动降级到一次性 `/message`。
 3. **密钥隔离**：AI/ESP 密钥只在 `backend/.server/config.json`，绝不进前端、绝不进镜像层。
 4. **鉴权安全默认**：`/api/bootstrap` 默认不下发 `localToken`（防任意访客拿到令牌即管理员）；`x-local-token` 鉴权仅在 `CARTBACK_OPEN_LOCAL=1` 时启用。`start_local_dev.sh` 已默认注入该变量保持本地免登录体验；webhook/本地令牌比较均为常量时间（`timingSafeEqual`）。
-4. **后端逻辑零改动**：IGDE 引擎、护栏、FSM、鉴权、全部 `/api/*` 逻辑逐字节保留，仅剥离静态托管。
+4. **后端逻辑零改动**：IGDE 引擎、护栏、FSM、鉴权、全部 `/api/*` 逻辑逐字节保留，仅剥离静态托管。邮件生成（mailgen）子系统已由 Python 迁移为同进程 TypeScript（`ts/`→`dist/`，`server.js` 同进程 `require('./dist/mailgen')`，不再 spawn python3）——见 `MIGRATION.md`。
 
 ## 双容器运维
 

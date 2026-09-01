@@ -108,13 +108,22 @@ function logEvent(type, data) {
   console.log(JSON.stringify({ t: 'ey', ts: Date.now(), type, ...data }));
 }
 
-// —— 异步生成 HTML 邮件 + 营销图片（调用 Python mailgen.py v2，走 emailgen 子系统） ——
-async function generateMailHtml(draft, card) {
-  const { spawn } = require('child_process');
-  const path = require('path');
-  const script = path.join(__dirname, 'scripts', 'mailgen.py');
+// —— 异步生成 HTML 邮件 + 营销图片（调用同进程 TypeScript mailgen 子系统，无需 Python） ——
+//    旧版 spawn('python3', scripts/mailgen.py) 已迁移为 Node + TS in-process 调用，
+//    stdout JSON 契约（html/image_path/subject/body/copy_provider/image_method/warnings/config_source）保持不变。
+let _mailgenMod = null;
+function getMailgen() {
+  if (_mailgenMod) return _mailgenMod;
+  try {
+    _mailgenMod = require('./dist/mailgen');
+    return _mailgenMod;
+  } catch (e) {
+    throw new Error('mailgen 模块未构建，请先在 backend/ 下执行 `npm run build`：' + (e && e.message));
+  }
+}
 
-  // 把 Node 端持有的 AI 密钥同步下发给 Python（同机可信边界，不跨网络，不落盘）
+async function generateMailHtml(draft, card) {
+  // 把 Node 端持有的 AI 密钥同步下发给 mailgen（同机可信边界，不跨网络，不落盘）
   // 这样商家只需在 UI 设置页录入一次即可，后端 LLM 与邮件图像复用同一套 Key。
   const ai_config = {
     provider: config.aiProvider || 'deepseek',
@@ -127,7 +136,7 @@ async function generateMailHtml(draft, card) {
     visionModel:   config.visionModel || config.wanxModel || 'wan2.7-image-pro',
   };
 
-  const input = JSON.stringify({
+  const payload = {
     // IGDE 方案卡字段（邮件主题/正文优先复用 Agent 产出，避免重复花 Token）
     subject: card.subject || '',
     body: card.body || '',
@@ -153,79 +162,55 @@ async function generateMailHtml(draft, card) {
       cart_url: config.shopCartUrl || 'https://cartback.demo',
       locale: card.locale || config.shopDefaultLocale || 'en',
     },
+  };
+
+  // v2 支持万相生成（可能 60-120s）+ 文案失败重试，总超时放宽到 240s（与旧版 Python 子进程一致）
+  let timer;
+  let timedOut = false;
+  const guard = new Promise((_, reject) => {
+    timer = setTimeout(() => { timedOut = true; reject(new Error('mailgen timeout after 240s')); }, 240000);
   });
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn('python3', [script], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+  let result;
+  try {
+    result = await Promise.race([getMailgen().run(payload), guard]);
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+  clearTimeout(timer);
+  if (timedOut) throw new Error('mailgen timeout after 240s');
 
-    // v2 支持万相生成（可能 60-120s）+ 文案失败重试，总超时放宽到 240s
-    const timer = setTimeout(() => {
-      proc.kill();
-      reject(new Error('mailgen timeout after 240s'));
-    }, 240000);
-
-    let stdout = '', stderr = '';
-    proc.stdout.on('data', d => stdout += d);
-    proc.stderr.on('data', d => { stderr += d; process.stderr.write(d); /* 透传日志到后端 */ });
-
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      console.error('[mailgen] spawn error:', err.message);
-      reject(err);
-    });
-
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      try {
-        // 提取 stdout 中最后一个 JSON 对象（跳过 print 日志）
-        const lines = stdout.trim().split('\n');
-        const jsonLine = [...lines].reverse().find(l => l.trim().startsWith('{'));
-        if (!jsonLine) {
-          throw new Error('no JSON found in stdout; stderr tail: ' + stderr.slice(-300));
-        }
-        const result = JSON.parse(jsonLine);
-
-        // 结构化日志：把 copy_provider / image_method / warnings 写入结构化事件，方便回测
-        logEvent('mailgen_result', {
-          draft_id: draft.id || null,
-          success: Boolean(result.success),
-          copy_provider: result.copy_provider || null,
-          image_method: result.image_method || null,
-          html_len: (result.html || '').length,
-          image_path_len: (result.image_path || '').length,
-          config_source: result.config_source || null,
-          warning_count: Array.isArray(result.warnings) ? result.warnings.length : 0,
-          stderr_tail: code !== 0 ? stderr.slice(-300) : undefined,
-        });
-
-        if (result.success) {
-          draft.html = result.html || '';
-          draft.image_path = result.image_path || '';
-          // Python 端可能重写了 subject/body（fallback_template 或 force_regen）
-          // 这里仅在 Agent 原本是空串时才回填，避免覆盖 Agent 已精心润色的文案
-          if (result.subject && !(card && card.subject)) draft.subject = result.subject;
-          if (result.body    && !(card && card.body))    draft.body    = result.body;
-          draft.mailgen_meta = {
-            copy_provider: result.copy_provider,
-            image_method:  result.image_method,
-            warnings:      result.warnings || null,
-            config_source: result.config_source,
-          };
-          store.upsertDraft(draft);
-          resolve(result);
-        } else {
-          reject(new Error(result.error || 'mailgen unknown error'));
-        }
-      } catch (e) {
-        reject(new Error('mailgen parse error: ' + e.message + ' (stderr=' + stderr.slice(-200) + ')'));
-      }
-    });
-
-    proc.stdin.write(input);
-    proc.stdin.end();
+  // 结构化日志：把 copy_provider / image_method / warnings 写入结构化事件，方便回测
+  logEvent('mailgen_result', {
+    draft_id: draft.id || null,
+    success: Boolean(result.success),
+    copy_provider: result.copy_provider || null,
+    image_method: result.image_method || null,
+    html_len: (result.html || '').length,
+    image_path_len: (result.image_path || '').length,
+    config_source: result.config_source || null,
+    warning_count: Array.isArray(result.warnings) ? result.warnings.length : 0,
   });
+
+  if (result.success) {
+    draft.html = result.html || '';
+    draft.image_path = result.image_path || '';
+    // mailgen 端可能重写了 subject/body（fallback_template 或 force_regen）
+    // 这里仅在 Agent 原本是空串时才回填，避免覆盖 Agent 已精心润色的文案
+    if (result.subject && !(card && card.subject)) draft.subject = result.subject;
+    if (result.body    && !(card && card.body))    draft.body    = result.body;
+    draft.mailgen_meta = {
+      copy_provider: result.copy_provider,
+      image_method:  result.image_method,
+      warnings:      result.warnings || null,
+      config_source: result.config_source,
+    };
+    store.upsertDraft(draft);
+    return result;
+  } else {
+    throw new Error(result.error || 'mailgen unknown error');
+  }
 }
 
 // —— 速率限制（架构 §6 P0-3：/send 速率限制防域名声誉滥用）——

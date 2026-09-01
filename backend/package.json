@@ -5,11 +5,25 @@
   "type": "commonjs",
   "scripts": {
     "start": "node server.js",
+    "build": "tsc -p tsconfig.json",
+    "pretest": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.js",
+    "selftest": "node dist/mailgen.js --selftest",
+    "gallery": "node dist/gallery.js",
     "eval:offline": "node eval/runner.js"
   },
   "engines": {
     "node": ">=22.5.0"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "^0.1.65",
+    "js-yaml": "^4.1.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.3"
   },
   "license": "MIT"
 }
