@@ -35,13 +35,12 @@ function formatG(n: number): string {
 export function fallbackCopy(user: UserRecord): CopyResult {
   const pct = Number.isInteger(user.discount) ? user.discount : user.discount;
   const subject = `Your ${pct}% OFF Is Waiting — Don't Miss Out, ${user.brand}`;
+  // 落款与「点击图片下单」提示由模板在图片后追加，body 只放开头+主体
   const body =
     `Hi there,\n\n` +
     `We noticed you left some items from ${user.brand} in your cart. ` +
     `Good news — we're giving you ${pct}% OFF to welcome you back.\n\n` +
-    `Use this chance today before it expires.\n\n` +
-    `Tap the button below to pick up where you left off.\n\n` +
-    `See you soon,\nThe ${user.brand} Team`;
+    `Use this chance today before it expires.`;
   return {
     subject,
     body,
@@ -94,9 +93,10 @@ export function buildPrompt(user: UserRecord): string {
     `WRITE IN: ${writeIn} (recipient's preferred language — write the ENTIRE email in this language)\n\n` +
     'REQUIREMENTS:\n' +
     '1. Email subject line (under 50 characters, urgent and compelling)\n' +
-    `2. Email body (friendly but urgent tone, ${formatG(user.discount)}% off as main hook, include a clear CTA phrase like "Shop Now", localized to the write-in language)\n` +
-    '3. Keep it concise and conversion-focused (3-6 short paragraphs max)\n' +
-    `4. Write the entire email (subject + body + CTA) in ${writeIn}\n` +
+    `2. Email body: greeting + ONE short main sentence about the ${formatG(user.discount)}% off recovery offer. Keep it to 2-3 short sentences total, under 40 words. ` +
+    'NO signature, NO closing, and ABSOLUTELY NO call-to-action line (do NOT write anything like "tap/click the image/button", "shop now", "reclaim", "grab" — the click-to-order prompt and signature are added by the template separately). Just the greeting and the offer.\n' +
+    '3. Keep it concise and conversion-focused\n' +
+    `4. Write the entire email (subject + body) in ${writeIn}\n` +
     toneHint +
     '\nIMPORTANT: Output JSON only. No explanations, no thinking, no markdown. Just the raw JSON object.\n\n' +
     'OUTPUT FORMAT (JSON):\n{"subject": "...", "body": "..."}'
@@ -261,145 +261,72 @@ export async function generateCopy(
 // 图片 Prompt 生成
 // ---------------------------------------------------------------------------
 
-const STYLE_BY_AGE_GENDER: Record<string, string> = {
-  '18-24|F':
-    'Instagram-style aesthetic, soft solid pastel gradient (blush pink / lavender / peach), diverse young female hand holding the phone case close to camera, trendy cafe / dorm scene softly blurred as background bokeh, bright natural lighting, vibrant',
-  '18-24|M':
-    'Instagram-style vivid gradient (teal / sunset orange), adventurous young male hand holding the phone case close to camera, outdoor landscape (beach / trail) softly blurred as background bokeh, sunlit, social-media trend',
-  '25-34|M':
-    'clean minimal luxury, dark charcoal with warm gold accents, suited male hand holding the phone case close to camera, modern office desk softly blurred as background bokeh, European elegance',
-  '25-34|F':
-    'modern chic, soft neutral gradient, elegant female hand holding the phone case close to camera, boutique / studio scene softly blurred as background bokeh, soft studio lighting, sophisticated',
-  '35-44|M':
-    'rugged industrial aesthetic, dark gunmetal / matte black, masculine hand holding the phone case close to camera, workshop / gear scene softly blurred as background bokeh, dramatic lighting',
-  '35-44|F':
-    'modern professional, clean neutral tones, confident female hand holding the phone case close to camera, office scene softly blurred as background bokeh, soft studio lighting',
-  '45-54|F':
-    'natural lifestyle, warm earthy tones, mature female hand holding the phone case close to camera, cozy home / kitchen scene softly blurred as background bokeh, soft daylight, inviting',
-  '45-54|M':
-    'classic premium, warm wood and leather tones, distinguished mature male hand holding the phone case close to camera, study / library scene softly blurred as background bokeh, refined',
+// 简短中文风格表（年龄+性别 → 一句风格/背景描述）。用户反馈：短自然语言 prompt 效果优于长英文约束模板。
+const STYLE_CN_BY_AGE_GENDER: Record<string, string> = {
+  '18-24|F': 'Instagram风格柔和粉紫渐变背景',
+  '18-24|M': 'Instagram风格鲜艳渐变背景',
+  '25-34|M': '极简轻奢深炭金背景',
+  '25-34|F': '现代柔和中性渐变背景',
+  '35-44|M': '硬朗工业风暗色金属背景',
+  '35-44|F': '现代职业中性背景',
+  '45-54|F': '自然生活暖色背景',
+  '45-54|M': '经典高级木皮质感背景',
 };
 
-const LANG_MODEL: Record<string, string> = {
-  spanish: 'Hispanic / Latino model, warm vibrant Latin cultural aesthetic',
-  german: 'European model, clean Bauhaus-inspired minimalism, precise',
-  french: 'French-style elegance, romantic soft tones, chic',
-  italian: 'Mediterranean warmth, passionate, Italian design flair',
-  english: 'diverse multicultural model, modern Western market',
+// preferred_language → 人群族裔描述（中文简短）
+const ETHNICITY_BY_LANG: Record<string, string> = {
+  english: '白人',
+  spanish: '西语裔',
+  german: '德裔',
+  french: '法裔',
+  italian: '意裔',
 };
 
-function buildImageStyle(user: UserRecord): string {
-  const parts: string[] = [];
-  const age = user.age_range || '25-34';
-  const gender = (user.gender || 'O').toUpperCase();
-  let core = STYLE_BY_AGE_GENDER[`${age}|${gender}`];
-  if (!core) {
-    if (gender === 'F') core = 'clean modern, soft gradient, elegant female lifestyle, bright natural lighting';
-    else if (gender === 'M') core = 'clean modern, dark gradient, masculine product photography, dramatic lighting';
-    else core = 'clean modern e-commerce style, neutral gradient, product-focused';
-  }
-  parts.push(core);
-
-  const ps = (user.price_sensitivity || '').toLowerCase();
-  if (ps === 'value') parts.push('bright cheerful approachable, colorful, deal-friendly savings vibe');
-  else if (ps === 'premium') parts.push('luxury high-end, dark elegant, gold / platinum accents, exclusive');
-  else if (ps === 'standard') parts.push('balanced practical, clean and honest, real-world usage');
-
-  const seg = (user.customer_segment || '').toLowerCase();
-  if (seg === 'new') parts.push('fresh welcoming, bright inviting');
-  else if (seg === 'returning') parts.push('warm familiar, appreciation and loyalty feel');
-  else if (seg === 'vip') parts.push('ultra-exclusive VIP, black and gold, opulent prestige');
-
-  const lang = (user.preferred_language || '').toLowerCase();
-  const modelHint = LANG_MODEL[lang];
-  if (modelHint && (core.includes('hand') || core.includes('model'))) parts.push(modelHint);
-
-  return parts.join('; ');
+// 取年龄区间代表值：18-24→20，25-34→30，35-44→40，45-54→50，55+→58
+function representativeAge(ageRange: string): number {
+  const m = ageRange.match(/\s*(\d+)/);
+  if (!m) return 30;
+  const lo = parseInt(m[1], 10);
+  if (lo < 25) return 20;
+  if (lo < 35) return 30;
+  if (lo < 45) return 40;
+  if (lo < 55) return 50;
+  return 58;
 }
 
+/**
+ * 生成简短中文自然语言图片 prompt（无约束指令模板）。
+ * 结构：{人群}手持{机型}{产品}的电商广告图，{风格}，手持特写浅景深，
+ *       底部渲染{折扣}% OFF和{CTA}文字，真实摄影，高级感，8k
+ */
 export function generateImagePrompt(user: UserRecord, config: Config): string {
-  let style = buildImageStyle(user);
+  const age = (user.age_range || '25-34').trim();
+  const gender = (user.gender || 'O').toUpperCase();
+
+  let style = STYLE_CN_BY_AGE_GENDER[`${age}|${gender}`];
+  if (!style) {
+    style =
+      gender === 'F'
+        ? '现代柔和渐变背景'
+        : gender === 'M'
+          ? '现代暗色渐变背景'
+          : '现代电商中性渐变背景';
+  }
   const override = (config.marketing.image_style || '').trim();
   if (override && override.toLowerCase() !== 'tech') style = override;
+
+  const ageNum = representativeAge(age);
+  const ethnicity = ETHNICITY_BY_LANG[(user.preferred_language || '').toLowerCase()] || '';
+  const genderWord = gender === 'F' ? '女性' : gender === 'M' ? '男性' : '';
+  const demographic = `${ageNum}岁${ethnicity}${genderWord}`;
+
+  const product = (user.product_cn || user.product_en || user.product || '手机壳').trim();
+  const device = (user.device || 'iPhone').trim();
 
   let discountPct = 10;
   const d = Number(user.discount);
   if (!Number.isNaN(d)) discountPct = Math.trunc(d);
-  const cta = (config.marketing.cta_button || 'Shop Now').trim();
-  const brand = (user.brand || 'CartBack').trim();
-  const product = (user.product_en || user.product || 'premium product').trim();
-  const device = (user.device || '').trim();
+  const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
 
-  let subjectDesc: string;
-  if (device) {
-    subjectDesc =
-      `a ${product} (a phone case) fitted on a ${device} smartphone. ` +
-      'The phone case itself is the single, dominant, sharply-focused hero subject ' +
-      'of the image — centered, large in frame, fully visible with its texture, ' +
-      'material and design details clearly readable.';
-  } else {
-    subjectDesc =
-      `a ${product} (a phone case). The phone case itself is the single, dominant, ` +
-      'sharply-focused hero subject of the image — centered, large in frame, fully ' +
-      'visible with its texture, material and design details clearly readable.';
-  }
-
-  const age = (user.age_range || '25-34').trim();
-  let ageLo = 25;
-  const am = age.match(/\s*(\d+)/);
-  if (am) ageLo = parseInt(am[1], 10);
-  const seniorUsers = ageLo >= 55;
-
-  const darkBg = ['dark', 'gunmetal', 'charcoal', 'matte black', 'black and gold'].some((w) =>
-    style.toLowerCase().includes(w),
-  );
-  const lightHint = darkBg ? 'dramatic studio lighting with rim light' : 'bright natural lighting';
-
-  let textHint: string;
-  if (seniorUsers) {
-    if (darkBg) {
-      textHint =
-        'high-contrast white text over a soft pale gradient band or translucent light strip behind each line for mature-reader legibility; keep strips thin and subtle';
-    } else {
-      textHint =
-        'high-contrast text (dark on a soft light band, or white on a soft gradient band) to ensure legibility for mature readers; keep bands thin and low-opacity';
-    }
-  } else {
-    if (darkBg) {
-      textHint =
-        'high-contrast white text placed directly on the dark blurred background with a subtle drop shadow only if needed; NO solid box, NO gradient band, NO banner strip, NO light strip behind any lettering';
-    } else {
-      textHint =
-        'high-contrast text placed directly on the blurred background with a subtle drop shadow only if needed; NO solid box, NO gradient band, NO banner strip behind any lettering';
-    }
-  }
-
-  let textArea: string;
-  if (seniorUsers) {
-    textArea =
-      'Marketing text in the lower area over a subtle, low-opacity gradient band for senior-readability legibility — keep the band thin and non-intrusive so the phone case remains the hero. ';
-  } else {
-    textArea =
-      'Marketing text sits cleanly in the lower area directly on the blurred background — NO banners, NO solid boxes, NO gradient bands, NO cards, NO strips behind any text; text floats freely with drop shadow only. ';
-  }
-
-  return (
-    '海外电商邮件营销广告图。 ' +
-    `Subject: ${subjectDesc} ` +
-    `Style: ${style}. ` +
-    'Composition: premium e-commerce marketing hero banner. CRITICAL FRAMING: ' +
-    'extreme close-up shot, the phone case is held in a hand and fills 60-70% of the frame, ' +
-    'centered in the upper area, sharply in focus. Shallow depth of field (f/1.8), ' +
-    'background heavily blurred into soft bokeh so the scene/model stays secondary and ' +
-    'never competes with the phone case. The phone case is the unmistakable hero. ' +
-    `${textArea}` +
-    'Render these English texts accurately and crisply into the image: ' +
-    `a large bold discount badge reading "${discountPct}% OFF", ` +
-    `a rounded CTA button labeled "${cta}", ` +
-    `and the brand name "${brand}". ` +
-    `Typography: clean modern sans-serif, ${textHint}, ` +
-    'perfect spelling, no gibberish, no extra or duplicated characters, no Chinese characters. ' +
-    `Lighting: ${lightHint}. ` +
-    'High quality, photorealistic, 8k.'
-  );
+  return `${demographic}手持${device}${product}的电商广告图，${style}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
 }

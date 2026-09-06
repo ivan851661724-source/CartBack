@@ -156,6 +156,10 @@ async function generateMailHtml(draft, card) {
     product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
     // 配置注入（零重复录入）
     ai_config,
+    // 公网基址：邮件内联图片 src 用 ${publicBaseUrl}/api/image/<path>，留空则退回本地路径（仅预览可用）
+    public_base_url: config.publicBaseUrl || '',
+    // 品牌统一用商家名（覆盖方案卡里 per-profile 的测试品牌）
+    shop_brand: config.shopBrand || '',
     draft: {
       id: draft.id || null,
       brand: config.shopBrand || 'CartBack',
@@ -880,6 +884,8 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.wanxKey === 'string') config.wanxKey = body.wanxKey.trim();
       if (typeof body.wanxBaseUrl === 'string') config.wanxBaseUrl = body.wanxBaseUrl.trim();
       if (typeof body.wanxModel === 'string') config.wanxModel = body.wanxModel.trim();
+      // CartBack 对外公网基址（邮件内联图片 src 用）
+      if (typeof body.publicBaseUrl === 'string') config.publicBaseUrl = body.publicBaseUrl.trim();
       // 店铺品牌 / 默认跳转
       if (typeof body.shopBrand === 'string') config.shopBrand = body.shopBrand.trim();
       if (typeof body.shopCartUrl === 'string') config.shopCartUrl = body.shopCartUrl.trim();

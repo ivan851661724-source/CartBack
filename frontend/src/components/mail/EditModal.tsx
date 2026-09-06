@@ -19,12 +19,17 @@ export default function EditModal() {
       setBody(editingDraft.body || '');
       setMsg(''); setErr(false);
 
-      // 构建预览 HTML（替换 CID 为后端图片绝对 URL）
+      // 构建预览 HTML：把图片引用改写到同源 /api/image 端点（经 Next 反代到 backend）
       let html = (editingDraft as any).html || '';
       const imgPath = (editingDraft as any).image_path || '';
       if (html && imgPath) {
-        const imgUrl = 'http://127.0.0.1:4173/api/image/' + encodeURIComponent(imgPath);
+        const imgUrl = '/api/image/' + encodeURIComponent(imgPath);
+        // 旧版 cid 内嵌 src 与 use_cid=false 的本地绝对路径 src 都改写到同源端点
         html = html.replace(/cid:hero-image/g, imgUrl);
+        const escPath = imgPath
+          .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+        if (escPath) html = html.split(escPath).join(imgUrl);
       }
       setPreviewHtml(html);
     }

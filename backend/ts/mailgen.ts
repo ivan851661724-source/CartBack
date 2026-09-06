@@ -61,6 +61,9 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
   } catch (e) {
     return { success: false, error: `构造 UserRecord 失败: ${(e as Error).message}`, warnings };
   }
+  // 品牌统一用商家名（shopBrand）：覆盖 per-profile 的测试品牌，使文案/图片/落款/折扣徽章品牌一致
+  const shopBrand = String(payload.shop_brand || '').trim();
+  if (shopBrand) user.brand = shopBrand;
 
   // 3. 文案
   const forceRegen = Boolean(payload.force_regen_copy);
@@ -119,18 +122,27 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
   }
 
   // 5. HTML
+  // 图片 src：配了 publicBaseUrl 就用公网 URL（正文内联可被邮件客户端加载），
+  // 否则退回本地绝对路径（仅预览可用，EditModal 会改写到同源 /api/image）
+  const publicBase = String(payload.public_base_url || '').trim().replace(/\/$/, '');
+  const imageUrl = publicBase && imagePath
+    ? `${publicBase}/api/image/${encodeURIComponent(imagePath)}`
+    : imagePath;
+
   const useCid = false;
   let html: string;
   try {
     html = buildEmailHtml({
       subject,
       body,
-      image_url: imagePath,
+      image_url: imageUrl,
+      image_link: user.cart_url, // 图片可点击跳转独立站产品/购物车页
       cart_url: user.cart_url,
       brand_name: user.brand,
       discount: user.discount,
       cta_text: cfg.marketing.cta_button || 'Shop Now',
       use_cid: useCid,
+      lang: user.preferred_language || user.locale, // 落款/提示按习惯语言本地化
     });
   } catch (e) {
     return {

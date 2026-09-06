@@ -45,6 +45,7 @@ const DEFAULTS = {
   shopDefaultLocale: 'en',      // 店铺主客群语种（预览/默认）；逐收件人仍按其自身 locale 本地化
   shopBrand: 'CartBack',        // 品牌名（邮件头部 / 营销图叠加 / 文案品牌位）
   shopCartUrl: 'https://cartback.demo', // 邮件 CTA 跳转默认购物车 URL
+  publicBaseUrl: '',                    // CartBack 对外公网基址（含协议），邮件内联图片 src 用：${publicBaseUrl}/api/image/<path>
   // —— 视觉 / 邮件图像 AI（复用 emailgen；未单独配时可留空，内部走 Pollinations 免费兜底）——
   visionKey: '',
   visionBaseUrl: '',

@@ -32,7 +32,29 @@ export interface BuildEmailHtmlOpts {
   discount?: Optional<number>;
   cta_text?: unknown;
   use_cid?: boolean;
+  /** 图片可点击跳转的目标 URL（产品页/购物车页）；为空则图片不可点击 */
+  image_link?: unknown;
+  /** 收件人习惯语言（preferred_language），用于本地化「点击图片下单」提示与落款 */
+  lang?: unknown;
 }
+
+// 「点击图片下单」提示 + 落款，按 preferred_language 本地化（无匹配则中文兜底）
+const PROMPT_BY_LANG: Record<string, string> = {
+  english: 'Tap the image above to pick up where you left off.',
+  spanish: 'Toca la imagen de arriba para continuar con tu pedido.',
+  german: 'Tippe auf das Bild oben, um deinen Einkauf abzuschließen.',
+  french: "Touchez l'image ci-dessus pour reprendre votre commande.",
+  italian: "Tocca l'immagine sopra per completare l'ordine.",
+  chinese: '点击上方图片，立即回到购物车完成下单。',
+};
+const SIGNATURE_BY_LANG: Record<string, string> = {
+  english: 'The {brand} Team',
+  spanish: 'El equipo de {brand}',
+  german: 'Das {brand}-Team',
+  french: "L'équipe {brand}",
+  italian: 'Il team di {brand}',
+  chinese: '{brand} 团队',
+};
 
 function discountStr(discount: Optional<number>): string {
   if (discount == null) return '';
@@ -51,8 +73,9 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
     cart_url,
     brand_name = 'CartBack',
     discount = null,
-    cta_text = 'Shop Now',
     use_cid = false,
+    image_link = '',
+    lang = '',
   } = opts;
 
   const dStr = discountStr(discount);
@@ -68,6 +91,20 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
       imgTag = '';
     }
   }
+  // 图片可点击跳转独立站产品页（正文内联 + 可点击）
+  const link = safeStr(image_link);
+  if (imgTag && link) {
+    imgTag = `<a href="${escapeHtml(link)}">${imgTag}</a>`;
+  }
+
+  // 按习惯语言本地化「点击图片下单」提示与落款
+  const langKey = (safeStr(lang).toLowerCase().trim()) || 'chinese';
+  const brandSafeForSig = escapeHtml(brand_name);
+  const promptText = PROMPT_BY_LANG[langKey] ?? PROMPT_BY_LANG.chinese;
+  const signatureText = (SIGNATURE_BY_LANG[langKey] ?? SIGNATURE_BY_LANG.chinese).replace(
+    '{brand}',
+    brandSafeForSig,
+  );
 
   const bodyHtml = escapeHtml(body)
     .replace(/\r\n/g, '\n')
@@ -75,7 +112,6 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
 
   const subjectSafe = escapeHtml(subject);
   const brandSafe = escapeHtml(brand_name);
-  const ctaSafe = escapeHtml(cta_text);
   const cartSafe = escapeHtml(cart_url);
   const copyYear = '2026';
 
@@ -97,31 +133,34 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
     '    .email-body { padding: 30px 25px; }\n' +
     '    .email-subject { font-size: 20px; font-weight: 600; color: #1a1a1a; margin-bottom: 16px; line-height: 1.4; }\n' +
     '    .email-text { font-size: 15px; color: #444444; line-height: 1.7; margin-bottom: 24px; white-space: normal; }\n' +
-    '    .cta-button { display: inline-block; background-color: #ff6b35; color: #ffffff; text-decoration: none; padding: 14px 36px; border-radius: 6px; font-size: 16px; font-weight: 600; text-align: center; margin: 16px 0; }\n' +
+    '    .email-after { padding: 0 25px 20px; }\n' +
+    '    .email-prompt { font-size: 15px; color: #ff6b35; font-weight: 600; line-height: 1.7; margin-bottom: 10px; }\n' +
+    '    .email-signature { font-size: 14px; color: #888888; line-height: 1.6; }\n' +
     '    .email-footer { background-color: #f9f9f9; padding: 20px 25px; text-align: center; border-top: 1px solid #eeeeee; }\n' +
     '    .email-footer p { font-size: 12px; color: #999999; line-height: 1.6; }\n' +
     '    .email-footer a { color: #999999; text-decoration: none; }\n' +
     '    @media (max-width: 480px) {\n' +
     '      .email-container { width: 100% !important; }\n' +
     '      .email-body { padding: 20px 16px; }\n' +
-    '      .cta-button { display: block; padding: 14px; }\n' +
+    '      .email-after { padding: 0 16px 16px; }\n' +
     '    }\n' +
     '  </style>\n' +
     '</head>\n' +
     '<body>\n' +
     '  <div class="email-container">\n' +
-    '    <div class="email-header">\n' +
-    `      <div class="brand">${brandSafe}</div>\n` +
-    '    </div>\n' +
-    '    <div class="email-hero">\n' +
-    `      ${imgTag}\n` +
-    '    </div>\n' +
+    // 主体（开头+正文）在图片之前（黑色品牌 header 已按需移除）
     '    <div class="email-body">\n' +
     `      <h2 class="email-subject">${subjectSafe}</h2>\n` +
     `      <div class="email-text">${bodyHtml}</div>\n` +
-    '      <div style="text-align: center;">\n' +
-    `        <a href="${cartSafe}" class="cta-button">${ctaSafe}</a>\n` +
-    '      </div>\n' +
+    '    </div>\n' +
+    // 图片（可点击，作为 CTA）
+    '    <div class="email-hero">\n' +
+    `      ${imgTag}\n` +
+    '    </div>\n' +
+    // 「点击图片下单」提示 + 落款 在图片之后
+    '    <div class="email-after">\n' +
+    `      <div class="email-prompt">${promptText}</div>\n` +
+    `      <div class="email-signature">${signatureText}</div>\n` +
     '    </div>\n' +
     '    <div class="email-footer">\n' +
     `      <p>&copy; ${copyYear} ${brandSafe}. All rights reserved.<br>\n` +
