@@ -16,6 +16,10 @@ data.sqlite
 node_modules/
 npm-debug.log*
 
+# —— 构建产物 / 开发产物（dist 在镜像内由 build 阶段编译产生，不取宿主机产物）——
+dist/
+output/
+
 # —— 测试（运行镜像不需要）——
 test/
 

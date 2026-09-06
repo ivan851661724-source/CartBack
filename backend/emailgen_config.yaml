@@ -1,7 +1,7 @@
 # CartBack 邮件生成子系统配置（可选 — 未配置时由 Node.js 通过 stdin 注入 ai_config 即可）
 #
 # 优先顺序：Node 注入 > 环境变量 > 本 YAML > 默认值
-# 环境变量见 emailgen/config.py（CARTBACK_DEEPSEEK_KEY / CARTBACK_WANX_KEY / …）
+# 环境变量见 ts/config.ts（CARTBACK_DEEPSEEK_KEY / CARTBACK_WANX_KEY / …）
 
 # —— AI 文案（推荐通过 Node /api/config 设置页面录入，这里只是 YAML 兜底）——
 deepseek:

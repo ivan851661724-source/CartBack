@@ -16,6 +16,10 @@ backend/.server/
 .env.*.local
 **/.env
 **/.env.local
+# 本地 AI 密钥配置（selftest 用：CARTBACK_AI_CONFIG=$(cat ...)），含活密钥绝不入库
+backend/st5_ai_config.json
+backend/*_ai_config*.json
+backend/*_ai_config*.local.json
 
 # ===== 依赖 =====
 node_modules/
