@@ -10,6 +10,7 @@ import MailView from '@/components/mail/MailView';
 import DataView from '@/components/data/DataView';
 import AudienceView from '@/components/audience/AudienceView';
 import SettingsView from '@/components/settings/SettingsView';
+import CompetitorView from '@/components/competitor/CompetitorView';
 import AudienceDrawer from '@/components/audience/AudienceDrawer';
 import ImportModal from '@/components/audience/ImportModal';
 import EditModal from '@/components/mail/EditModal';
@@ -24,6 +25,7 @@ function Shell() {
     ['mail', <MailView key="mail" />],
     ['data', <DataView key="data" />],
     ['aud', <AudienceView key="aud" />],
+    ['comp', <CompetitorView key="comp" />],
     ['set', <SettingsView key="set" />],
   ];
   return (

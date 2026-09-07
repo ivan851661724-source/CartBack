@@ -22,6 +22,7 @@ export const CHAT_PLACEHOLDER = '说清楚你想挽回谁、为啥、要什么�
 /** 邮件生命周期进度段：[草稿完成, 发送完成, 触达完成]（recovering 第三段为 ok 色） */
 export const SEG_MAP: Record<string, number[]> = {
   draft: [1, 0, 0],
+  queued: [1, 0, 0],   // 202 已入队，发送中
   sending: [1, 0, 0],
   sent: [1, 1, 0],
   recovering: [1, 1, 1],
@@ -29,12 +30,13 @@ export const SEG_MAP: Record<string, number[]> = {
   failed: [1, 0, 0],
 };
 
-/** 5 个模块 tab key → 顶栏面包屑文案 */
+/** 模块 tab key → 顶栏面包屑文案 */
 export const TAB_LABELS: Record<string, string> = {
   chat: '助手',
   mail: '邮件配置',
   data: '数据看板',
   aud: '受众',
+  comp: '竞品',
   set: '设置',
 };
 

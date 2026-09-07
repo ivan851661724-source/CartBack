@@ -15,12 +15,65 @@ const { LLMClient } = require('./lib/llm');
 const { normalizeAgentProfile } = require('./lib/context');
 const { buildConnectors } = require('./lib/storeConnector');
 const authMod = require('./lib/auth');
+// —— PRD v5 新增模块 ——
+const render = require('./lib/render');
+const variantsMod = require('./lib/variants');
+const tagsMod = require('./lib/tags');
+const benchmarkMod = require('./lib/benchmark');
+const competitorsMod = require('./lib/competitors');
+const { JobQueue } = require('./lib/queue');
+const { BreakerRegistry } = require('./lib/breaker');
+const postersMod = require('./lib/posters');
 
 let config = cfg.load();
 const store = new Store();
 store.init();
 // 店后台连接器集合（架构 §2 B1）：从配置构建；null = 未接入任何店，退化本地种子/演示
 const connectors = buildConnectors(config);
+
+// —— 熔断注册表（PRD §0.2）：llm / esp / poster 各自独立计数 ——
+const breakers = new BreakerRegistry({ threshold: config.breakerThreshold || 5, cooldownMs: config.breakerCooldownMs || 30000 });
+
+// —— G0 白名单（品牌名/专有名词，可含中文；商家在设置页维护）——
+function g0Whitelist() {
+  const base = Array.isArray(config.g0Whitelist) ? config.g0Whitelist : [];
+  const brand = config.shopBrand ? [config.shopBrand] : [];
+  return [...new Set([...brand, ...base].filter(Boolean))];
+}
+
+// —— 非en语种翻译（主对话模型统一出口；同 draft 同语言缓存复用）——
+// 说明：qwen-mt-plus 为 P2 专属接入，当前经 ModelGateway 用主模型完成 translate
+//（prompt 锁死「只输出译文」），失败回落 en 原文，G0 拦截保底。
+const translationCache = new Map();
+async function translateText(text, targetLocale) {
+  if (!config.aiKey || !text) return text;
+  const breaker = breakers.get('llm');
+  try {
+    return await breaker.exec(async () => {
+      const client = makeLlmClient();
+      const r = await client.chatStructured({
+        messages: [
+          { role: 'system', content: `You are a translation engine. Translate the user text into locale "${targetLocale}". Output ONLY the translation, no quotes, no explanation. Keep template placeholders like {{name}} and {{coupon}} exactly unchanged.` },
+          { role: 'user', content: text }
+        ],
+        temperature: 0.2,
+        maxTokens: 1024
+      });
+      const out = r && r.reply ? String(r.reply).trim() : '';
+      return out || text;
+    });
+  } catch (e) {
+    return text; // 熔断 open / 调用失败 → 回落 en 原文（PRD §4.2）
+  }
+}
+
+// —— 异步任务队列（PRD §0.5 jobs / §0.6 /api/jobs/:id）——
+const queue = new JobQueue({ store, concurrency: 2, baseDelayMs: 2000, maxRetries: 3, logger: logEvent });
+queue.register('send_draft', (j) => processSendJob(j));
+queue.register('posters', (j) => processPosterJob(j));
+queue.register('g6_purge', () => competitorsMod.g6Purge(store));
+queue.register('tag_expiry', () => applyTagExpiryWeights());
+queue.recover();
 
 function agentContextOptions() {
   return {
@@ -248,7 +301,8 @@ function makeLlmClient() {
     model: config.aiModel,
     apiKey: config.aiKey,
     contextWindowTokens: config.aiContextWindowTokens,
-    contextSafetyMargin: config.aiContextSafetyMargin
+    contextSafetyMargin: config.aiContextSafetyMargin,
+    extraBody: config.aiExtraBody || null
   });
 }
 
@@ -297,20 +351,22 @@ async function callCritic(text) {
 // —— ESP 适配器（Resend 真发 + 仿真回退） ——
 // 隐私：Batch API 每封独立 to，收件人互不可见（修复 To 群发泄露收件人列表）；
 // 送达率：≤100 封/请求分批（Resend batch 上限；单收件人走普通端点——batch 最少 2 封）。
+// ④ 渲染管线消费：messages = renderCampaign 产物 [{email, subject, body, html?}]，逐收件人内容可不同。
 const RESEND_BATCH_SIZE = 100;
-async function fetchResend(draft, recipients, c) {
+async function fetchResend(draft, messages, c) {
   const base = String(c.espApiUrl || 'https://api.resend.com/emails').replace(/\/emails?\/?$/, '');
   const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.espKey };
   const message = r => {
     const msg = {
       from: c.espFrom,
       to: [r.email],
-      subject: draft.subject,
-      text: draft.body
+      subject: r.subject,
+      text: r.body
     };
-    // 如果有 HTML 邮件，使用 HTML（带 CID 图片）
-    if (draft.html) {
-      msg.html = draft.html;
+    // HTML 邮件仅对生成过 html 的变体附上（mailgen html 为标准档直出；其余档用纯文本，避免跨变体串内容）
+    if (r.html) msg.html = r.html;
+    else if (!r.tier || r.tier === 'standard') {
+      if (draft.html && !String(draft.html).startsWith('ERROR')) msg.html = draft.html;
     }
     return msg;
   };
@@ -320,17 +376,17 @@ async function fetchResend(draft, recipients, c) {
     return resp.json();
   };
   const ids = [];
-  if (recipients.length === 1) {
-    const r = await post(base + '/emails', message(recipients[0]));
+  if (messages.length === 1) {
+    const r = await post(base + '/emails', message(messages[0]));
     if (r && r.id) ids.push(r.id);
-    return { id: ids.join(','), batches: 1 };
+    return { id: ids.join(','), ids, batches: 1 };
   }
-  for (let i = 0; i < recipients.length; i += RESEND_BATCH_SIZE) {
-    const batch = recipients.slice(i, i + RESEND_BATCH_SIZE);
+  for (let i = 0; i < messages.length; i += RESEND_BATCH_SIZE) {
+    const batch = messages.slice(i, i + RESEND_BATCH_SIZE);
     const r = await post(base + '/emails/batch', batch.map(message));   // 整批原子成败 → 失败由 sendDraft 整体重试
     if (Array.isArray(r)) for (const m of r) if (m && m.id) ids.push(m.id);
   }
-  return { id: ids.join(','), batches: ids.length };
+  return { id: ids.join(','), ids, batches: ids.length };
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -351,55 +407,249 @@ function resolveRecipients(draft) {
   return matchAudienceByDesc(draft.audience).slice(0, 200);
 }
 
+// —— ② 受众圈选条件（确认卡展示用）：需求关键词 → 结构化过滤条件 + 命中概览 ——
+function audienceConditions(desc) {
+  const d = (desc || '').toLowerCase();
+  const filters = [];
+  if (/弃购|未付/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '弃购/下单未付' });
+  else if (/加购/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '加购未付' });
+  else if (/浏览/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '浏览未买' });
+  else if (/老客|沉睡|流失/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '老客/沉睡/流失' });
+  filters.push({ field: 'email', op: 'valid', value: '真实邮箱' });
+  filters.push({ field: 'email_status', op: 'not_equals', value: 'email_invalid' });
+  filters.push({ field: 'window', op: 'within_days', value: 30 });
+  const matched = matchAudienceByDesc(desc);
+  return {
+    desc: desc || '全部受众',
+    filters,
+    matchedCount: matched.length,
+    estGmv: +matched.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2)
+  };
+}
+
+// —— ③ 72h 频控：同收件人同活动（受众口径）72h 内不重发（PRD §3.4）——
+const FREQ_WINDOW_MS = 72 * 3600 * 1000;
+function frequencyFilter(recipients, draft) {
+  const cutoff = Date.now() - FREQ_WINDOW_MS;
+  const campaignKey = (draft.audience || '').toLowerCase();
+  const emailedEvents = store.getEvents().filter(e => e.type === 'emailed' && e.ts >= cutoff);
+  // 已发过的收件人（72h 内任意草稿）；同活动（同受众口径）的才拦截，跨活动放行
+  const draftsById = new Map(store.getDrafts().map(d => [d.id, d]));
+  const recentlyEmailed = new Set();
+  for (const e of emailedEvents) {
+    const d = draftsById.get(e.draft_id);
+    if (d && (d.audience || '').toLowerCase() === campaignKey) recentlyEmailed.add(e.audience_id);
+  }
+  const allow = recipients.filter(r => !recentlyEmailed.has(r.id));
+  return { allow, skipped: recipients.length - allow.length };
+}
+
+// —— ③ 发送前预检 + 失败分类（PRD §3.4：域名验证/邮箱格式/限额，失败给分类人话提示）——
+function precheckSend(draft, { dryRun = false } = {}) {
+  const problems = [];
+  if (config.mode === 'real') {
+    if (!config.espKey) problems.push({ type: 'esp_not_configured', human: '还没有配置发信密钥（ESP），去设置页填好再发。' });
+    if (!config.espFrom) problems.push({ type: 'from_missing', human: '还没有设置发件人地址，去设置页填「发件邮箱」。' });
+    else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(config.espFrom)) problems.push({ type: 'from_invalid', human: '发件人地址格式不对，请检查设置页的「发件邮箱」。' });
+    // 域名验证（MVP：与店铺域名/公开基址一致性提示；Resend 域名验证状态经预检调用探测）
+    else if (config.publicBaseUrl) {
+      const fromDomain = config.espFrom.split('@')[1] || '';
+      const siteDomain = (config.publicBaseUrl.replace(/^https?:\/\//, '').split(':')[0] || '').replace(/^www\./, '');
+      if (siteDomain && fromDomain && !siteDomain.endsWith(fromDomain)) {
+        problems.push({ type: 'domain_mismatch', human: `发件域名（${fromDomain}）和站点域名（${siteDomain}）不一致，邮件容易被判垃圾，建议用同域名发件箱。` });
+      }
+    }
+  }
+  const all = resolveRecipients(draft);
+  const valid = all.filter(r => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid');
+  if (!valid.length) problems.push({ type: 'no_recipients', human: '没有可发送的收件人（邮箱无效或都被退信剔除了）。' });
+  const freq = frequencyFilter(valid, draft);
+  if (!freq.allow.length) problems.push({ type: 'frequency_capped', human: '这批人 72 小时内已经发过同一场活动，先别打扰了。' });
+  if (config.sendRateLimitPerMin > 0 && freq.allow.length > config.sendRateLimitPerMin * 5) {
+    problems.push({ type: 'quota_warning', human: `本批 ${freq.allow.length} 人超过当前发送限额建议值，系统会自动分批限速。` });
+  }
+  const blocking = problems.filter(p => !['quota_warning', 'domain_mismatch'].includes(p.type));
+  return {
+    ok: blocking.length === 0,
+    problems,
+    recipients: valid.length,
+    skippedByFrequency: freq.skipped,
+    sendable: freq.allow.length
+  };
+}
+
+// ④ 渲染管线消费方：发送前逐收件人渲染（变体选择→语种→模板展开→G0 拦截）
+async function renderForDraft(draft, recipients) {
+  const draftFacts = {
+    id: draft.id, coupon: draft.coupon, discount: draft.discount,
+    // 注意：product 绝不回退到 audience（商家侧中文描述）——进消费者邮件的事实必须无中文，否则 G0 全拦
+    product: draft.product || '', offer: draft.offer || '',
+    brand: config.shopBrand || 'CartBack'
+  };
+  const variants = (Array.isArray(draft.variants) && draft.variants.length)
+    ? draft.variants
+    : variantsMod.standardVariants({ brand: config.shopBrand, discount: draft.discount, coupon: draft.coupon, product: draftFacts.product });
+  return render.renderCampaign({
+    draft: draftFacts,
+    variants,
+    recipients,
+    tagsOf: (r) => store.getAudienceTags(r.id),
+    whitelist: g0Whitelist(),
+    translateFn: translateText,
+    cache: translationCache
+  });
+}
+
 // 仿真归因事件（演示模式驱动看板；真实模式仅在有回执时写入）
 function scheduleSimEvents(draft, recipients) {
   const now = Date.now();
   recipients.forEach((r, i) => {
     const base = now + i * 1200;
+    store.addEvent({ type: 'emailed', draft_id: draft.id, audience_id: r.id, ts: base });
     if (Math.random() < 0.72) store.addEvent({ type: 'open', draft_id: draft.id, audience_id: r.id, ts: base });
     if (Math.random() < 0.34) store.addEvent({ type: 'click', draft_id: draft.id, audience_id: r.id, ts: base + 3000 });
     if (Math.random() < 0.14) {
       const value = +(r.abandoned_value * (0.1 + Math.random() * 0.2)).toFixed(2);
       store.addEvent({ type: 'convert', draft_id: draft.id, audience_id: r.id, value, ts: base + 9000 });
+      tagsMod.weightForConversion(store, r.id);   // ⑤ 标签反哺（演示模式同步演示加权）
     }
   });
 }
 
+// ⑤ 窗口期满未转化 → 标签 w −= 0.5（队列周期 job 调用）
+function applyTagExpiryWeights() {
+  const windowMs = ((config.attributionWindowDays) || 7) * 86400000;
+  const now = Date.now();
+  let touched = 0;
+  for (const d of store.getDrafts()) {
+    if (!['sent', 'recovering', 'timeout'].includes(d.status) || !d.sent_at) continue;
+    if (now - d.sent_at <= windowMs) continue;
+    const evs = store.getEvents({ draft_id: d.id });
+    const converts = new Set(evs.filter(e => e.type === 'convert').map(e => e.audience_id));
+    const expiryKey = 'tag_expiry_done:' + d.id;
+    if (store.getMeta(expiryKey)) continue;
+    for (const e of evs) {
+      if (e.type !== 'emailed' || !e.audience_id || converts.has(e.audience_id)) continue;
+      touched += tagsMod.weightForExpiry(store, e.audience_id);
+    }
+    store.setMeta(expiryKey, '1');
+  }
+  if (touched) logEvent('tag_expiry_weight', { touched });
+  return { touched };
+}
+
 async function sendDraft(draft) {
-  const recipients = resolveRecipients(draft);
-  metricsInc('send_volume', recipients.length);
+  const all = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid');
+  // 预检不通过（无人可发）直接失败并分类提示
+  const check = precheckSend(draft);
+  if (!check.ok) {
+    draft.status = 'failed';
+    draft.fail_reason = (check.problems.find(p => p.type !== 'quota_warning') || {}).human || 'precheck_failed';
+    store.upsertDraft(draft);
+    metricsInc('send_fail');
+    logEvent('send_fail', { draft_id: draft.id, reason: draft.fail_reason });
+    return { error: draft.fail_reason, problems: check.problems, recipients: 0, cost: 0, estGmv: draft.estGmv };
+  }
+  const { allow, skipped } = frequencyFilter(all, draft);
+  metricsInc('send_volume', allow.length);
   const real = (config.mode === 'real' && config.espKey && config.espFrom);
   draft.status = 'sending'; store.upsertDraft(draft);
   if (!real) {
     draft.status = 'sent';
     draft.sent_at = Date.now();
     draft.esp_message_id = 'sim_' + uid();
-    draft.cost = +(recipients.length * 0.02).toFixed(2); // 仿真混合成本
+    draft.cost = +(allow.length * 0.02).toFixed(2); // 仿真混合成本
+    draft.skipped_by_frequency = skipped;
+    draft.g0_blocked = [];   // 仿真档不做 G0 拦截（内容为商家确认过的原稿）
     store.upsertDraft(draft);
-    scheduleSimEvents(draft, recipients);
+    scheduleSimEvents(draft, allow);
+    benchmarkMod.rebuildBenchmark(store);
     metricsInc('send_sim');
-    logEvent('send', { real: false, recipients: recipients.length, cost: draft.cost });
-    return { real: false, recipients: recipients.length, cost: draft.cost, estGmv: draft.estGmv };   // UI v4 整改 4：补 cost/estGmv
+    logEvent('send', { real: false, recipients: allow.length, skipped_by_frequency: skipped, cost: draft.cost });
+    return { real: false, recipients: allow.length, skippedByFrequency: skipped, cost: draft.cost, estGmv: draft.estGmv };
+  }
+  // ④ 渲染管线（真实模式）：变体→语种→模板展开→G0
+  const rendered = await renderForDraft(draft, allow);
+  const sendable = rendered.messages.filter(m => !m.blocked);
+  const blockedList = rendered.messages.filter(m => m.blocked);
+  draft.g0_blocked = blockedList.map(m => ({ email: m.email, hits: m.g0Hits }));
+  if (blockedList.length) {
+    metricsInc('g0_blocked', blockedList.length);
+    logEvent('g0_intercept', { draft_id: draft.id, blocked: blockedList.length });
+  }
+  if (!sendable.length) {
+    // 全部被 G0 拦截 → 置失败并给出人话修复指引（绝不把「0 人已发送」标成成功）
+    draft.status = 'failed';
+    draft.fail_reason = 'G0 语种护栏拦截了全部邮件（检出非白名单中文）。请到设置页把品牌名/专有名词加入白名单，或修正文案后重试。';
+    store.upsertDraft(draft);
+    metricsInc('send_fail');
+    logEvent('send_fail', { draft_id: draft.id, reason: 'g0_blocked_all' });
+    return { error: draft.fail_reason, g0Blocked: blockedList.length, recipients: 0, cost: 0, estGmv: draft.estGmv };
   }
   let attempt = 0, lastErr;
   while (attempt < 3) {
     attempt++;
     try {
-      const r = await fetchResend(draft, recipients, config);
+      const r = await breakers.get('esp').exec(() => fetchResend(draft, sendable, config));
       draft.status = 'sent';
       draft.sent_at = Date.now();
       draft.esp_message_id = r.id || ('real_' + uid());
-      draft.cost = +(recipients.length * 0.0004).toFixed(4);
+      draft.cost = +(sendable.length * 0.0004).toFixed(4);
+      draft.skipped_by_frequency = skipped;
+      // 记录 per-recipient 发送事实（频控 / 标签反哺窗口 / ESP 回执映射的依据）
+      const espIds = Array.isArray(r.ids) ? r.ids : [];
+      for (let i = 0; i < sendable.length; i++) {
+        store.addEvent({
+          type: 'emailed', draft_id: draft.id,
+          audience_id: (sendable[i].recipient || {}).id || null,
+          esp_id: espIds[i] || null, ts: Date.now()
+        });
+      }
       store.upsertDraft(draft);
+      benchmarkMod.rebuildBenchmark(store);
       metricsInc('send_real');
-      logEvent('send', { real: true, recipients: recipients.length, attempt, cost: draft.cost });
-      return { real: true, id: draft.esp_message_id, recipients: recipients.length, cost: draft.cost, estGmv: draft.estGmv };   // UI v4 整改 4
+      logEvent('send', { real: true, recipients: sendable.length, skipped_by_frequency: skipped, g0_blocked: blockedList.length, attempt, cost: draft.cost });
+      return { real: true, id: draft.esp_message_id, recipients: sendable.length, skippedByFrequency: skipped, g0Blocked: blockedList.length, cost: draft.cost, estGmv: draft.estGmv };
     } catch (e) { lastErr = e; await sleep(1000 * attempt); }
   }
-  draft.status = 'failed'; store.upsertDraft(draft);
+  draft.status = 'failed';
+  draft.fail_reason = String(lastErr && lastErr.message || lastErr);
+  store.upsertDraft(draft);
   metricsInc('send_fail');
-  logEvent('send_fail', { recipients: recipients.length, error: String(lastErr && lastErr.message || lastErr) });
-  return { real: true, error: String(lastErr && lastErr.message || lastErr), recipients: recipients.length, cost: draft.cost || 0, estGmv: draft.estGmv };   // UI v4 整改 4
+  logEvent('send_fail', { recipients: sendable.length, error: draft.fail_reason });
+  return { real: true, error: draft.fail_reason, recipients: (sendable || []).length, cost: draft.cost || 0, estGmv: draft.estGmv };
+}
+
+// —— 队列 handler：send_draft（POST /api/draft/:id/send 202 入队后的实际执行体）——
+async function processSendJob({ job, payload }) {
+  const draft = store.getDraft(payload.draftId);
+  if (!draft) return { skipped: 'draft not found' };
+  if (['sent', 'sending'].includes(draft.status)) return { skipped: 'already ' + draft.status };
+  const r = await sendDraft(draft);
+  return r;
+}
+
+// G6：策略卡对外形态——原文（raw_email）绝不出库，只出结构卡
+function publicCard(c) {
+  const { raw_email, ...rest } = c;
+  return { ...rest, raw_retained: Boolean(raw_email) };
+}
+
+const POSTERS_DIR = require('path').join(__dirname, 'output', 'posters');
+// —— 队列 handler：posters（wanx 优先，失败占位；经熔断快速失败降级）——
+async function processPosterJob({ job, payload }) {
+  const draft = store.getDraft(payload.draftId);
+  if (!draft) return { skipped: 'draft not found' };
+  const t2i = async (prompt) => breakers.get('poster').exec(() => postersMod.wanxText2Image({
+    prompt, apiKey: config.visionKey, baseUrl: config.visionBaseUrl || 'https://dashscope.aliyuncs.com/api/v1',
+    model: config.visionModel || 'wan2.6-t2i'
+  }));
+  const r = await postersMod.generatePosters({ draft, config, outDir: POSTERS_DIR, t2iFn: config.visionKey ? t2i : null });
+  draft.posters = r.posters;
+  store.upsertDraft(draft);
+  metricsAdd({ posters_generated: r.posters.filter(p => p.method === 'wanx').length, posters_placeholder: r.posters.filter(p => p.method === 'placeholder').length });
+  logEvent('posters_done', { draft_id: draft.id, methods: r.posters.map(p => p.method) });
+  return { posters: r.posters.map(p => ({ method: p.method, url: p.url })) };
 }
 
 // —— CSV 导入解析（RFC 4180：支持 "引用字段" 内含逗号/换行/转义引号 ""） ——
@@ -471,7 +721,7 @@ const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin;
   if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
     res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,x-local-token');
   }
   if (method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
@@ -481,7 +731,7 @@ const server = http.createServer(async (req, res) => {
 
   // 鉴权：bootstrap 与 /api/auth/* 豁免；业务端点解析会话 cookie，回退 x-local-token（老前端零破坏，整改 1a）
   // /api/attribution 为真实 ESP webhook 回执，豁免全局鉴权、端点内用 webhook secret 校验（整改 2）
-  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution' && !pathname.startsWith('/api/image/')) {
+  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution' && !pathname.startsWith('/api/image/') && pathname !== '/api/health') {
     const who = authMod.resolveUser(req, store, config);
     if (!who) return sendJson(res, 403, { error: 'unauthorized' });
     req.userId = who.userId;
@@ -720,14 +970,35 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // —— 生成草稿（从方案卡） ——
+    // —— 生成草稿（从方案卡）：× 消费者标签分布 → 变体；检索套路卡/基准注入参考 ——
     if (pathname === '/api/draft' && method === 'POST') {
       const body = await readBody(req);
       const card = body.planCard;
       if (!card) return sendJson(res, 400, { error: 'missing planCard' });
-      // 预估可挽回 GMV
+      // 预估可挽回 GMV + 受众圈选条件（确认卡展示）
       const matched = matchAudienceByDesc(card.audience);
       const estGmv = +matched.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
+      const conditions = audienceConditions(card.audience);
+      // ⑥ 竞品套路卡检索（G6：只出结构卡，raw_email 绝不外发）+ 基准库 Top-3
+      const refCards = competitorsMod.topCards(store, req.userId, { audience: card.audience, discount: card.discount, k: 3 });
+      const benchLib = benchmarkMod.getBenchmark(store);
+      const benchHits = benchmarkMod.queryBenchmark(benchLib, { audience: card.audience, discount: card.discount, k: 3 });
+      // ④ 变体生成：需求（act.needs）× 标签分布 → 一次调用出三档；AI 离线全落标准三档
+      const act = body.actId ? store.getAct(body.actId) : null;
+      const needs = (act && act.needs) || {};
+      const tagDist = tagsMod.tagDistribution(store, matched);
+      const draftFacts = {
+        brand: config.shopBrand || 'CartBack', discount: card.discount, coupon: card.coupon,
+        product: card.product || '', offer: card.offer || ''
+      };
+      const llmJSON = config.aiKey ? async (messages) => {
+        const r = await breakers.get('llm').exec(() => makeLlmClient().chatStructured({ messages, maxTokens: 2048 }));
+        return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
+      } : null;
+      const strategyHints = refCards.map(c => ({ theme_formula: c.theme_formula, angle: c.angle, discount_range: c.discount_range, timing: c.timing }));
+      const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints });
+      if (v.warning) logEvent('variants_fallback', { warning: v.warning });
+      metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
       const draft = {
         id: uid('dr_'), act_id: body.actId || null,
         subject: card.subject, body: card.body, audience: card.audience,
@@ -736,11 +1007,14 @@ const server = http.createServer(async (req, res) => {
         status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
         user_id: req.userId || null,
         locale: card.locale || null,
-        html: '', image_path: ''  // 待异步生成
+        html: '', image_path: '',   // 待异步生成
+        variants: v.variants, variants_provider: v.provider,
+        strategy_card_ids: refCards.map(c => c.id),
+        audience_conditions: conditions
       };
       store.upsertDraft(draft);
 
-      // 同步生成 HTML 邮件 + 营销图片
+      // 同步生成 HTML 邮件 + 营销图片（标准档直出 html；变体在发送环节逐收件人渲染）
       try {
         await generateMailHtml(draft, card);
         draft.html = draft.html || 'FALLBACK_HTML';
@@ -752,7 +1026,20 @@ const server = http.createServer(async (req, res) => {
         store.upsertDraft(draft);
       }
 
-      return sendJson(res, 200, { draft, estGmv, matchedCount: matched.length });
+      // 海报异步生成入队（确认弹出时生成一次；失败占位+重试，不阻塞发送）
+      queue.enqueue({ type: 'posters', payload: { draftId: draft.id }, dedupeKey: 'posters:' + draft.id });
+
+      return sendJson(res, 200, {
+        draft, estGmv, matchedCount: matched.length,
+        audience_conditions: conditions,
+        tag_distribution: tagDist,
+        references: {
+          strategy_cards: refCards.map(c => ({ id: c.id, competitor_name: c.competitor_name, theme_formula: c.theme_formula, angle: c.angle })),
+          strategy_cards_count: refCards.length,
+          benchmark: benchHits
+        },
+        variants_provider: v.provider
+      });
     }
 
     if (pathname === '/api/drafts' && method === 'GET') {
@@ -769,25 +1056,48 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { drafts: items, stats });
     }
 
-    // —— 发送（真实 / 仿真，含重试与 FSM） ——
+    // —— 发送（PRD §0.6：改 202 入队；预检 + 频控 + 幂等键 send:{userId}:{draftId}）——
     const sm = pathname.match(/^\/api\/draft\/([\w-]+)\/send$/);
     if (sm && method === 'POST') {
       const draft = store.getDraft(sm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
+      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
       try {
         const body = await readBody(req);
         if (body && typeof body.subject === 'string' && body.subject.trim()) draft.subject = body.subject.trim();
         if (body && typeof body.body === 'string' && body.body.trim()) draft.body = body.body.trim();
+        store.upsertDraft(draft);
       } catch (e) { /* 无 body 或非 JSON：维持存储原稿 */ }
-      if (config.mode === 'real' && !config.espKey) {
-        return sendJson(res, 400, { error: '真实模式未配置 ESP 密钥，已禁用真实发送' });
+      if (['sent', 'sending', 'queued'].includes(draft.status)) {
+        return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
+      }
+      // ③ 发送前预检：ESP 配置 / 发件域名 / 收件人有效性 / 72h 频控，失败分类人话提示
+      const check = precheckSend(draft);
+      if (!check.ok) {
+        const first = check.problems.find(p => !['quota_warning', 'domain_mismatch'].includes(p.type));
+        logEvent('send_precheck_fail', { draft_id: draft.id, problems: check.problems });
+        return sendJson(res, 400, { error: first ? first.human : '发送预检未通过', problems: check.problems });
       }
       if (!rateLimitOk()) {
         return sendJson(res, 429, { error: '发送频率超限（每分钟上限 ' + (config.sendRateLimitPerMin || 20) + '），请稍后再试' });
       }
-      const r = await sendDraft(draft);
-      return sendJson(res, 200, { result: r, draft });
+      // 202 入队（幂等键防重复点击）；实际发送由队列异步执行，前端经 GET /api/jobs/:id 轮询
+      const { job, deduped } = queue.enqueue({
+        type: 'send_draft',
+        payload: { draftId: draft.id },
+        dedupeKey: 'send:' + (req.userId || 'anon') + ':' + draft.id
+      });
+      if (!deduped) {
+        draft.status = 'queued';
+        store.upsertDraft(draft);
+      }
+      logEvent('send_queued', { draft_id: draft.id, job_id: job.id, deduped, sendable: check.sendable, skipped_by_frequency: check.skippedByFrequency });
+      return sendJson(res, 202, {
+        job_id: job.id, queued: true, deduped,
+        check: { recipients: check.recipients, skippedByFrequency: check.skippedByFrequency, sendable: check.sendable, warnings: check.problems.filter(p => ['quota_warning', 'domain_mismatch'].includes(p.type)) },
+        draft
+      });
     }
 
     // —— 受众 ——
@@ -799,6 +1109,7 @@ const server = http.createServer(async (req, res) => {
       const list = parseCsv(body.csv || '');
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
       store.addAudience(list);
+      tagsMod.scoreAudience(store, list);   // ① 同步时打分（source=scoring；manual 不被覆盖）
       return sendJson(res, 200, { imported: list.length, audience: store.getAudience() });
     }
 
@@ -816,6 +1127,7 @@ const server = http.createServer(async (req, res) => {
         .filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.email || ''));
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
       store.addAudience(list);
+      tagsMod.scoreAudience(store, list);   // ① 店铺事件同步打分
       logEvent('store_sync', { imported: list.length });
       return sendJson(res, 200, { imported: list.length, audience: store.getAudience().length });
     }
@@ -860,6 +1172,7 @@ const server = http.createServer(async (req, res) => {
       const events = await connectors.listBehaviorEvents({}).catch(() => []);
       const audience = recipients.map(r => recipientToAudience(r, events));
       store.replaceAudience(audience);
+      tagsMod.scoreAudience(store, audience);   // ① 拉取同步时打分（PRD §0.3：同步时 scoring）
       // 行为事件落库（供后续归因/KPI）
       for (const e of events) store.addEvent({ type: e.type, audience_id: (audience.find(a => a.email === e.email) || {}).id || null, value: e.value, ts: e.ts });
       logEvent('store_pull', { recipients: audience.length, events: events.length });
@@ -890,6 +1203,11 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.shopBrand === 'string') config.shopBrand = body.shopBrand.trim();
       if (typeof body.shopCartUrl === 'string') config.shopCartUrl = body.shopCartUrl.trim();
       if (typeof body.shopDefaultLocale === 'string') config.shopDefaultLocale = body.shopDefaultLocale.trim();
+      // G0 白名单（品牌名/专有名词，含中文品牌名；白名单内不拦截）
+      if (Array.isArray(body.g0Whitelist)) {
+        config.g0Whitelist = body.g0Whitelist
+          .map(s => String(s).trim()).filter(Boolean).filter(s => s.length <= 40).slice(0, 50);
+      }
       if (Number.isFinite(body.aiContextWindowTokens)) config.aiContextWindowTokens = Math.max(2048, Math.min(1000000, body.aiContextWindowTokens | 0));
       if (Number.isFinite(body.aiMaxOutputTokens)) config.aiMaxOutputTokens = Math.max(64, Math.min(32768, body.aiMaxOutputTokens | 0));
       if (Number.isFinite(body.aiContextSafetyMargin)) config.aiContextSafetyMargin = Math.max(128, Math.min(65536, body.aiContextSafetyMargin | 0));
@@ -897,6 +1215,11 @@ const server = http.createServer(async (req, res) => {
       if (Number.isFinite(body.aiSummaryTriggerRatio)) config.aiSummaryTriggerRatio = Math.max(0.25, Math.min(0.95, body.aiSummaryTriggerRatio));
       if (Number.isFinite(body.aiMaxCallsPerTurn)) config.aiMaxCallsPerTurn = Math.max(1, Math.min(8, body.aiMaxCallsPerTurn | 0));
       if (typeof body.aiCriticMode === 'string' && ['always', 'suspicious', 'off'].includes(body.aiCriticMode)) config.aiCriticMode = body.aiCriticMode;
+      // 供应商专属请求参数（对象透传给 LLMClient.extraBody；null 清空）
+      if (body.aiExtraBody === null) config.aiExtraBody = null;
+      else if (body.aiExtraBody && typeof body.aiExtraBody === 'object' && !Array.isArray(body.aiExtraBody)) {
+        config.aiExtraBody = Object.fromEntries(Object.entries(body.aiExtraBody).slice(0, 16).map(([k, v]) => [String(k).slice(0, 64), v]));
+      }
       if (Number.isFinite(body.sendRateLimitPerMin)) config.sendRateLimitPerMin = Math.max(0, Math.min(1000, body.sendRateLimitPerMin | 0));
       if (Number.isFinite(body.attributionWindowDays)) config.attributionWindowDays = Math.max(1, Math.min(60, body.attributionWindowDays | 0));
       if (Number.isFinite(body.emailTimeoutDays)) config.emailTimeoutDays = Math.max(1, Math.min(30, body.emailTimeoutDays | 0));
@@ -905,24 +1228,110 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { status: cfg.status(config) });
     }
 
-    // —— 归因回执（webhook，真实模式 ESP 回调；支持 open/click + 优惠码核销订单 convert；整改 2：webhook secret 校验）——
+    // —— ⑤ 归因回执 webhook（PRD §5；豁免全局鉴权，x-webhook-secret 校验）——
+    // 三种形态：
+    //  A. Resend 回执：{type:'email.opened'|'email.clicked'|'email.bounced'|'email.delivered', data:{message_id, email?}}
+    //     message_id → emailed 事件(esp_id) 反查 draft+audience；bounced → email_status 剔除
+    //  B. Shopify 订单：{source:'shopify', event:'orders/create'|'orders/update', order:{id, email, total_price, discount_codes, financial_status}}
+    //     discount_codes 命中本系统优惠码 → convert（order_id 幂等）；update 退款 → GMV 扣减
+    //  C. 旧版简易格式（保留兼容）：{type:'open'|'click'|'convert', draft_id?, coupon?, audience_id?, value?}
+    const RESEND_EVENT_MAP = {
+      'email.sent': null, 'email.delivered': 'delivered', 'email.opened': 'open',
+      'email.clicked': 'click', 'email.bounced': 'bounced', 'email.complained': 'complaint'
+    };
+    function resolveByEspId(messageId) {
+      if (!messageId) return null;
+      const ev = store.getEvents().find(e => e.type === 'emailed' && e.esp_id === messageId);
+      return ev || null;
+    }
+    function resolveAudienceByEmail(email) {
+      if (!email) return null;
+      const target = String(email).toLowerCase();
+      return store.getAudience().find(a => String(a.email || '').toLowerCase() === target) || null;
+    }
     if (pathname === '/api/attribution' && method === 'POST') {
       const whSecret = req.headers['x-webhook-secret'];
       if (!config.webhookSecret || !authMod.secretEqual(whSecret, config.webhookSecret)) {
         return sendJson(res, 401, { error: 'bad webhook secret' });
       }
       const body = await readBody(req);
+      const rawType = String(body.type || body.event || '');
+
+      // —— A. Resend 回执 ——
+      if (rawType.startsWith('email.')) {
+        const mapped = RESEND_EVENT_MAP[rawType] !== undefined ? RESEND_EVENT_MAP[rawType] : 'open';
+        if (!mapped) return sendJson(res, 200, { ok: true, ignored: rawType });
+        const data = body.data || {};
+        const emailed = resolveByEspId(data.message_id || data.messageId);
+        const draftId = emailed ? emailed.draft_id : (body.draft_id || null);
+        const audienceId = emailed ? emailed.audience_id : ((resolveAudienceByEmail(data.email_address || data.email) || {}).id || body.audience_id || null);
+        if (mapped === 'bounced' && audienceId) {
+          store.suppressAudienceEmail(audienceId);   // 卫生：自动剔除后续名单，保护域名信誉
+          metricsInc('attr_bounced');
+          logEvent('attribution_bounced', { draft_id: draftId, audience_id: audienceId });
+        }
+        store.addEvent({ type: mapped, draft_id: draftId, audience_id: audienceId, value: body.value || 0, esp_id: data.message_id || null });
+        metricsInc('attr_' + mapped);
+        logEvent('attribution', { source: 'resend', type: mapped, draft_id: draftId, audience_id: audienceId });
+        return sendJson(res, 200, { ok: true });
+      }
+
+      // —— B. Shopify 订单（优惠码核销 / 退款扣减）——
+      const isShopify = body.source === 'shopify' || /^orders\/(create|update)$/.test(rawType) || (body.order && (body.order.discount_codes || body.order.financial_status));
+      if (isShopify) {
+        const order = body.order || body;
+        const orderId = String(order.id || order.order_id || body.order_id || '');
+        const codes = (order.discount_codes || order.discountCodes || []).map(c => String(c).trim().toLowerCase());
+        const financial = String(order.financial_status || body.financial_status || '').toLowerCase();
+
+        // 退款扣减：orders/update（financial_status=refunded / 显式 refund）→ 命中 convert 事件清零
+        if (/orders\/update/.test(rawType) || financial === 'refunded' || body.refund) {
+          const conv = store.findEventByOrderId(orderId);
+          if (conv && conv.type === 'convert' && !conv.refunded) {
+            store.updateEvent(conv.id, { value: 0, refunded: 1 });
+            metricsInc('attr_refund');
+            logEvent('attribution_refund', { order_id: orderId, event_id: conv.id, deducted: conv.value });
+            return sendJson(res, 200, { ok: true, refunded: true, deducted: conv.value });
+          }
+          return sendJson(res, 200, { ok: true, refunded: false, reason: conv ? 'already_refunded' : 'no_convert_found' });
+        }
+
+        // 优惠码核销 → convert（不限窗口；order_id 幂等，宁漏勿错不跨码归因）
+        if (!codes.length) return sendJson(res, 200, { ok: true, ignored: 'no discount codes' });
+        const drafts = store.getDrafts();
+        const hitDraft = drafts.find(d => d.coupon && codes.includes(String(d.coupon).toLowerCase()));
+        if (!hitDraft) return sendJson(res, 200, { ok: true, ignored: 'code not ours' });
+        if (orderId && store.findEventByOrderId(orderId)) {
+          return sendJson(res, 200, { ok: true, deduped: true });   // 同单只归因一次
+        }
+        const aud = resolveAudienceByEmail(order.email);
+        const value = parseFloat(order.total_price) || 0;
+        store.addEvent({ type: 'convert', draft_id: hitDraft.id, audience_id: (aud || {}).id || null, value, order_id: orderId || null });
+        if (aud) tagsMod.weightForConversion(store, aud.id);   // ⑤ 标签加权：convert → w += 2
+        benchmarkMod.rebuildBenchmark(store);
+        metricsInc('attr_convert');
+        logEvent('attribution', { source: 'shopify', type: 'convert', draft_id: hitDraft.id, order_id: orderId, value, audience_id: (aud || {}).id || null });
+        return sendJson(res, 200, { ok: true, attributed: true });
+      }
+
+      // —— C. 旧版简易格式（兼容演示模式/既有测试）——
       let draftId = body.draft_id || (body.data && body.data.draft_id);
-      const type = body.type || (body.event === 'open' ? 'open' : body.event === 'click' ? 'click' : body.event === 'convert' ? 'convert' : 'open');
+      const type = ['open', 'click', 'convert', 'delivered', 'bounced'].includes(body.type) ? body.type
+        : (body.event === 'open' ? 'open' : body.event === 'click' ? 'click' : body.event === 'convert' ? 'convert' : 'open');
       // 优惠码核销归因：按 coupon 反查 draft（订单回传）
       if (!draftId && body.coupon) {
         const d = store.getDrafts().find(x => x.coupon === body.coupon);
         if (d) draftId = d.id;
       }
-      store.addEvent({ type, draft_id: draftId, audience_id: body.audience_id || null, value: body.value || 0 });
+      if (type === 'convert' && body.order_id && store.findEventByOrderId(String(body.order_id))) {
+        return sendJson(res, 200, { ok: true, deduped: true });
+      }
+      const ev = store.addEvent({ type, draft_id: draftId, audience_id: body.audience_id || null, value: body.value || 0, order_id: body.order_id ? String(body.order_id) : null });
+      if (type === 'convert' && body.audience_id) tagsMod.weightForConversion(store, body.audience_id);
+      if (type === 'bounced' && body.audience_id) store.suppressAudienceEmail(body.audience_id);
       metricsInc(type === 'convert' ? 'attr_convert' : 'attr_' + type);
-      logEvent('attribution', { type, draft_id: draftId, value: body.value || 0 });
-      return sendJson(res, 200, { ok: true });
+      logEvent('attribution', { source: 'legacy', type, draft_id: draftId, value: body.value || 0 });
+      return sendJson(res, 200, { ok: true, event_id: ev.id });
     }
 
     // —— 监控指标（架构 §7 B6）——
@@ -940,6 +1349,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/reset' && method === 'POST') {
       if (req.authMode === 'local') {
         store.reset();
+        tagsMod.scoreAudience(store, store.getAudience());   // 重置后重打种子标签
       } else {
         store._write('acts', store._read('acts').filter(a => !a.user_id || a.user_id !== req.userId));
         store._write('drafts', store._read('drafts').filter(d => !d.user_id || d.user_id !== req.userId));
@@ -953,6 +1363,184 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         acts: store.getActsByUser(req.userId), drafts: store.getDraftsByUser(req.userId),
         audience: store.getAudience(), events: store.getEvents(), kpis: store.getKpis(config.mode, req.userId)
+      });
+    }
+
+    // —— PRD v5 新增端点 ——
+    // 健康检查（底座）：含存储后端 / 队列 / 熔断快照，供部署编排与异常条
+    if (pathname === '/api/health' && method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true, uptime_s: Math.floor(process.uptime()),
+        mode: config.mode,
+        aiConfigured: Boolean(config.aiKey), espConfigured: Boolean(config.espKey),
+        storage: store.b ? store.b.kind : 'unknown',
+        queue: queue.stats(),
+        breakers: breakers.snapshotAll()
+      });
+    }
+
+    // 异步任务轮询（前端 202 入队后查进度）
+    const jm = pathname.match(/^\/api\/jobs\/([\w-]+)$/);
+    if (jm && method === 'GET') {
+      const job = store.getJob(jm[1]);
+      if (!job) return sendJson(res, 404, { error: 'job not found' });
+      return sendJson(res, 200, {
+        id: job.id, type: job.type, status: job.status, retry_count: job.retry_count,
+        result: job.result || null, error: job.error || null,
+        created_at: job.created_at, updated_at: job.updated_at
+      });
+    }
+
+    // 海报生成入队（换一批/重试也走这里；dedupe: posters:{draftId}）
+    if (pathname === '/api/posters' && method === 'POST') {
+      const body = await readBody(req);
+      const draft = store.getDraft(body.draftId);
+      if (!draft) return sendJson(res, 404, { error: 'draft not found' });
+      const { job } = queue.enqueue({ type: 'posters', payload: { draftId: draft.id, regenerate: Boolean(body.regenerate) }, dedupeKey: 'posters:' + draft.id + ':' + (body.regenerate ? Date.now() : 'base') });
+      return sendJson(res, 202, { job_id: job.id, queued: true });
+    }
+
+    // 受众圈选条件预览（确认卡展示：条件 + 命中人数 + 预估 GMV）
+    if (pathname === '/api/audience/preview' && method === 'POST') {
+      const body = await readBody(req);
+      return sendJson(res, 200, audienceConditions(String(body.audience || '').slice(0, 200)));
+    }
+
+    // 消费者标签读取 / 手动维护（manual 来源不被 scoring/attribution 覆盖）
+    const tm = pathname.match(/^\/api\/audience\/([\w-]+)\/tags$/);
+    if (tm && method === 'GET') {
+      return sendJson(res, 200, { audience_id: tm[1], tags: store.getAudienceTags(tm[1]) });
+    }
+    if (tm && method === 'PUT') {
+      const body = await readBody(req);
+      const aud = store.getAudience().find(a => a.id === tm[1]);
+      if (!aud) return sendJson(res, 404, { error: 'audience not found' });
+      const list = Array.isArray(body.tags) ? body.tags.slice(0, 20) : [];
+      for (const t of list) {
+        if (!t || !['price_sensitivity', 'intent', 'category_like'].includes(t.tag_type)) continue;
+        store.upsertAudienceTag({
+          audience_id: tm[1], tag_type: t.tag_type,
+          tag_value: String(t.tag_value || '').slice(0, 40),
+          weight: Math.max(0, Math.min(10, Number(t.weight) || 5)),
+          source: 'manual'
+        });
+      }
+      logEvent('tags_manual', { audience_id: tm[1], count: list.length });
+      return sendJson(res, 200, { audience_id: tm[1], tags: store.getAudienceTags(tm[1]) });
+    }
+
+    // 标签效果聚合（数据页「标签效果」区块：Top5 + 样本数）
+    if (pathname === '/api/tags/effect' && method === 'GET') {
+      return sendJson(res, 200, { effect: tagsMod.tagEffect(store, { minSample: 1 }).slice(0, 10) });
+    }
+
+    // —— ⑥ 竞品雷达：源管理（user_id 隔离）——
+    if (pathname === '/api/competitors' && method === 'GET') {
+      const sources = store.listCompetitorSources(req.userId);
+      return sendJson(res, 200, {
+        sources,
+        collection_address: competitorsMod.collectionAddress(req.userId, config.espFrom),
+        cards_count: store.listStrategyCards(req.userId).length
+      });
+    }
+    if (pathname === '/api/competitors' && method === 'POST') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim().slice(0, 60);
+      if (!name) return sendJson(res, 400, { error: '竞品名称不能为空' });
+      const s = store.upsertCompetitorSource({
+        user_id: req.userId, name,
+        mailbox: String(body.mailbox || '').trim().slice(0, 120) || null,
+        status: 'active', last_collected_at: null
+      });
+      logEvent('competitor_source_add', { source_id: s.id, userId: req.userId });
+      return sendJson(res, 200, { source: s, sources: store.listCompetitorSources(req.userId) });
+    }
+    const cdm = pathname.match(/^\/api\/competitors\/([\w-]+)$/);
+    if (cdm && method === 'DELETE') {
+      store.deleteCompetitorSource(cdm[1], req.userId);
+      return sendJson(res, 200, { ok: true, sources: store.listCompetitorSources(req.userId) });
+    }
+
+    // —— ⑥ 收集入口：手动粘贴 MVP（session 鉴权）+ 转发制 inbound（webhook secret）二合一 ——
+    // 鉴权：登录会话；或 x-webhook-secret / ?token=（转发邮箱 inbound webhook 无会话）
+    if (pathname === '/api/competitors/inbound' && method === 'POST') {
+      const inboundAuth = authMod.secretEqual(req.headers['x-webhook-secret'], config.webhookSecret)
+        || authMod.secretEqual(parsed.query.token, config.webhookSecret);
+      let userId = req.userId || null;
+      if (!userId && !inboundAuth) return sendJson(res, 403, { error: 'unauthorized' });
+      if (!userId && inboundAuth) userId = String(parsed.query.uid || 'inbound');
+      const body = await readBody(req);
+      const rawEmail = String(body.raw_email || body.raw || '').slice(0, 50000);
+      const competitorName = String(body.competitor_name || body.name || '').trim().slice(0, 60);
+      if (!rawEmail) return sendJson(res, 400, { error: '缺少邮件原文（raw_email）' });
+      // 预过滤（规则）：退订链接 AND 促销词 → 营销邮件；订单/物流通知 → 丢弃
+      const pf = competitorsMod.prefilter(rawEmail);
+      metricsInc(pf.keep ? 'competitor_kept' : 'competitor_dropped');
+      if (!pf.keep) {
+        logEvent('competitor_prefilter_drop', { reason: pf.reason });
+        return sendJson(res, 200, { kept: false, reason: pf.reason, message: '已丢弃：' + pf.reason + '（仅收营销邮件）' });
+      }
+      // 拆解（LLM 一次调用；AI 离线降级启发式；G6：学结构不抄文案）
+      const llmJSON = config.aiKey ? async (messages) => {
+        const r = await breakers.get('llm').exec(() => makeLlmClient().chatStructured({ messages, maxTokens: 1024 }));
+        return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
+      } : null;
+      const { card, provider, warning } = await competitorsMod.extractStrategyCard({ rawEmail, competitorName, llmJSON });
+      if (warning) logEvent('competitor_extract_fallback', { warning });
+      const saved = store.upsertStrategyCard({
+        user_id: userId,
+        competitor_name: card.competitor_name || competitorName || null,
+        theme_formula: card.theme_formula || null,
+        angle: card.angle || null,
+        discount_range: card.discount_range || null,
+        timing: card.timing || null,
+        frequency: card.frequency || null,
+        visual_style: card.visual_style || null,
+        keywords: competitorsMod.cardKeywords(card),
+        raw_email: rawEmail,          // G6：仅存 30 天，g6_purge job 清除（保留卡片）
+        collected_at: Date.now(),
+        embedding_id: null            // P2：text-embedding-v4 检索
+      });
+      // 关联源最近收集时间
+      const src = store.listCompetitorSources(userId).find(s => s.name === (saved.competitor_name || competitorName));
+      if (src) store.upsertCompetitorSource({ ...src, last_collected_at: Date.now() });
+      metricsInc('strategy_cards_created');
+      logEvent('strategy_card_created', { card_id: saved.id, provider, userId });
+      return sendJson(res, 200, { kept: true, card: publicCard(saved), provider });
+    }
+
+    // —— ⑥ 策略卡列表（G6：原文不出库——任何响应都不含 raw_email）——
+    if (pathname === '/api/strategy-cards' && method === 'GET') {
+      return sendJson(res, 200, { cards: store.listStrategyCards(req.userId).map(publicCard) });
+    }
+    const scm = pathname.match(/^\/api\/strategy-cards\/([\w-]+)$/);
+    if (scm && method === 'DELETE') {
+      store.deleteStrategyCard(scm[1], req.userId);
+      return sendJson(res, 200, { ok: true, cards: store.listStrategyCards(req.userId).map(publicCard) });
+    }
+
+    // —— ④ 按人群/语言预览（邮件编辑器：变体样例 + 语言分布 + G0 拦截名单）——
+    const pm = pathname.match(/^\/api\/draft\/([\w-]+)\/preview$/);
+    if (pm && method === 'GET') {
+      const draft = store.getDraft(pm[1]);
+      if (!draft) return sendJson(res, 404, { error: 'draft not found' });
+      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      const recipients = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid');
+      const rendered = await renderForDraft(draft, recipients);
+      const tiers = render.TIERS.map(tier => {
+        const same = rendered.messages.filter(m => m.tier === tier);
+        const m = same[0];
+        return m
+          ? { tier, count: same.length, subject: m.subject, body: m.body, locale: m.locale, sample: (m.recipient || {}).name || '', blocked: m.blocked }
+          : { tier, count: 0 };
+      });
+      return sendJson(res, 200, {
+        draft_id: draft.id,
+        audience_conditions: draft.audience_conditions || audienceConditions(draft.audience),
+        tiers,                                   // 「按人群预览」：每档一条样例（{{}} 已按样例收件人展开）
+        languages: render.languageDistribution(recipients),   // 「语言预览」：分布
+        g0_blocked: draft.g0_blocked || [],      // 被拦截邮件（标红 + 原因）
+        stats: rendered.stats
       });
     }
 
@@ -983,4 +1571,12 @@ server.listen(PORT, () => {
   console.log(`CartBack v3 本地服务已启动: http://localhost:${PORT}`);
   console.log(`模式: ${config.mode} | AI: ${config.aiKey ? '已配置' : '未配置(桩模型)'} | ESP: ${config.espKey ? '已配置' : '仿真'}`);
   console.log(`本地令牌: ${config.localToken}`);
+
+  // —— 周期任务（PRD §0.5 jobs / G6 / ⑤ 标签窗口反哺）——
+  // 种子受众补打标签（首次启动 / 老库升级）
+  if (store.getAllAudienceTags().length === 0) tagsMod.scoreAudience(store, store.getAudience());
+  // G6：竞品原文 30 天清除（每小时检查一次）
+  setInterval(() => queue.enqueue({ type: 'g6_purge', payload: {} }), 3600 * 1000);
+  // ⑤ 窗口期满未转化 → 标签 −0.5（每 6 小时检查一次）
+  setInterval(() => queue.enqueue({ type: 'tag_expiry', payload: {} }), 6 * 3600 * 1000);
 });

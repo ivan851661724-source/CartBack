@@ -9,12 +9,19 @@ const path = require('path');
 const { Store } = require('../lib/store');
 const config = require('../lib/config');
 
+// Windows 下 SQLite WAL 文件句柄释放略滞后于 close()，立即 rmSync 会偶发 EPERM：
+// 用 maxRetries 让 fs.rm 自带重试（对 EPERM/EBUSY 生效）
+const RM_OPTS = { recursive: true, force: true, maxRetries: 10, retryDelay: 100 };
+
 test('act context state round-trips through the configured store backend', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-store-context-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const store = new Store({ dbFile: path.join(dir, 'context.sqlite') });
   store.init();
-  t.after(() => store.b && store.b.close());
+  // 单钩子保证顺序：先关 SQLite 句柄再删目录（Windows 下打开中的文件不可删）
+  t.after(() => {
+    try { if (store.b) store.b.close(); } catch (e) { /* 已关闭 */ }
+    fs.rmSync(dir, RM_OPTS);
+  });
 
   store.upsertAct({
     id: 'act_context', stage: 'S1', needs: { audience: '加购未付客户' },
@@ -43,10 +50,12 @@ test('agent context defaults are explicit and safe', () => {
 
 test('agent profiles are isolated by user and can be cleared', (t) => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-store-profile-'));
-  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const store = new Store({ dbFile: path.join(dir, 'profile.sqlite') });
   store.init();
-  t.after(() => store.b && store.b.close());
+  t.after(() => {
+    try { if (store.b) store.b.close(); } catch (e) { /* 已关闭 */ }
+    fs.rmSync(dir, RM_OPTS);
+  });
 
   store.upsertAgentProfile('user_a', { product: '跑鞋' });
   store.upsertAgentProfile('user_b', { product: '手表' });

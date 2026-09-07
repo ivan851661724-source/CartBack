@@ -12,21 +12,51 @@ export default function SettingsView() {
   const [espKey, setEspKey] = useState('');
   const [espFrom, setEspFrom] = useState('');
   const [aiModel, setAiModel] = useState('deepseek-chat');
+  const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [msg, setMsg] = useState('');
+  // G0 白名单（品牌名/专有名词，含中文品牌名；白名单内不拦截）
+  const [g0Terms, setG0Terms] = useState<string[]>([]);
+  const [g0Input, setG0Input] = useState('');
 
   useEffect(() => {
     setAiKey(s.aiConfigured ? '••••••••' : '');
     setEspKey(s.espConfigured ? '••••••••' : '');
     setEspFrom(s.espFrom || '');
     setAiModel(s.aiModel || 'deepseek-chat');
+    setAiBaseUrl(s.aiBaseUrl || '');
+    setG0Terms(Array.isArray(s.g0Whitelist) ? s.g0Whitelist : []);
   }, [status]);
 
   const onSave = async () => {
-    await saveConfig({ aiKey, espKey, espFrom, aiModel });
+    await saveConfig({ aiKey, espKey, espFrom, aiModel, aiBaseUrl });
     setMsg('已保存（密钥仅存于服务端，不回传前端）');
   };
 
   const configStatus = `AI：${s.aiConfigured ? '已配置' : '未配置（离线桩模型）'} · ESP：${s.espConfigured ? '已配置（真实发送）' : '仿真发送'} · 发件域：${s.espFrom || '—'} · 模型：${s.aiModel || 'deepseek-chat'}`;
+
+  // —— G0 白名单维护：增删术语后经 /api/config 保存（merchant 品牌名默认已含）——
+  const addG0Term = async () => {
+    const t = g0Input.trim();
+    if (!t) return;
+    if (g0Terms.includes(t)) { setG0Input(''); return; }
+    const next = [...g0Terms, t].slice(0, 50);
+    setG0Terms(next);
+    setG0Input('');
+    await saveWhitelist(next);
+  };
+  const removeG0Term = async (term: string) => {
+    const next = g0Terms.filter((x) => x !== term);
+    setG0Terms(next);
+    await saveWhitelist(next);
+  };
+  const saveWhitelist = async (terms: string[]) => {
+    try {
+      const { api } = await import('@/lib/api');
+      await api('/api/config', { method: 'POST', body: JSON.stringify({ g0Whitelist: terms }) });
+      setMsg('白名单已更新');
+      setTimeout(() => setMsg(''), 2000);
+    } catch { setMsg('白名单保存失败'); }
+  };
 
   return (
     <div className="view-body">
@@ -45,6 +75,15 @@ export default function SettingsView() {
               <input type="text" placeholder="deepseek-chat" style={{ maxWidth: 200 }} value={aiModel} onChange={(e) => setAiModel(e.target.value)} />
               <button className="btn ghost sm" onClick={onSave}>保存</button>
             </div>
+            <div className="row">
+              <input
+                type="text"
+                placeholder="接口基地址（OpenAI 兼容，如 Token Plan 专属地址）"
+                value={aiBaseUrl}
+                onChange={(e) => setAiBaseUrl(e.target.value)}
+              />
+            </div>
+            <div className="s-desc">专属 Key 必须与专属基地址配套（如阿里 Token Plan 走通用 dashscope 地址不抵扣套餐）；模型示例：deepseek-v4-flash / qwen3.7-plus / glm-5.2。</div>
           </div>
         </div>
 
@@ -84,6 +123,34 @@ export default function SettingsView() {
               </div>
             </div>
             {s.mode === 'real' && <div className="mode-warn show">切换到真实模式后，看板只显示真实归因数据；ESP 未配置前「确认发送」仅生成草稿。</div>}
+          </div>
+        </div>
+
+        <div className="setup-card glass-card">
+          <div className="s-no">5</div>
+          <div className="s-body">
+            <div className="s-head"><h3>中文白名单（G0 语种护栏）</h3><Tag kind="default">{g0Terms.length} 个词条</Tag></div>
+            <div className="s-desc">发往消费者的邮件默认零中文；品牌名 / 专有名词加进白名单后不拦截（店铺品牌名已自动包含）。</div>
+            <div className="row">
+              <input
+                placeholder="如：老王家的锅"
+                value={g0Input}
+                onChange={(e) => setG0Input(e.target.value)}
+                style={{ maxWidth: 220 }}
+                onKeyDown={(e) => { if (e.key === 'Enter') addG0Term(); }}
+              />
+              <button className="btn ghost sm" onClick={addG0Term}>添加</button>
+              {msg && <span className="msg-ok">{msg}</span>}
+            </div>
+            {g0Terms.length > 0 && (
+              <div className="row" style={{ flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+                {g0Terms.map((t) => (
+                  <button key={t} className="btn ghost sm" onClick={() => removeG0Term(t)} title="点击移除">
+                    {t} ×
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

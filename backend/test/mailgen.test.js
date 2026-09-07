@@ -84,7 +84,8 @@ test('mailgen: 空 subject/body + skip_image → fallback_template + skip', asyn
     const draft = body.draft;
     assert.ok(draft, '应返回 draft');
     assert.ok(draft.html && draft.html.startsWith('<!DOCTYPE html>'), 'html 应以 DOCTYPE 开头');
-    assert.ok(draft.html.includes('SmokeBrand'), 'html 应包含品牌名');
+    // 品牌统一：shopBrand（默认 CartBack）覆盖方案卡里的 per-profile 测试品牌
+    assert.ok(draft.html.includes('CartBack'), 'html 应包含统一后的商家品牌名');
     assert.equal(draft.mailgen_meta.copy_provider, 'fallback_template');
     assert.equal(draft.mailgen_meta.image_method, 'skip');
     // skip_image 时 mailgen 返回空，/api/draft 兜底写入 FALLBACK_IMAGE 哨兵（迁移前既有行为）

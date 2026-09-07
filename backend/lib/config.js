@@ -26,12 +26,17 @@ const DEFAULTS = {
   aiKey: '',                    // 仅服务端持有
   // Agent 上下文预算：按 token 管理，不再按固定消息数硬截断
   aiContextWindowTokens: 32768,
-  aiMaxOutputTokens: 512,
+  // 1024 起：thinking 系模型（deepseek-v4-flash 等）的思考 token 计入 completion 预算，
+  // 512 会把 JSON envelope 拦腰截断 → 结构化解析失败、残渣透传给用户
+  aiMaxOutputTokens: 1024,
   aiContextSafetyMargin: 1024,
   aiRecentTurns: 24,
   aiSummaryTriggerRatio: 0.72,
   aiMaxCallsPerTurn: 3,
   aiCriticMode: 'suspicious',   // 'always' | 'suspicious' | 'off'
+  // 供应商专属参数透传（如 Token Plan thinking 系模型的 {"enable_thinking": false}：
+  // 思考 token 计入输出预算且把 JSON envelope 挤截断，关掉后 JSON 合规 3/10 → 6/6、延迟减半）
+  aiExtraBody: null,
   espProvider: 'resend',
   espApiUrl: 'https://api.resend.com/emails',
   espKey: '',                   // 仅服务端持有
@@ -55,7 +60,11 @@ const DEFAULTS = {
   wanxBaseUrl: '',
   wanxModel: '',
   shopify: { shopDomain: '', apiVersion: '2024-04', accessToken: '' }, // Shopify 自定义应用 Admin Token
-  stores: []                    // 多个独立站：[{ type:'rest', baseUrl, apiKey, fieldMap }]
+  stores: [],                   // 多个独立站：[{ type:'rest', baseUrl, apiKey, fieldMap }]
+  // —— PRD v5 新增 ——
+  g0Whitelist: [],              // G0 白名单：品牌名/专有名词（可含中文），设置页维护，白名单内不拦截
+  breakerThreshold: 5,          // 熔断：连续失败 N 次进入 open
+  breakerCooldownMs: 30000      // 熔断：open 冷却时长（ms）
 };
 
 function ensureDir() {
@@ -102,6 +111,7 @@ function status(cfg) {
     espFrom: cfg.espFrom ? cfg.espFrom.replace(/(.{2}).*(@.*)/, '$1***$2') : '',
     aiProvider: cfg.aiProvider,
     aiModel: cfg.aiModel || '',          // 回显给前端设置页（P1-3：避免刷新后模型名丢失）
+    aiBaseUrl: cfg.aiBaseUrl || '',      // 非敏感（基地址非密钥），设置页回显便于核对专属基地址配套
     aiContextWindowTokens: cfg.aiContextWindowTokens,
     aiMaxOutputTokens: cfg.aiMaxOutputTokens,
     aiRecentTurns: cfg.aiRecentTurns,
@@ -111,6 +121,7 @@ function status(cfg) {
     emailTimeoutDays: cfg.emailTimeoutDays,
     sendRateLimitPerMin: cfg.sendRateLimitPerMin,
     shopDefaultLocale: cfg.shopDefaultLocale || 'en',
+    g0Whitelist: Array.isArray(cfg.g0Whitelist) ? cfg.g0Whitelist : [],   // 设置页回显白名单（非敏感）
     storeConfigured,          // 是否已接入任意店后台（不暴露任何密钥/域名）
     storeTypes: storeConfigured
       ? ([

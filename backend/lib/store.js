@@ -28,12 +28,42 @@ const SCHEMA = {
   audience: {
     id: 'TEXT', name: 'TEXT', email: 'TEXT', intent: 'TEXT', risk: 'TEXT',
     price: 'TEXT', score: 'REAL', abandoned_value: 'REAL', source: 'TEXT', created_at: 'INTEGER',
-    locale: 'TEXT', country: 'TEXT'   // UI v4 整改 3：收件人语种/国家（邮件本地化依据，真实源 storeConnector 已带）
-    // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策：audience/events 保持全局）
+    locale: 'TEXT', country: 'TEXT',   // UI v4 整改 3：收件人语种/国家（邮件本地化依据，真实源 storeConnector 已带）
+    email_status: 'TEXT',              // ⑤ bounced → 'email_invalid' 自动剔除后续名单（保护域名信誉）
+    at_risk_at: 'INTEGER'              // ① 进入流失风险的时间（intent 时效分档 / 紧迫度倒计时依据）
+    // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
   },
   events: {
-    id: 'TEXT', type: 'TEXT', draft_id: 'TEXT', audience_id: 'TEXT', value: 'REAL', ts: 'INTEGER'
+    id: 'TEXT', type: 'TEXT', draft_id: 'TEXT', audience_id: 'TEXT', value: 'REAL', ts: 'INTEGER',
+    order_id: 'TEXT',        // ⑤ 订单归因幂等键（Shopify order id；同单只归因一次）
+    refunded: 'INTEGER',     // ⑤ orders/update 退款标记：1 = 已扣减，防重复扣
+    esp_id: 'TEXT'           // ⑤ Resend message_id → 收件人映射（回执定位 / bounced 剔除）
     // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
+  },
+  // —— PRD v5 新增 4 表（§0.5）——
+  audience_tags: {
+    // 消费者标签（飞轮资产）；写入来源只有 scoring / attribution / manual，铁律 1：对话绝不写
+    id: 'TEXT', audience_id: 'TEXT', tag_type: 'TEXT', tag_value: 'TEXT',
+    weight: 'REAL', source: 'TEXT', updated_at: 'INTEGER'
+  },
+  strategy_cards: {
+    // ⑥ 竞品策略卡：学结构不抄文案；raw_email 原文仅存 30 天（G6 purge job 清除，保留卡片）
+    id: 'TEXT', user_id: 'TEXT', competitor_name: 'TEXT',
+    theme_formula: 'TEXT', angle: 'TEXT', discount_range: 'TEXT',
+    timing: 'TEXT', frequency: 'TEXT', visual_style: 'JSON',
+    embedding_id: 'TEXT', keywords: 'JSON',
+    raw_email: 'TEXT', collected_at: 'INTEGER', created_at: 'INTEGER'
+  },
+  competitor_sources: {
+    // ⑥ 竞品源管理：转发制收集地址 / 手动粘贴来源
+    id: 'TEXT', user_id: 'TEXT', name: 'TEXT', mailbox: 'TEXT',
+    status: 'TEXT', last_collected_at: 'INTEGER', created_at: 'INTEGER'
+  },
+  jobs: {
+    // 异步任务持久化（队列兜底可见性；执行态在内存驱动，重启后 pending 任务可续跑/标记失败）
+    id: 'TEXT', type: 'TEXT', payload: 'JSON', status: 'TEXT',
+    dedupe_key: 'TEXT', retry_count: 'INTEGER', max_retries: 'INTEGER',
+    result: 'JSON', error: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER'
   },
   agent_profiles: {
     user_id: 'TEXT', profile: 'JSON', updated_at: 'INTEGER'
@@ -270,6 +300,161 @@ class Store {
     if (filter && filter.draft_id) rows = rows.filter(r => r.draft_id === filter.draft_id);
     return rows;
   }
+  findEventByOrderId(orderId) {
+    if (!orderId) return null;
+    return this._read('events').find(e => e.order_id === orderId) || null;
+  }
+  updateEvent(id, patch) {
+    const rows = this._read('events');
+    const ev = rows.find(e => e.id === id);
+    if (!ev) return null;
+    Object.assign(ev, patch, { id: ev.id });
+    this._write('events', rows); return ev;
+  }
+
+  // —— audience_tags（PRD §0.5；铁律 1：source 只有 scoring/attribution/manual，对话不写）——
+  /** 同一 (audience_id, tag_type, tag_value) 唯一；manual 来源不被 scoring/attribution 覆盖 */
+  upsertAudienceTag({ audience_id, tag_type, tag_value, weight, source }) {
+    if (!audience_id || !tag_type) return null;
+    const rows = this._read('audience_tags');
+    const w = Math.max(0, Math.min(10, Number(weight) || 0));
+    // 铁律 1：manual 是该 tag_type 的权威值——机器来源（scoring/attribution）不得另起新值行覆盖
+    if (source !== 'manual') {
+      const manualSameType = rows.find(t =>
+        t.audience_id === audience_id && t.tag_type === tag_type && t.source === 'manual');
+      if (manualSameType) return manualSameType;
+    }
+    // manual 写入 = 商家手动改值：同 tag_type 的机器行让位（manual 改后不再被覆盖，机器行也无意义）
+    if (source === 'manual') {
+      const kept = rows.filter(t => !(t.audience_id === audience_id && t.tag_type === tag_type && t.source !== 'manual'));
+      rows.length = 0;
+      rows.push(...kept);
+    }
+    const existing = rows.find(t =>
+      t.audience_id === audience_id && t.tag_type === tag_type && t.tag_value === (tag_value || ''));
+    if (existing) {
+      if (existing.source === 'manual' && source !== 'manual') return existing; // manual 不被覆盖
+      existing.weight = source === existing.source
+        ? Math.max(0, Math.min(10, Math.max(existing.weight, w)))   // 同源取高
+        : w;
+      existing.source = source;
+      existing.updated_at = Date.now();
+      this._write('audience_tags', rows);
+      return existing;
+    }
+    const row = {
+      id: uid('tag_'), audience_id, tag_type, tag_value: tag_value || '',
+      weight: w, source: ['scoring', 'attribution', 'manual'].includes(source) ? source : 'scoring',
+      updated_at: Date.now()
+    };
+    rows.push(row); this._write('audience_tags', rows); return row;
+  }
+  getAudienceTags(audienceId) {
+    return this._read('audience_tags').filter(t => t.audience_id === audienceId);
+  }
+  getAllAudienceTags() { return this._read('audience_tags'); }
+  /** 标签加权（⑤：convert → 全部标签 w += 2；窗口期满未转化 → w −= 0.5；截断 [0,10]；manual 不动） */
+  weightAudienceTags(audienceId, delta) {
+    const rows = this._read('audience_tags');
+    let touched = 0;
+    for (const t of rows) {
+      if (t.audience_id !== audienceId || t.source === 'manual') continue;
+      t.weight = Math.max(0, Math.min(10, +(t.weight + delta).toFixed(2)));
+      t.source = 'attribution';
+      t.updated_at = Date.now();
+      touched++;
+    }
+    if (touched) this._write('audience_tags', rows);
+    return touched;
+  }
+  deleteAudienceTags(audienceId) {
+    this._write('audience_tags', this._read('audience_tags').filter(t => t.audience_id !== audienceId));
+  }
+
+  // —— ⑤ bounced 剔除（保护域名信誉）——
+  suppressAudienceEmail(audienceId) {
+    const rows = this._read('audience');
+    const a = rows.find(x => x.id === audienceId);
+    if (!a) return null;
+    a.email_status = 'email_invalid';
+    this._write('audience', rows); return a;
+  }
+
+  // —— strategy_cards（⑥；user_id 隔离）——
+  listStrategyCards(userId) {
+    return this._read('strategy_cards')
+      .filter(c => c.user_id === userId)
+      .sort((a, b) => b.created_at - a.created_at);
+  }
+  upsertStrategyCard(c) {
+    c.id = c.id || uid('sc_');
+    c.created_at = c.created_at || Date.now();
+    const rows = this._read('strategy_cards').filter(x => x.id !== c.id);
+    rows.push(c); this._write('strategy_cards', rows); return c;
+  }
+  getStrategyCard(id) { return this._read('strategy_cards').find(c => c.id === id) || null; }
+  deleteStrategyCard(id, userId) {
+    this._write('strategy_cards', this._read('strategy_cards').filter(c => !(c.id === id && c.user_id === userId)));
+  }
+  /** G6：原文仅存 30 天——到期的 raw_email 清空（保留卡片本体），返回清除数量 */
+  purgeExpiredRawEmails(maxAgeMs = 30 * 86400000) {
+    const rows = this._read('strategy_cards');
+    const cutoff = Date.now() - maxAgeMs;
+    let n = 0;
+    for (const c of rows) {
+      if (c.raw_email && (c.collected_at || c.created_at) < cutoff) { c.raw_email = null; n++; }
+    }
+    if (n) this._write('strategy_cards', rows);
+    return n;
+  }
+
+  // —— competitor_sources（⑥；user_id 隔离）——
+  listCompetitorSources(userId) {
+    return this._read('competitor_sources')
+      .filter(s => s.user_id === userId)
+      .sort((a, b) => b.created_at - a.created_at);
+  }
+  upsertCompetitorSource(s) {
+    s.id = s.id || uid('cs_');
+    s.created_at = s.created_at || Date.now();
+    const rows = this._read('competitor_sources').filter(x => x.id !== s.id);
+    rows.push(s); this._write('competitor_sources', rows); return s;
+  }
+  getCompetitorSource(id) { return this._read('competitor_sources').find(s => s.id === id) || null; }
+  deleteCompetitorSource(id, userId) {
+    this._write('competitor_sources', this._read('competitor_sources').filter(s => !(s.id === id && s.user_id === userId)));
+  }
+
+  // —— jobs（异步任务持久化；执行由 lib/queue 驱动）——
+  /** dedupe_key 命中 pending/running 的同型任务时直接复用（幂等入队） */
+  createJob(j) {
+    j.id = j.id || uid('job_');
+    j.status = j.status || 'pending';
+    j.retry_count = j.retry_count || 0;
+    j.created_at = j.created_at || Date.now();
+    j.updated_at = Date.now();
+    if (j.dedupe_key) {
+      const dup = this._read('jobs').find(x =>
+        x.dedupe_key === j.dedupe_key && ['pending', 'running'].includes(x.status));
+      if (dup) return { job: dup, deduped: true };
+    }
+    const rows = this._read('jobs');
+    rows.push(j);
+    // 只保留最近 500 条已完成任务，防表无限膨胀
+    const done = rows.filter(x => ['done', 'failed'].includes(x.status)).sort((a, b) => b.created_at - a.created_at);
+    const keep = new Set(done.slice(0, 500).map(x => x.id));
+    this._write('jobs', rows.filter(x => !['done', 'failed'].includes(x.status) || keep.has(x.id)));
+    return { job: j, deduped: false };
+  }
+  getJob(id) { return this._read('jobs').find(j => j.id === id) || null; }
+  updateJob(id, patch) {
+    const rows = this._read('jobs');
+    const j = rows.find(x => x.id === id);
+    if (!j) return null;
+    Object.assign(j, patch, { id: j.id, updated_at: Date.now() });
+    this._write('jobs', rows); return j;
+  }
+  listPendingJobs() { return this._read('jobs').filter(j => j.status === 'pending'); }
 
   // —— meta ——
   getMeta(key) { const r = this._read('meta').find(m => m.key === key); return r ? r.value : null; }

@@ -14,7 +14,7 @@ import type {
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
 
-export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'set';
+export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'comp' | 'set';
 export type PlanShown = 'confirm' | 'plan' | 'sent' | null;
 
 interface ToastState { msg: string; shown: boolean; }
@@ -64,7 +64,7 @@ interface AppContextValue extends AppState {
   newConversation: () => Promise<void>;   // 多会话 #2：新建会话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
-  saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string }) => Promise<void>;
+  saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string }) => Promise<void>;
   resetData: () => Promise<void>;
   doImport: (csv: string) => Promise<boolean>;
   authSubmit: (email: string, password: string, name: string) => Promise<boolean>;
@@ -298,12 +298,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [loadState, toast_]);
 
   // —— 保存配置 ——
-  const saveConfig = useCallback(async (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string }) => {
-    const payload = {
+  const saveConfig = useCallback(async (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string }) => {
+    const payload: Record<string, string> = {
       aiKey: body.aiKey.startsWith('•') ? '' : body.aiKey,
       espKey: body.espKey.startsWith('•') ? '' : body.espKey,
       espFrom: body.espFrom, aiModel: body.aiModel,
     };
+    if (typeof body.aiBaseUrl === 'string') payload.aiBaseUrl = body.aiBaseUrl;
     const r = await api<{ status: Status }>('/api/config', { method: 'POST', body: JSON.stringify(payload) });
     patch({ status: r.status });
     toast_('配置已保存（密钥仅存于服务端，不回传前端）');
@@ -364,41 +365,70 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
   }, [state.acts, patch]);
 
-  // —— 方案卡「确认发送」→ 生成草稿 + 发送 + 进对话流 sent banner ——
+  // —— 异步任务轮询（发送 202 入队后；GET /api/jobs/:id）——
+  const pollJob = useCallback(async (jobId: string, timeoutMs = 120000): Promise<{ ok: boolean; result?: any; error?: string }> => {
+    const started = Date.now();
+    while (Date.now() - started < timeoutMs) {
+      try {
+        const j = await api<{ status: string; result?: any; error?: string }>(`/api/jobs/${jobId}`);
+        if (j.status === 'done') return { ok: true, result: j.result };
+        if (j.status === 'failed') return { ok: false, error: j.error || '任务执行失败' };
+      } catch { /* 网络抖动继续轮询 */ }
+      await new Promise(r => setTimeout(r, 900));
+    }
+    return { ok: false, error: '任务超时，请稍后在邮件页查看状态' };
+  }, []);
+
+  // —— 方案卡「确认发送」→ 生成草稿（含变体+海报入队）→ 202 发送入队 → 轮询结果 ——
   const confirmSendPlan = useCallback(async (card: PlanCard) => {
     if (!state.act) return;
     try {
-      const r = await api<{ draft: Draft; error?: string }>('/api/draft', {
+      const r = await api<{ draft: Draft; references?: any; error?: string }>('/api/draft', {
         method: 'POST', body: JSON.stringify({ actId: state.act.id, planCard: card }),
       });
       if (r.error) { toast_(r.error); return; }
       const d = r.draft;
-      const s = await api<{ result?: SendResult; error?: string }>(`/api/draft/${d.id}/send`, {
+      const s = await api<{ job_id?: string; queued?: boolean; result?: SendResult; error?: string }>(`/api/draft/${d.id}/send`, {
         method: 'POST', body: JSON.stringify({ subject: d.subject, body: d.body }),
       });
       if (s.error) { toast_(s.error); return; }
-      patch({ planShown: 'sent', lastSent: { res: s.result || {}, draft: d } });
+      let res: SendResult | undefined = s.result;
+      if (s.queued && s.job_id) {
+        const j = await pollJob(s.job_id);
+        if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return; }
+        res = j.result;
+      }
+      patch({ planShown: 'sent', lastSent: { res: res || {}, draft: d } });
       await loadState();
       toast_('邮件已发出 · 回流中…');
     } catch (e: any) {
       toast_('发送失败：' + (e?.message || e));
     }
-  }, [state.act, patch, loadState, toast_]);
+  }, [state.act, patch, loadState, pollJob, toast_]);
 
-  // —— 邮件卡编辑后发送 ——
+  // —— 邮件卡编辑后发送（202 入队 + 轮询）——
   const sendEditedDraft = useCallback(async (subject: string, body: string) => {
     const d = state.editingDraft;
     if (!d) return false;
     if (!subject || !body) { toast_('主题和正文不能为空'); return false; }
-    const r = await api<{ error?: string }>(`/api/draft/${d.id}/send`, {
-      method: 'POST', body: JSON.stringify({ subject, body }),
-    });
-    if (r.error) { toast_(r.error); return false; }
-    patch({ editOpen: false, editingDraft: null });
-    toast_('邮件已发送（以编辑后内容为准）');
-    await loadState();
-    return true;
-  }, [state.editingDraft, patch, loadState, toast_]);
+    try {
+      const r = await api<{ job_id?: string; queued?: boolean; error?: string }>(`/api/draft/${d.id}/send`, {
+        method: 'POST', body: JSON.stringify({ subject, body }),
+      });
+      if (r.error) { toast_(r.error); return false; }
+      if (r.queued && r.job_id) {
+        const j = await pollJob(r.job_id);
+        if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return false; }
+      }
+      patch({ editOpen: false, editingDraft: null });
+      toast_('邮件已发送（以编辑后内容为准）');
+      await loadState();
+      return true;
+    } catch (e: any) {
+      toast_('发送失败：' + (e?.message || e));
+      return false;
+    }
+  }, [state.editingDraft, patch, loadState, pollJob, toast_]);
 
   const value: AppContextValue = {
     ...state,

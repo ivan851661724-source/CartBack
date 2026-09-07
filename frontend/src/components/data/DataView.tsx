@@ -9,6 +9,7 @@ import Funnel from './Funnel';
 import TrendChart from './TrendChart';
 import MetricsStrip from './MetricsStrip';
 import EmailConfigPanel from './EmailConfigPanel';
+import TagEffectPanel from './TagEffectPanel';
 
 /** 数据看板视图 */
 export default function DataView() {
@@ -42,6 +43,7 @@ export default function DataView() {
           </div>
         </div>
       </div>
+      <TagEffectPanel />
       <MetricsStrip k={k} m={metrics} demoAnchorRoi={demoAnchorRoi} />
       <EmailConfigPanel />
     </div>

@@ -17,6 +17,7 @@ export interface Status {
   espFrom: string;
   aiProvider: string;
   aiModel: string;
+  aiBaseUrl: string;
   espProvider: string;
   attributionWindowDays: number;
   emailTimeoutDays: number;
@@ -69,6 +70,7 @@ export interface Act {
 /** 邮件草稿 / 已发送（生命周期状态机） */
 export type DraftStatus =
   | 'draft'
+  | 'queued'      // 202 已入队（发送队列执行中）
   | 'sending'
   | 'sent'
   | 'recovering'

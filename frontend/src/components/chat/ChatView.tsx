@@ -29,6 +29,18 @@ export default function ChatView() {
   const messages = act?.messages || [];
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
 
+  // ② 受众圈选条件预览（确认卡核对用；与发送端 /api/draft 同口径）
+  const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
+  const planAudience = act?.planCard?.audience || '';
+  useEffect(() => {
+    if (planShown !== 'confirm' || !planAudience) { setAudConditions(null); return; }
+    let alive = true;
+    api<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] }>('/api/audience/preview', {
+      method: 'POST', body: JSON.stringify({ audience: planAudience }),
+    }).then((r) => { if (alive && r && (r as any).filters) setAudConditions(r); }).catch(() => {});
+    return () => { alive = false; };
+  }, [planShown, planAudience]);
+
   // 自动滚到底（消息变化 / 流式 token / 卡片出现）
   useEffect(() => {
     const el = areaRef.current;
@@ -79,6 +91,16 @@ export default function ChatView() {
 
             {messages.map((m, i) => <MessageBubble key={i} m={m} />)}
 
+            {/* ② 主动轻提示：四要素齐了但一直没触发确认卡 → 轻推一句（非弹窗、非表单） */}
+            {!streaming && n >= 4 && !act?.planCard && !planShown && messages.length > 4 && (
+              <div className="msg agent">
+                <div className="avatar agent"><NavChat /></div>
+                <div className="bubble" style={{ opacity: 0.92 }}>
+                  差不多齐了——要我现在按这些配一封挽回邮件吗？想先调整哪块也行。
+                </div>
+              </div>
+            )}
+
             {streaming && (
               <div className="msg agent">
                 <div className="avatar agent"><NavChat /></div>
@@ -98,6 +120,14 @@ export default function ChatView() {
                   <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>要什么结果</span><span>{act.planCard.goal || '—'}</span></div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>给什么钩子</span><span>{act.planCard.discount || act.planCard.offer || '—'}</span></div>
                 </div>
+                {audConditions && (
+                  <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'1px dashed #DDE2E8',fontSize:'12.5px'}}>
+                    <div style={{fontWeight:600,color:'#1E293B',marginBottom:'2px'}}>受众圈选条件（发送前请核对）</div>
+                    <div style={{color:'#5B6773'}}>条件：{audConditions.filters.map((f) => String(f.value)).join(' · ')}</div>
+                    <div style={{color:'#5B6773'}}>预计触达 {audConditions.matchedCount} 人 · 预估可挽回 ¥{audConditions.estGmv}（预估）</div>
+                    <div style={{color:'#5B6773'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
+                  </div>
+                )}
                 <div style={{display:'flex',gap:'9px'}}>
                   <button className="btn primary" onClick={async () => { 
                     setPlanShown('plan');

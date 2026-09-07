@@ -13,8 +13,17 @@ export default function MailCard({ d, onOpen }: { d: Draft; onOpen: () => void }
     <div className="mail-card glass-card" onClick={onOpen}>
       <div className="mc-top">
         <span className="mc-subj">{d.subject || ''}</span>
-        <span className={`status-badge ${d.status}`}>{d.status}</span>
+        <span className={`status-badge ${d.status}`}>{d.status === 'queued' ? 'sending' : d.status}</span>
       </div>
+      {(d as any).g0_blocked && (d as any).g0_blocked.length > 0 && (
+        <div
+          className="mc-meta"
+          style={{ color: 'var(--danger, #d33)', fontWeight: 600, marginTop: 4 }}
+          title={(d as any).g0_blocked.map((b: any) => `${b.email}: ${(b.hits || []).join('、')}`).join('；')}
+        >
+          ⛔ G0 拦截 {(d as any).g0_blocked.length} 封（含非白名单中文，未发送）
+        </div>
+      )}
       <div className="mc-meta">
         <span>触达 <b>{d.matchedCount || 0}</b> 人</span>
         <span>{d.sendTiming || '—'}</span>

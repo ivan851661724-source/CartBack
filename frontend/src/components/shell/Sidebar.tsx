@@ -2,13 +2,14 @@
 
 import type { ReactNode } from 'react';
 import { useApp, type Tab } from '@/state/AppProvider';
-import { NavChat, NavMail, NavData, NavAud, NavSet, FootArrow } from '@/components/ui/icons';
+import { NavChat, NavMail, NavData, NavAud, NavComp, NavSet, FootArrow } from '@/components/ui/icons';
 
 const NAVS: { key: Tab; label: string; Icon: () => ReactNode }[] = [
   { key: 'chat', label: '助手', Icon: NavChat },
   { key: 'mail', label: '邮件配置', Icon: NavMail },
   { key: 'data', label: '数据看板', Icon: NavData },
   { key: 'aud', label: '用户', Icon: NavAud },
+  { key: 'comp', label: '竞品', Icon: NavComp },
   { key: 'set', label: '设置', Icon: NavSet },
 ];
 
