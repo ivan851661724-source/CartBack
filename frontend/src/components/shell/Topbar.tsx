@@ -7,17 +7,19 @@ import { initial } from '@/lib/format';
 
 /** 顶栏：logo / 面包屑 / needs 进度提示 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
-  const { status, act, activeTab, me, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep } = useApp();
+  const { status, act, me, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep } = useApp();
   const real = status?.mode === 'real';
   const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
 
-  const showOnboarding = !onboardingSkipped && onboardingStep < 4 && activeTab === 'chat';
+  // 引导态在所有页面都稳定显示当前步骤，切页不再回退到 0/4
+  const showOnboarding = !onboardingSkipped && onboardingStep < 4;
+  const isLastStep = onboardingStep >= 3; // 第 4 步（显示 4/4）
 
   const ONBOARDING_TEXTS: Record<number, string> = {
     0: '点击左侧「助手」，依次点上方 10 个快捷描述告诉助手你的品牌信息。',
     1: '太棒了！去「邮件配置」查看 10 个要点，选好受众和折扣后点「发送」。',
     2: '邮件已发出！切到「数据看板」查看点击 / 转化 / GMV / ROI。',
-    3: '完整闭环已跑通！可切换受众重复发送，或关掉引导自由操作。',
+    3: '完整闭环已跑通！',
   };
 
   const hpText = showOnboarding
@@ -48,7 +50,9 @@ export default function Topbar() {
       </div>
 
       <HintPill n={showOnboarding ? onboardingStep + 1 : n} text={hpText} onboarding={showOnboarding}
+        nextLabel={isLastStep ? '完成' : '下一步 →'}
         onNext={() => {
+          if (isLastStep) { setOnboardingStep(4); return; } // 第 4 步：完成引导
           const next = onboardingStep + 1;
           setOnboardingStep(next);
           if (next === 2) switchTab('mail');
@@ -76,7 +80,7 @@ export default function Topbar() {
 }
 
 /** needs 进度提示条（可收起 / 引导模式） */
-function HintPill({ n, text, onboarding, onNext, onSkip }: { n: number; text: string; onboarding?: boolean; onNext?: () => void; onSkip?: () => void }) {
+function HintPill({ n, text, onboarding, nextLabel, onNext, onSkip }: { n: number; text: string; onboarding?: boolean; nextLabel?: string; onNext?: () => void; onSkip?: () => void }) {
   const [collapsed, setCollapsed] = useState(false);
   if (collapsed) {
     return (
@@ -100,7 +104,7 @@ function HintPill({ n, text, onboarding, onNext, onSkip }: { n: number; text: st
       <span className="hp-actions">
         {onboarding ? (
           <>
-            <button type="button" className="hp-btn" onClick={onNext} style={{background:'#FF7F4D',color:'#fff',borderRadius:'6px',padding:'3px 9px',fontSize:'11px',fontWeight:600,fontFamily:'var(--font-disp)'}}>下一步 →</button>
+            <button type="button" className="hp-btn" onClick={onNext} style={{background:'#FF7F4D',color:'#fff',borderRadius:'6px',padding:'3px 9px',fontSize:'11px',fontWeight:600,fontFamily:'var(--font-disp)'}}>{nextLabel ?? '下一步 →'}</button>
             <button type="button" className="hp-skip" onClick={onSkip}>跳过</button>
           </>
         ) : (
