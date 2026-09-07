@@ -404,7 +404,24 @@ function matchAudienceByDesc(desc) {
   return list;
 }
 function resolveRecipients(draft) {
-  return matchAudienceByDesc(draft.audience).slice(0, 200);
+  return filterTargetable(matchAudienceByDesc(draft.audience)).slice(0, 200);
+}
+
+// PRD §1 过滤口径：真实邮箱 且 未转化 且 挽回窗口 30 天（与确认卡展示的圈选条件同源，说到做到）
+const RECOVERY_WINDOW_MS = 30 * 86400000;
+function filterTargetable(list) {
+  const byId = new Map(store.getAudience().map(a => [a.id, a]));
+  const converted = new Set();
+  for (const e of store.getEvents()) {
+    if (e.type !== 'convert' || !e.audience_id) continue;
+    const a = byId.get(e.audience_id);
+    if (a && a.email) converted.add(String(a.email).toLowerCase());
+  }
+  const cutoff = Date.now() - RECOVERY_WINDOW_MS;
+  return (list || [])
+    .filter(a => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.email || ''))
+    .filter(a => (a.at_risk_at || a.created_at || 0) >= cutoff)
+    .filter(a => !converted.has(String(a.email).toLowerCase()));
 }
 
 // —— ② 受众圈选条件（确认卡展示用）：需求关键词 → 结构化过滤条件 + 命中概览 ——
@@ -418,7 +435,7 @@ function audienceConditions(desc) {
   filters.push({ field: 'email', op: 'valid', value: '真实邮箱' });
   filters.push({ field: 'email_status', op: 'not_equals', value: 'email_invalid' });
   filters.push({ field: 'window', op: 'within_days', value: 30 });
-  const matched = matchAudienceByDesc(desc);
+  const matched = filterTargetable(matchAudienceByDesc(desc));   // 与发送端同一口径
   return {
     desc: desc || '全部受众',
     filters,
@@ -1062,6 +1079,10 @@ const server = http.createServer(async (req, res) => {
       const draft = store.getDraft(sm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
       if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      // 状态检查前置：已发送/发送中的草稿不接受编辑落库（避免 409 前把编辑内容写进已发出的邮件）
+      if (['sent', 'sending', 'queued'].includes(draft.status)) {
+        return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
+      }
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
       try {
         const body = await readBody(req);
@@ -1069,9 +1090,6 @@ const server = http.createServer(async (req, res) => {
         if (body && typeof body.body === 'string' && body.body.trim()) draft.body = body.body.trim();
         store.upsertDraft(draft);
       } catch (e) { /* 无 body 或非 JSON：维持存储原稿 */ }
-      if (['sent', 'sending', 'queued'].includes(draft.status)) {
-        return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
-      }
       // ③ 发送前预检：ESP 配置 / 发件域名 / 收件人有效性 / 72h 频控，失败分类人话提示
       const check = precheckSend(draft);
       if (!check.ok) {
@@ -1122,7 +1140,8 @@ const server = http.createServer(async (req, res) => {
         .map(e => ({
           name: e.name || (e.email || '').split('@')[0], email: e.email,
           intent: e.intent || '导入', risk: e.risk || '中', price: e.price || '中',
-          abandoned_value: parseFloat(e.abandoned_value) || 0, source: 'store', at_risk_at: Date.now()
+          abandoned_value: parseFloat(e.abandoned_value) || 0, source: 'store',
+          at_risk_at: Number(e.at_risk_at) || Date.now()   // 真实店铺事件自带流失时间（30 天窗口过滤依据）
         }))
         .filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.email || ''));
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
@@ -1544,14 +1563,19 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // —— 图片服务（邮件预览用） ——
+    // —— 图片服务（邮件预览/海报用） ——
+    // 安全（P1 修复）：只允许 output/ 目录树内的文件，防绝对路径穿越读取任意文件
     const imgMatch = pathname.match(/^\/api\/image\/(.+)$/);
     if (imgMatch && method === 'GET') {
       const imgPath = decodeURIComponent(imgMatch[1]);
       const fs = require('fs');
       const path = require('path');
+      const OUTPUT_ROOT = path.join(__dirname, 'output');
       const fullPath = path.resolve(imgPath);
-      console.log('[image] requested:', imgPath, 'resolved:', fullPath, 'exists:', fs.existsSync(fullPath));
+      const rel = path.relative(OUTPUT_ROOT, fullPath);
+      if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+        return sendJson(res, 403, { error: 'forbidden: image path outside output directory' });
+      }
       if (!fs.existsSync(fullPath)) return sendJson(res, 404, { error: 'image not found', path: fullPath });
       const ext = path.extname(fullPath).toLowerCase();
       const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif' }[ext] || 'image/png';

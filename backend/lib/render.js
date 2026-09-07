@@ -49,13 +49,10 @@ function tierOf(recipient, tags = []) {
   if (price === 'high') return 'discount';
   const intent = byType.intent && byType.intent.tag_value;
   if (intent === 'hot') return 'urgency';
-  // 兜底：老字段近似（audience.risk 高 ≈ hot；price 高 ≈ 折扣敏感）
+  // 兜底：无标签时按 audience 老字段近似（audience.risk 高 ≈ hot；price 高 ≈ 折扣敏感）
   if (!Object.keys(byType).length) {
     if ((recipient && recipient.price) === '高' || (recipient && recipient.price) === 'high') return 'discount';
     if ((recipient && recipient.risk) === '高' || (recipient && recipient.risk) === 'high') return 'urgency';
-  } else if (intent === 'hot' || price === 'mid') {
-    // 已有标签但未命中 high/hot → standard
-    return 'standard';
   }
   return 'standard';
 }

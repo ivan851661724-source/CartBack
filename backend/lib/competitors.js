@@ -93,11 +93,16 @@ function topCards(store, userId, { audience = '', discount = 0, k = 3 } = {}) {
   const { categoryOf, discountTier } = require('./benchmark');
   const wantTier = discountTier(discount);
   const tokens = String(audience || '').split(/\s+/).map(s => s.toLowerCase()).filter(Boolean);
+  const descLower = String(audience || '').toLowerCase();
   return store.listStrategyCards(userId)
     .map(c => {
       const kws = cardKeywords(c);
       let score = 0;
-      for (const kw of kws) for (const t of tokens) if (kw.includes(t) || t.includes(kw)) score++;
+      for (const kw of kws) {
+        // 拉丁 token 级匹配 + 原串子串回退（中文受众描述没有空白分词）
+        if (tokens.some(t => t && (kw.includes(t) || t.includes(kw)))) score++;
+        else if (descLower.length >= 2 && (kw.includes(descLower) || descLower.includes(kw))) score++;
+      }
       if (c.discount_range && /^\d+/.test(c.discount_range)) {
         const m = Number((c.discount_range.match(/^(\d+)/) || [])[1] || 0);
         if (m && discountTier(m) === wantTier) score += 1;

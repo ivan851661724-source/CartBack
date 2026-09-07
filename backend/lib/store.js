@@ -282,10 +282,16 @@ class Store {
     this._write('audience', this._read('audience').filter(a => a.source === 'seed'));
   }
 
-  /** 全量替换受众（拉到真实店后台数据后调用，清掉种子/旧导入） */
+  /** 全量替换受众（拉到真实店后台数据后调用，清掉种子/旧导入）；同步清理孤儿标签 */
   replaceAudience(list) {
-    this._write('audience', Array.isArray(list) ? list : []);
-    return list;
+    const kept = Array.isArray(list) ? list : [];
+    const ids = new Set(kept.map(a => a.id).filter(Boolean));
+    this._write('audience', kept);
+    // 被替换掉的用户不再有归属，其标签若留在表里会灌水 tagEffect/benchmark 样本
+    const tags = this._read('audience_tags');
+    const keptTags = tags.filter(t => ids.has(t.audience_id));
+    if (keptTags.length !== tags.length) this._write('audience_tags', keptTags);
+    return kept;
   }
 
   // —— events ——

@@ -157,9 +157,11 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
     assert.ok(m.text.includes('BACK12'), '优惠码事实进入正文');
   }
 
-  // —— 草稿态：queued → sent；重复发送 409 ——
-  const dup = await api(`/api/draft/${draft.id}/send`, { method: 'POST', body: {} });
+  // —— 草稿态：queued → sent；重复发送 409，且编辑内容不得写进已发出的邮件 ——
+  const dup = await api(`/api/draft/${draft.id}/send`, { method: 'POST', body: { subject: 'TAMPERED', body: 'TAMPERED' } });
   assert.equal(dup.status, 409);
+  const sentDraft = (await api('/api/drafts')).json.drafts.find((x) => x.id === draft.id);
+  assert.equal(sentDraft.subject, "Your 12% OFF Is Waiting — Don't Miss Out, CartBack");
 
   // —— 72h 频控：同受众第二场活动被拦截（400 + 人话提示） ——
   const dr2 = await api('/api/draft', {
@@ -233,11 +235,24 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
   assert.equal(kpis.convert, 1);
   assert.equal(kpis.gmv, 0);
 
-  // —— 按人群/语言预览（渲染管线同口径；mo.chen 已被 bounced 剔除 → urgency 少 1 人） ——
+  // —— PRD §1 过滤口径：30 天挽回窗口 + 未转化 ——
+  // 同步一条 40 天前流失的「加购未付」：进入受众但不进可发送名单（窗口外）
+  await api('/api/store/sync', { method: 'POST', body: { events: [{ email: 'old.cart@example.com', name: 'OldCart', intent: '加购未付', abandoned_value: 500, at_risk_at: Date.now() - 40 * 86400000 }] } });
+  const conditions = (await api('/api/audience/preview', { method: 'POST', body: { audience: '加购未付' } })).json;
+  assert.equal(conditions.matchedCount, 8);   // 原始 10 条命中（9 + 老客）；窗口剔除老客、转化剔除 wan.lin → 8
+
+  // wan.lin 已转化（即使退款）也退出可发送名单；mo.chen 被 bounced 剔除
+  // —— 按人群/语言预览（渲染管线同口径；此时可发送：discount 2 / urgency 1 / standard 4） ——
   const preview = (await api(`/api/draft/${draft.id}/preview`)).json;
-  assert.equal(preview.tiers.find((x) => x.tier === 'discount').count, 3);
+  assert.equal(preview.tiers.find((x) => x.tier === 'discount').count, 2);
   assert.equal(preview.tiers.find((x) => x.tier === 'urgency').count, 1);
   assert.equal(preview.tiers.find((x) => x.tier === 'standard').count, 4);
   assert.ok(preview.languages.length >= 1);
   assert.equal(preview.g0_blocked.length, 0);
+
+  // —— /api/image 只允许 output/ 目录树内文件（P1 路径穿越修复） ——
+  const outside = await fetch(base + '/api/image/' + encodeURIComponent(require('path').join(__dirname, '..', 'server.js')));
+  assert.equal(outside.status, 403);
+  const posterImg = await fetch(base + '/api/image/' + encodeURIComponent(sentDraft.posters[0].file));
+  assert.equal(posterImg.status, 200);
 });

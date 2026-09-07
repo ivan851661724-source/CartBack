@@ -62,10 +62,14 @@ test('基准库：样本 ≥5 才出数；折扣档/品类键正确；检索按�
     const [rare] = store.addAudience([{ name: 'R', email: 'r@x.com', intent: '沉睡', risk: '低', price: '低', abandoned_value: 10, locale: 'en' }]);
     store.addEvent({ type: 'emailed', draft_id: d2.id, audience_id: rare.id, ts: Date.now() });
 
+    // 无 emailed 事件的转化不得灌水样本（分母 = 触达人数，非互动人数）
+    const [ghost] = store.addAudience([{ name: 'G', email: 'g@x.com', intent: '加购未付', risk: '高', price: '高', abandoned_value: 10, locale: 'en' }]);
+    store.addEvent({ type: 'convert', draft_id: 'dr_b0', audience_id: ghost.id, value: 99 });
+
     const lib = benchmarkMod.rebuildBenchmark(store);
     const cart = lib.rows.find((r) => r.category === 'cart');
     assert.ok(cart, 'cart 桶出数');
-    assert.equal(cart.sample, 6);
+    assert.equal(cart.sample, 6, '分母=emailed 触达人数，无触达事件的转化不进样本');
     assert.equal(cart.converts, 6);
     assert.equal(cart.rate, 1);
     assert.equal(cart.discount_tier, 'mid');

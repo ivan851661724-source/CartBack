@@ -36,7 +36,8 @@ function rebuildBenchmark(store, opts = {}) {
   const events = store.getEvents();
   const audienceById = new Map(store.getAudience().map(a => [a.id, a]));
 
-  // 每个 (category, tags_key, discount_tier) 桶：sample=发送的收件人次，converts=其中转化数
+  // 每个 (category, tags_key, discount_tier) 桶：sample=实际触达人数（emailed 事件），converts=其中转化数。
+  // 分母必须是触达人数而非「有互动的人数」，否则转化率系统性偏高、误导折扣决策。
   const buckets = {};
   const windowDays = opts.windowDays || 30;
   const windowMs = windowDays * 86400000;
@@ -45,10 +46,10 @@ function rebuildBenchmark(store, opts = {}) {
     if (Date.now() - d.sent_at > windowMs) continue;
     const category = categoryOf(d.audience);
     const tier = discountTier(d.discount);
-    // 该草稿触达的收件人 = 有点击/转化/打开事件的受众 ∪（演示模式无 per-recipient 事件时按 matchedCount 计）
+    // 触达名单 = 该草稿的 emailed 事件（无 per-recipient 事件的旧草稿无法归因，跳过）
     const evs = events.filter(e => e.draft_id === d.id);
-    const audIds = new Set(evs.map(e => e.audience_id).filter(Boolean));
-    for (const aid of audIds) {
+    const reachedIds = [...new Set(evs.filter(e => e.type === 'emailed' && e.audience_id).map(e => e.audience_id))];
+    for (const aid of reachedIds) {
       const a = audienceById.get(aid);
       if (!a) continue;
       const tags = store.getAudienceTags(aid);

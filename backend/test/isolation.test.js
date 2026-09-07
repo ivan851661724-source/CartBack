@@ -108,6 +108,23 @@ test('⑤ bounced 剔除：email_status=email_invalid 的收件人不再进入�
   } finally { cleanup(); }
 });
 
+test('replaceAudience 清理孤儿标签：被替换掉的用户标签不残留', () => {
+  const { store, cleanup } = tempStore('orphan-tags');
+  try {
+    const list = store.addAudience([
+      { name: 'A', email: 'a@x.com', intent: '加购未付', risk: '高', price: '高', abandoned_value: 10 },
+      { name: 'B', email: 'b@x.com', intent: '浏览未买', risk: '低', price: '低', abandoned_value: 10 }
+    ]);
+    tagsMod.scoreAudience(store, list);
+    assert.equal(store.getAllAudienceTags().length, 4);   // 2 人 × 2 类
+    // 店铺全量替换：只保留 A
+    store.replaceAudience([list[0]]);
+    const remain = store.getAllAudienceTags();
+    assert.equal(remain.length, 2);
+    assert.ok(remain.every(t => t.audience_id === list[0].id));
+  } finally { cleanup(); }
+});
+
 test('⑤ tagEffect：按标签聚合转化率，样本不足不出数（null）', () => {
   const { store, cleanup } = tempStore('tags-effect');
   try {
