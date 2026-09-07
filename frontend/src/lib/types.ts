@@ -92,6 +92,7 @@ export interface Draft {
 
 /** 受众 / 高意向流失个体（CSV 导入或店铺拉取） */
 export interface Audience {
+  id?: string;        // 受众 id（画像抽屉拉消费者标签用）
   name: string;
   email: string;
   intent: string;
@@ -102,6 +103,9 @@ export interface Audience {
   urgencyDays?: number | null;
   source?: string;
   score?: number | null;
+  locale?: string;
+  country?: string;
+  email_status?: string; // 'email_invalid' = 退信剔除
 }
 
 /** 数据看板北极星 KPI（/api/state 的 kpis） */

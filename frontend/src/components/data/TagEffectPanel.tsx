@@ -18,17 +18,17 @@ const TAG_TYPE_LABEL: Record<string, string> = {
 /** 标签效果区块（PRD §5 UI：标签飞轮资产的价值可见——Top 区块 + 样本数） */
 export default function TagEffectPanel() {
   const [rows, setRows] = useState<TagEffectRow[]>([]);
-  const booted = useApp().booted;
+  const { booted, activeTab } = useApp();
 
-  // 视图常驻挂载：等 bootstrap（本地令牌）就绪再拉数据
+  // 视图常驻挂载：bootstrap 后 + 每次切到数据页都重新拉取（否则是旧快照）
   useEffect(() => {
-    if (!booted) return;
+    if (!booted || activeTab !== 'data') return;
     let alive = true;
     api<{ effect: TagEffectRow[] }>('/api/tags/effect')
       .then((r) => { if (alive) setRows((r.effect || []).slice(0, 5)); })
       .catch(() => {});
     return () => { alive = false; };
-  }, [booted]);
+  }, [booted, activeTab]);
 
   if (!rows.length) return null; // 还没有标签数据时整块隐藏（不打扰）
 

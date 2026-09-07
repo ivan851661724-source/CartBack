@@ -21,7 +21,7 @@ interface StrategyCard {
 }
 
 export default function CompetitorView() {
-  const { toast_, booted } = useApp();
+  const { toast_, booted, activeTab } = useApp();
   const [sources, setSources] = useState<CompSource[]>([]);
   const [address, setAddress] = useState('');
   const [cards, setCards] = useState<StrategyCard[]>([]);
@@ -43,8 +43,8 @@ export default function CompetitorView() {
     }
   }, [toast_]);
 
-  // 视图常驻挂载：等 bootstrap（本地令牌）就绪再拉数据，避免 403
-  useEffect(() => { if (booted) load(); }, [booted, load]);
+  // 视图常驻挂载：bootstrap 后 + 每次切到竞品页都重新拉取（否则是旧快照）
+  useEffect(() => { if (booted && activeTab === 'comp') load(); }, [booted, activeTab, load]);
 
   const addSource = async () => {
     if (!newName.trim()) { toast_('竞品名称不能为空'); return; }
