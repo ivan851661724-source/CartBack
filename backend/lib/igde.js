@@ -69,7 +69,8 @@ function extractNeeds(text) {
   else if (/浏览|看看|逛/.test(t)) out.audience = '浏览未买客户';
   else if (/老客|老顾客|会员|vip|沉睡|很久没|好久没|流失/.test(t)) out.audience = '沉睡 / 流失老客';
   else if (/新客|新人|新用户/.test(t)) out.audience = '新客';
-  else if (/全部|所有|大家|都/.test(t)) out.audience = '全部流失人群';
+  // 收紧：裸「都/大家/所有」误伤率高（如"客人基本都是欧美的"），要求明确的人群指称才兜底
+  else if (/全部(客户|老客|客人|人群)|所有(客户|客人|老客|人)|所有流失/.test(t)) out.audience = '全部流失人群';
   // pain（中英文双匹配）
   if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.pain = '太久没动静、快被遗忘';
   else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.pain = '可能被竞品勾走';
@@ -92,7 +93,12 @@ function extractNeeds(text) {
   else if (/满\s*(\d+)\s*减\s*(\d+)/.test(t)) { const m = t.match(/满\s*(\d+)\s*减\s*(\d+)/); out.offer = `满${m[1]}减${m[2]}`; }
   else if (/优惠码|优惠券|券|折扣码|promo|coupon/.test(t)) out.offer = '专属优惠码';
   else if (/包邮|免邮/.test(t)) out.offer = '包邮'; // 明确要包邮时优先于通用「折扣」词，避免"折扣改成包邮"被误抽成折扣
-  else if (/(\d+)\s*%|打折|折扣/.test(t)) { const m = t.match(/(\d+)\s*%/); out.offer = (m ? m[1] + '%' : '折扣') + '优惠'; }
+  else if (/(\d+)\s*%|打折|折扣/.test(t)) {
+    const m = t.match(/(\d+)\s*%/);
+    // "100% 回来下单"是数量表述不是折扣，勿误抽成 offer
+    out.offer = (m && +m[1] !== 100) ? m[1] + '%优惠' : (m ? '' : '折扣优惠');
+    if (!out.offer) delete out.offer;
+  }
   else if (/限时|秒杀|紧迫|倒计时|赶紧/.test(t)) out.offer = '限时紧迫钩子';
   else if (/送|赠|礼/.test(t)) out.offer = '赠送礼品';
   return out;
@@ -165,9 +171,10 @@ function guardrailL3(reply) {
   return /[?？]/.test(reply.trim());
 }
 function guardrailL4(reply, stage) {
-  // 抢跑禁令：S3 之前不得输出方案卡式配置
+  // 整封邮件倾倒（含【邮件标题】等变体）在聊天里任何阶段都算抢跑——邮件由引擎方案卡/mailgen 产出，
+  // 聊天直出会绕过 G0 语种护栏与商家确认环节
+  if (/(优惠码[:：]|主题行[:：]|正文[:：]|方案卡|以下是配置|【邮件(标题|主题|正文)】|subject\s*[:：]|hi\s*\[|dear\s*\[)/i.test(reply)) return false;
   if (stage === 'S3') return true;
-  if (/(优惠码[:：]|主题行[:：]|正文[:：]|方案卡|以下是配置)/.test(reply)) return false;
   return true;
 }
 

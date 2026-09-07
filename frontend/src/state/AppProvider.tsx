@@ -253,7 +253,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           messages: [...prev.act.messages, assistantMsg],
           planCard: r.planCard ?? prev.act.planCard ?? null,
         };
-        const pushConfirm = !!r.planCard && !prev.planPushed;
+        // 确认卡重现：首推（planPushed=false）或卡片未在流转中且用户用文字确认（「可以，去发」类）时拉卡。
+        // 修「卡片永远不再出现」死局：planPushed 全局一次性后，再聊聊/刷新后打字确认无法唤回卡片。
+        const CONFIRM_INTENT_RE = /(可以|行(的|吧)|好(的|吧|嘞)|去发|发送|确认|就这样|生成|ok|yes|send)/i;
+        const pushConfirm = !!r.planCard && prev.planShown === null
+          && (!prev.planPushed || CONFIRM_INTENT_RE.test(t));
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）

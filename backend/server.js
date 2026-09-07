@@ -1013,7 +1013,7 @@ const server = http.createServer(async (req, res) => {
         return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
       } : null;
       const strategyHints = refCards.map(c => ({ theme_formula: c.theme_formula, angle: c.angle, discount_range: c.discount_range, timing: c.timing }));
-      const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints });
+      const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
       if (v.warning) logEvent('variants_fallback', { warning: v.warning });
       metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
       const draft = {

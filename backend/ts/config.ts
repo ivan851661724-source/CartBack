@@ -169,7 +169,10 @@ function applyNodeInjection(cfg: Config, aiConfig?: AiConfig | null): void {
   const base = String(aiConfig.baseUrl || aiConfig.aiBaseUrl || '').trim();
   const model = String(aiConfig.model || aiConfig.aiModel || '').trim();
 
-  if (provider === 'deepseek' && key) {
+  // 'deepseek' 槽位实为「OpenAI 兼容对话端点」：tokenplan / qwen / custom 等任何带
+  // 专属 baseUrl 的 provider 都注入同一槽位（callProvider 统一 POST base_url + /chat/completions）。
+  // 非 deepseek 必须显式带 base 才注入（专属 Key 配专属基地址，缺 base 不可误用官方默认端点）。
+  if (provider !== 'minimax' && key && (provider === 'deepseek' || base)) {
     if (!cfg.deepseek) cfg.deepseek = { api_key: '', model: 'deepseek-chat', base_url: 'https://api.deepseek.com' };
     cfg.deepseek.api_key = key;
     if (base) cfg.deepseek.base_url = base;

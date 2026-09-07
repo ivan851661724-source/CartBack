@@ -67,20 +67,31 @@ function standardVariants(draft = {}) {
   ];
 }
 
+/** 标签分布 → 一句话画像（供 system 注入；空分布返回空串，标准三档不受影响） */
+function tagMixSummary(tagDist = []) {
+  const list = (Array.isArray(tagDist) ? tagDist : []).slice(0, 6);
+  if (!list.length) return '';
+  return list.map(d => `${d.tag_type}=${d.tag_value}×${d.count}(均权${d.avg_weight})`).join('、');
+}
+
 /**
  * LLM 生成三档变体（一次调用）。llmJSON(messages) → {reply, jsonOk, raw} 由 server 注入
  * （chatStructured 封装）；本函数只关心其返回 JSON 的 variants 字段。
  * strategyHints：竞品套路卡（⑥ 检索注入，只注入结构线索，不注入原文——G6）。
+ * tagDist：受众实时标签分布（tags.tagDistribution），生成端据此倾斜三档措辞权重；
+ *          空/离线时退化为纯 needs 驱动（标准三档兜底不变）。
  * @returns {{variants, provider: 'llm'|'fallback_standard', warning?: string}}
  */
-async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strategyHints = [] }) {
+async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strategyHints = [], tagDist = [] }) {
   const base = standardVariants(draft);
   if (!llmJSON) return { variants: base, provider: 'fallback_standard', warning: 'AI 未配置，使用标准三档' };
+  const mix = tagMixSummary(tagDist);
   const system =
     '你是跨境电商挽回邮件的文案变体生成器。基于给定【事实】，为三类人群各生成一封邮件变体，返回 JSON。' +
     '铁律：只换角度不换事实——折扣力度、优惠码、品牌名、商品等事实必须与输入一致，禁止编造新事实、禁止夸大。' +
     '面向消费者的邮件必须是英文（或跟随店铺语种），禁止中文。允许使用模板占位符 {{name}}、{{coupon}}、{{brand}}、{{product}} 与单层 {{#if coupon}}…{{/if}}。' +
     '三档：discount=价格敏感人群（折扣主打，优惠码前置）；urgency=高意向人群（紧迫感为主、弱化折扣）；standard=其余人群（中性提醒）。' +
+    (mix ? '本次受众的实时标签分布：【' + mix + '】。三档的措辞权重跟着分布倾斜（如 price_sensitivity=high 占比高 → discount 档优惠信息更前置、urgency 档强调库存稀缺但保留事实），铁律不变。' : '') +
     '只返回一个 JSON 对象：{"variants":[{"tier":"discount","subject":"…","body":"…"},{"tier":"urgency",…},{"tier":"standard",…}]}，不要 markdown 代码块。';
   const facts = {
     brand: draft.brand || '', discount: draft.discount || '', coupon: draft.coupon || '',
@@ -89,6 +100,7 @@ async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strate
   };
   const user = '【事实】' + JSON.stringify(facts) + '\n【基准模板（可在此基础上改写角度）】' +
     JSON.stringify(base.map(v => ({ tier: v.tier, subject: v.subject, body: v.body }))) +
+    (mix ? '\n【受众标签分布（audience_tags 实时打分，只影响措辞角度）】' + JSON.stringify((tagDist || []).slice(0, 8)) : '') +
     (strategyHints && strategyHints.length
       ? '\n【已验证打法参考（同类竞品策略卡结构线索，仅借鉴角度，禁止照抄任何文案）】' + JSON.stringify(strategyHints)
       : '');
@@ -115,4 +127,4 @@ async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strate
   }
 }
 
-module.exports = { validateVariants, completeTiers, standardVariants, generateVariants };
+module.exports = { validateVariants, completeTiers, standardVariants, tagMixSummary, generateVariants };
