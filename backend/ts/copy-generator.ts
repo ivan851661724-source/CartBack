@@ -169,8 +169,10 @@ async function callProvider(
     payload = {
       model: config.deepseek.model,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 1000,
+      max_tokens: 4000,
       temperature: 0.8,
+      // 阿里 qwen3 系列关推理：直接出答案，避免推理耗时长导致 /api/draft 超时（非 qwen 模型该参数被忽略）
+      enable_thinking: false,
     };
   } else {
     const base = config.minimax.base_url.replace(/\/$/, '');
@@ -179,7 +181,7 @@ async function callProvider(
     payload = {
       model: config.minimax.model,
       messages: [{ role: 'user', content: prompt }],
-      max_tokens: 1000,
+      max_tokens: 4000,
       temperature: 0.8,
     };
   }
@@ -200,6 +202,11 @@ async function callProvider(
       const choice = choices[0] as Record<string, unknown>;
       const msg = (choice.message || {}) as Record<string, unknown>;
       let content = String(msg.content ?? '').trim();
+      // 推理模型（deepseek-v4-pro 等）偶发 content 为空，最终答案在 reasoning_content 里
+      if (!content) {
+        const rc = String(msg.reasoning_content ?? '').trim();
+        if (rc) content = rc;
+      }
       if (name === 'minimax') {
         content = content.replace(/ thinking[\s\S]*? response/g, '').trim() || content;
       }

@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
 import { api } from '@/lib/api';
+import type { Draft } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import ConfirmCard from './ConfirmCard';
 import PlanCardView from './PlanCardView';
@@ -18,6 +19,7 @@ export default function ChatView() {
     act, acts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
+    setEditingDraft, setEditOpen, setDraftGenerating,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep,
   } = useApp();
 
@@ -133,11 +135,14 @@ export default function ChatView() {
                     const card = act.planCard;
                     if (!card) return;
                     setPlanShown('plan');
+                    switchTab('mail');          // 立即跳转邮件 tab（不等草稿生成）
+                    setDraftGenerating(true);
                     try {
-                      await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
+                      const d = await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
                       await loadState();
+                      setEditingDraft(d); setEditOpen(true);            // 草稿就绪→打开预览
                     } catch(e) {}
-                    switchTab('mail');
+                    setDraftGenerating(false);
                   }}>可以，去发</button>
                   <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
                 </div>

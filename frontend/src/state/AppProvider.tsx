@@ -52,6 +52,7 @@ interface AppState {
   importOpen: boolean;
   historyOpen: boolean; // 多会话 #2：历史会话弹窗
   editOpen: boolean;
+  draftGenerating: boolean; // 邮件草稿生成中（方案卡「可以，去发」后、预览弹出前）
   authOpen: boolean;
   authMode: 'login' | 'register';
   toast: ToastState;
@@ -89,6 +90,7 @@ interface AppContextValue extends AppState {
   setImportOpen: (v: boolean) => void;
   setHistoryOpen: (v: boolean) => void;
   setEditOpen: (v: boolean) => void;
+  setDraftGenerating: (v: boolean) => void;
   setAuthOpen: (v: boolean) => void;
   setAuthMode: (m: 'login' | 'register') => void;
   toast_: (msg: string) => void;
@@ -111,7 +113,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     planPushed: false, planShown: null, lastSent: null, me: null,
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
-    importOpen: false, historyOpen: false, editOpen: false, authOpen: false, authMode: 'register',
+    importOpen: false, historyOpen: false, editOpen: false, draftGenerating: false, authOpen: false, authMode: 'register',
     toast: { msg: '', shown: false },
     onboardingStep: 0, onboardingSkipped: false,
   });
@@ -473,6 +475,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setImportOpen: (v) => patch({ importOpen: v }),
     setHistoryOpen: (v) => patch({ historyOpen: v }),
     setEditOpen: (v) => patch({ editOpen: v }),
+    setDraftGenerating: (v: boolean) => patch({ draftGenerating: v }),
     setAuthOpen: (v) => patch({ authOpen: v }),
     setAuthMode: (m) => patch({ authMode: m }),
     toast_,

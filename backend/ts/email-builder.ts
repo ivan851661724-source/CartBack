@@ -56,6 +56,25 @@ const SIGNATURE_BY_LANG: Record<string, string> = {
   chinese: '{brand} 团队',
 };
 
+// locale 码 → 语言全称（preferred_language 可能是全称如 "English"，也可能只传 locale 如 "en"/"en-US"）
+const LOCALE_TO_LANG: Record<string, string> = {
+  en: 'english', 'en-us': 'english', 'en-gb': 'english', 'en-au': 'english', 'en-ca': 'english',
+  es: 'spanish', 'es-es': 'spanish', 'es-mx': 'spanish',
+  de: 'german', 'de-de': 'german',
+  fr: 'french', 'fr-fr': 'french', 'fr-ca': 'french',
+  it: 'italian', 'it-it': 'italian',
+  zh: 'chinese', 'zh-cn': 'chinese', 'zh-tw': 'chinese',
+};
+function resolveLangKey(lang: string): string {
+  const k = (lang || '').toLowerCase().trim();
+  if (!k) return 'chinese';
+  if (PROMPT_BY_LANG[k]) return k; // 全称直接命中
+  if (LOCALE_TO_LANG[k]) return LOCALE_TO_LANG[k]; // locale 码映射
+  // 处理 "en-US" 这类带连字符的：取主语言
+  const main = k.split(/[-_]/)[0];
+  return LOCALE_TO_LANG[main] || 'chinese';
+}
+
 function discountStr(discount: Optional<number>): string {
   if (discount == null) return '';
   const n = Number(discount);
@@ -98,7 +117,7 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
   }
 
   // 按习惯语言本地化「点击图片下单」提示与落款
-  const langKey = (safeStr(lang).toLowerCase().trim()) || 'chinese';
+  const langKey = resolveLangKey(safeStr(lang));
   const brandSafeForSig = escapeHtml(brand_name);
   const promptText = PROMPT_BY_LANG[langKey] ?? PROMPT_BY_LANG.chinese;
   const signatureText = (SIGNATURE_BY_LANG[langKey] ?? SIGNATURE_BY_LANG.chinese).replace(

@@ -344,6 +344,18 @@ input,textarea{font-family:inherit}
 .mc-step{display:flex;justify-content:space-between;font-size:9.5px;color:var(--soft);margin-top:4px;font-weight:600}
 .mc-foot{display:flex;align-items:center;gap:7px;margin-top:7px}
 .mc-foot .tag{margin-right:auto}
+/* 生成中骨架卡（方案卡「可以，去发」后、草稿就绪前） */
+.generating-card{cursor:default;overflow:hidden}
+.generating-card:hover{transform:none;box-shadow:none;border-color:var(--border)}
+.gen-thumb{height:120px;border-radius:9px;margin-bottom:11px}
+.gen-body{display:flex;flex-direction:column;gap:7px}
+.gen-line{height:11px;border-radius:6px}
+.gen-line.w80{width:80%}.gen-line.w60{width:60%}.gen-line.w40{width:40%}
+.gen-status{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted);margin-top:9px;font-weight:600}
+.shimmer{background:linear-gradient(100deg,var(--bg-hover) 30%,rgba(255,255,255,.65) 50%,var(--bg-hover) 70%);background-size:200% 100%;animation:shimmer 1.25s linear infinite}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+.spinner{width:14px;height:14px;border-radius:50%;border:2px solid var(--bg-hover);border-top-color:var(--brand);animation:spin .7s linear infinite;display:inline-block}
+@keyframes spin{to{transform:rotate(360deg)}}
 .status-badge{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:999px;font-weight:500}
 .status-badge.draft{background:var(--bg-hover);color:var(--muted)}
 .status-badge.sending{background:var(--indigo-bg);color:var(--indigo3)}
