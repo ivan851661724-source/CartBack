@@ -17,7 +17,7 @@ export default function ChatView() {
   const {
     act, acts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
-    setPlanShown, setPlanPushed, confirmSendPlan, switchTab, setHistoryOpen, loadState,
+    setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep,
   } = useApp();
 
@@ -129,13 +129,15 @@ export default function ChatView() {
                   </div>
                 )}
                 <div style={{display:'flex',gap:'9px'}}>
-                  <button className="btn primary" onClick={async () => { 
+                  <button className="btn primary" onClick={async () => {
+                    const card = act.planCard;
+                    if (!card) return;
                     setPlanShown('plan');
                     try {
-                      await api('/api/draft', { method: 'POST', body: JSON.stringify({ actId: act.id, planCard: act.planCard }) });
+                      await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
                       await loadState();
                     } catch(e) {}
-                    switchTab('mail'); 
+                    switchTab('mail');
                   }}>可以，去发</button>
                   <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
                 </div>

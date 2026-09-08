@@ -17,6 +17,10 @@ import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
 export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'comp' | 'set';
 export type PlanShown = 'confirm' | 'plan' | 'sent' | null;
 
+// 确认卡预建草稿暂存（单用户本地应用，模块级即可）：可以去发时建一条，确认发送复用同一条，
+// 修复「同卡建两条草稿、邮件 tab 僵尸草稿与实际发送对不上」的跳转不准问题
+let pendingCardDraft: { actId: string; draft: Draft } | null = null;
+
 interface ToastState { msg: string; shown: boolean; }
 
 interface AppState {
@@ -71,6 +75,7 @@ interface AppContextValue extends AppState {
   authLogout: () => Promise<void>;
   jumpToConfig: (intent: string, aud?: Audience) => Promise<void>;
   confirmSendPlan: (card: PlanCard) => Promise<void>;
+  createCardDraft: (actId: string, card: PlanCard) => Promise<Draft>;   // 确认卡预建草稿（确认发送时复用，防重复建草稿）
   sendEditedDraft: (subject: string, body: string) => Promise<boolean>;
   // setters
   setChatInput: (v: string) => void;
@@ -384,14 +389,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // —— 方案卡「确认发送」→ 生成草稿（含变体+海报入队）→ 202 发送入队 → 轮询结果 ——
+  // 修「跳转不准」根因：确认卡「可以，去发」已预建草稿（createCardDraft 暂存），
+  // 此处优先复用，避免同一张方案卡建出两条草稿（僵尸草稿留在邮件 tab，状态与实际发送对不上）
   const confirmSendPlan = useCallback(async (card: PlanCard) => {
     if (!state.act) return;
     try {
-      const r = await api<{ draft: Draft; references?: any; error?: string }>('/api/draft', {
-        method: 'POST', body: JSON.stringify({ actId: state.act.id, planCard: card }),
-      });
-      if (r.error) { toast_(r.error); return; }
-      const d = r.draft;
+      let d: Draft | null = null;
+      if (pendingCardDraft && pendingCardDraft.actId === state.act.id) {
+        d = pendingCardDraft.draft;
+        pendingCardDraft = null;
+      }
+      if (!d) {
+        const r = await api<{ draft: Draft; references?: any; error?: string }>('/api/draft', {
+          method: 'POST', body: JSON.stringify({ actId: state.act.id, planCard: card }),
+        });
+        if (r.error) { toast_(r.error); return; }
+        d = r.draft;
+      }
       const s = await api<{ job_id?: string; queued?: boolean; result?: SendResult; error?: string }>(`/api/draft/${d.id}/send`, {
         method: 'POST', body: JSON.stringify({ subject: d.subject, body: d.body }),
       });
@@ -409,6 +423,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       toast_('发送失败：' + (e?.message || e));
     }
   }, [state.act, patch, loadState, pollJob, toast_]);
+
+  // —— 确认卡「可以，去发」预建草稿：重活（变体/海报入队）提前跑，暂存给确认发送复用 ——
+  const createCardDraft = useCallback(async (actId: string, card: PlanCard): Promise<Draft> => {
+    const r = await api<{ draft: Draft; error?: string }>('/api/draft', {
+      method: 'POST', body: JSON.stringify({ actId, planCard: card }),
+    });
+    if (r.error || !r.draft) throw new Error(r.error || '草稿生成失败');
+    pendingCardDraft = { actId, draft: r.draft };
+    return r.draft;
+  }, []);
 
   // —— 邮件卡编辑后发送（202 入队 + 轮询）——
   const sendEditedDraft = useCallback(async (subject: string, body: string) => {
@@ -437,7 +461,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const value: AppContextValue = {
     ...state,
     switchTab, switchAct, loadState, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
-    authSubmit, authLogout, jumpToConfig, confirmSendPlan, sendEditedDraft,
+    authSubmit, authLogout, jumpToConfig, confirmSendPlan, createCardDraft, sendEditedDraft,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
     setPlanShown: (p) => patch({ planShown: p }),
