@@ -88,6 +88,38 @@ test('⑤ 标签加权：convert +2 / 期满 −0.5，截断 [0,10]', () => {
   } finally { cleanup(); }
 });
 
+test('风格品类标签：normalizeStyle 归一 + scoring 产出 style_preference + manual 四值校验', () => {
+  const { store, cleanup } = tempStore('style-tag');
+  try {
+    // 归一：四值 + 中文别名 + 非法值
+    assert.equal(tagsMod.normalizeStyle('Tech'), 'tech');
+    assert.equal(tagsMod.normalizeStyle('科技'), 'tech');
+    assert.equal(tagsMod.normalizeStyle('时尚'), 'fashion');
+    assert.equal(tagsMod.normalizeStyle('商务'), 'business');
+    assert.equal(tagsMod.normalizeStyle('户外运动'), 'outdoor');
+    assert.equal(tagsMod.normalizeStyle('beauty'), null);
+    assert.equal(tagsMod.normalizeStyle(''), null);
+    // 打分：audience 带 style → 产出 style_preference（scoring 来源）
+    const [a] = store.addAudience([{ name: 'S', email: 's@x.com', intent: '加购未付', risk: '高', price: '高', abandoned_value: 10, style: 'tech' }]);
+    tagsMod.scoreAudience(store, [a]);
+    const styleTag = store.getAudienceTags(a.id).find(t => t.tag_type === 'style_preference');
+    assert.ok(styleTag, 'scoring 产出 style_preference');
+    assert.equal(styleTag.tag_value, 'tech');
+    assert.equal(styleTag.source, 'scoring');
+    // manual 写入 style_preference：服务端先归一（此处模拟同一行为），同类型机器行让位
+    const manualValue = tagsMod.normalizeStyle('科技');
+    store.upsertAudienceTag({ audience_id: a.id, tag_type: 'style_preference', tag_value: manualValue, weight: 6, source: 'manual' });
+    assert.equal(store.getAudienceTags(a.id).filter(t => t.tag_type === 'style_preference').length, 1, 'manual 替换同类型机器行');
+    assert.equal(store.getAudienceTags(a.id).find(t => t.tag_type === 'style_preference').tag_value, 'tech');
+    assert.equal(store.getAudienceTags(a.id).find(t => t.tag_type === 'style_preference').source, 'manual');
+    // 风格标签参与 tagDistribution（③ 生成输入）与 tagEffect（⑤ 效果聚合）
+    const dist = tagsMod.tagDistribution(store, [a]).find(d => d.tag_type === 'style_preference');
+    assert.ok(dist && dist.tag_value === 'tech');
+    const effect = tagsMod.tagEffect(store, { minSample: 1 }).find(e => e.tag_type === 'style_preference');
+    assert.ok(effect && effect.sample >= 1);
+  } finally { cleanup(); }
+});
+
 test('⑤ bounced 剔除：email_status=email_invalid 的收件人不再进入发送名单', async () => {
   const render = require('../lib/render');
   const { store, cleanup } = tempStore('tags-bounce');

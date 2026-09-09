@@ -15,6 +15,7 @@ const TAG_TYPE_LABEL: Record<string, string> = {
   intent: '意向',
   price_sensitivity: '价格敏感',
   category_like: '品类偏好',
+  style_preference: '风格品类',
 };
 const SOURCE_LABEL: Record<string, string> = {
   scoring: '打分',

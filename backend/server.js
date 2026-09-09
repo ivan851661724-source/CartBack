@@ -707,6 +707,7 @@ function parseCsv(text) {
       risk: row.risk || '中',
       price: row.price || '中',
       abandoned_value: parseFloat(row.abandoned_value) || 0,
+      style: tagsMod.normalizeStyle(row.style) || null,   // 风格品类列（tech/fashion/business/outdoor，含中文别名）
       source: 'import'
     });
   }
@@ -1141,7 +1142,8 @@ const server = http.createServer(async (req, res) => {
           name: e.name || (e.email || '').split('@')[0], email: e.email,
           intent: e.intent || '导入', risk: e.risk || '中', price: e.price || '中',
           abandoned_value: parseFloat(e.abandoned_value) || 0, source: 'store',
-          at_risk_at: Number(e.at_risk_at) || Date.now()   // 真实店铺事件自带流失时间（30 天窗口过滤依据）
+          at_risk_at: Number(e.at_risk_at) || Date.now(),   // 真实店铺事件自带流失时间（30 天窗口过滤依据）
+          style: tagsMod.normalizeStyle(e.style) || null    // 风格品类归一（tech/fashion/business/outdoor）
         }))
         .filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.email || ''));
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
@@ -1436,10 +1438,17 @@ const server = http.createServer(async (req, res) => {
       if (!aud) return sendJson(res, 404, { error: 'audience not found' });
       const list = Array.isArray(body.tags) ? body.tags.slice(0, 20) : [];
       for (const t of list) {
-        if (!t || !['price_sensitivity', 'intent', 'category_like'].includes(t.tag_type)) continue;
+        if (!t || !['price_sensitivity', 'intent', 'category_like', 'style_preference'].includes(t.tag_type)) continue;
+        // style_preference 归一到 tech/fashion/business/outdoor 四值，归一失败不写入
+        let tagValue = String(t.tag_value || '').slice(0, 40);
+        if (t.tag_type === 'style_preference') {
+          const normalized = tagsMod.normalizeStyle(tagValue);
+          if (!normalized) continue;
+          tagValue = normalized;
+        }
         store.upsertAudienceTag({
           audience_id: tm[1], tag_type: t.tag_type,
-          tag_value: String(t.tag_value || '').slice(0, 40),
+          tag_value: tagValue,
           weight: Math.max(0, Math.min(10, Number(t.weight) || 5)),
           source: 'manual'
         });

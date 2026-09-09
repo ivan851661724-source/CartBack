@@ -91,7 +91,8 @@ async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strate
     '铁律：只换角度不换事实——折扣力度、优惠码、品牌名、商品等事实必须与输入一致，禁止编造新事实、禁止夸大。' +
     '面向消费者的邮件必须是英文（或跟随店铺语种），禁止中文。允许使用模板占位符 {{name}}、{{coupon}}、{{brand}}、{{product}} 与单层 {{#if coupon}}…{{/if}}。' +
     '三档：discount=价格敏感人群（折扣主打，优惠码前置）；urgency=高意向人群（紧迫感为主、弱化折扣）；standard=其余人群（中性提醒）。' +
-    (mix ? '本次受众的实时标签分布：【' + mix + '】。三档的措辞权重跟着分布倾斜（如 price_sensitivity=high 占比高 → discount 档优惠信息更前置、urgency 档强调库存稀缺但保留事实），铁律不变。' : '') +
+    (mix ? '本次受众的实时标签分布：【' + mix + '】。三档的措辞权重跟着分布倾斜（如 price_sensitivity=high 占比高 → discount 档优惠信息更前置、urgency 档强调库存稀缺但保留事实），铁律不变。' +
+      'style_preference 是风格品类（tech/fashion/business/outdoor），据此选内容角度：tech→性能与参数、fashion→款式与搭配、business→效率与专业、outdoor→耐用与探索；只影响举例和措辞角度，不新增事实。' : '') +
     '只返回一个 JSON 对象：{"variants":[{"tier":"discount","subject":"…","body":"…"},{"tier":"urgency",…},{"tier":"standard",…}]}，不要 markdown 代码块。';
   const facts = {
     brand: draft.brand || '', discount: draft.discount || '', coupon: draft.coupon || '',

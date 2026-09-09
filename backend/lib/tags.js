@@ -26,6 +26,26 @@ function priceTagValue(row) {
   return 'mid';
 }
 
+// —— 风格品类（style_preference）：tech / fashion / business / outdoor ——
+const STYLES = ['tech', 'fashion', 'business', 'outdoor'];
+const STYLE_ALIASES = {
+  tech: 'tech', technology: 'tech', '科技': 'tech', '数码': 'tech', '电子': 'tech',
+  fashion: 'fashion', apparel: 'fashion', '时尚': 'fashion', '服饰': 'fashion', '服装': 'fashion', '美妆': 'fashion',
+  business: 'business', office: 'business', '商务': 'business', '办公': 'business', '职场': 'business',
+  outdoor: 'outdoor', sports: 'outdoor', '户外': 'outdoor', '运动': 'outdoor', '探险': 'outdoor'
+};
+/** 归一到四值之一；不在表内返回 null（不造数）。精确命中优先，中文别名支持子串回退（如「户外运动」→outdoor） */
+function normalizeStyle(v) {
+  if (!v) return null;
+  const key = String(v).trim().toLowerCase();
+  if (STYLE_ALIASES[key]) return STYLE_ALIASES[key];
+  if (STYLES.includes(key)) return key;
+  for (const s of STYLES) {
+    if (Object.entries(STYLE_ALIASES).some(([alias, val]) => val === s && alias.length >= 2 && key.includes(alias))) return s;
+  }
+  return null;
+}
+
 /** 由 audience 行计算标签集（[{tag_type, tag_value, weight}]，source=scoring） */
 function tagsForAudienceRow(row) {
   const tags = [];
@@ -35,6 +55,9 @@ function tagsForAudienceRow(row) {
   const priceValue = priceTagValue(row);
   const priceWeight = priceValue === 'high' ? 7 : priceValue === 'mid' ? 4 : 2;
   tags.push({ tag_type: 'price_sensitivity', tag_value: priceValue, weight: priceWeight });
+  // style_preference（风格品类）：店铺数据/导入带 style 才产出，权重固定 4（内容角度依据，不影响 tier 分档）
+  const styleValue = normalizeStyle(row.style);
+  if (styleValue) tags.push({ tag_type: 'style_preference', tag_value: styleValue, weight: 4 });
   // category_like：种子/导入数据无品类字段时不造数（允许缺）
   if (row.category) tags.push({ tag_type: 'category_like', tag_value: String(row.category), weight: 3 });
   return tags;
@@ -106,6 +129,7 @@ function tagEffect(store, opts = {}) {
 }
 
 module.exports = {
+  STYLES, STYLE_ALIASES, normalizeStyle,
   INTENT_RANK, tagsForAudienceRow, scoreAudience,
   weightForConversion, weightForExpiry,
   tagDistribution, tagEffect

@@ -30,7 +30,8 @@ const SCHEMA = {
     price: 'TEXT', score: 'REAL', abandoned_value: 'REAL', source: 'TEXT', created_at: 'INTEGER',
     locale: 'TEXT', country: 'TEXT',   // UI v4 整改 3：收件人语种/国家（邮件本地化依据，真实源 storeConnector 已带）
     email_status: 'TEXT',              // ⑤ bounced → 'email_invalid' 自动剔除后续名单（保护域名信誉）
-    at_risk_at: 'INTEGER'              // ① 进入流失风险的时间（intent 时效分档 / 紧迫度倒计时依据）
+    at_risk_at: 'INTEGER',             // ① 进入流失风险的时间（intent 时效分档 / 紧迫度倒计时依据）
+    style: 'TEXT'                      // 风格品类 tech/fashion/business/outdoor（style_preference 标签来源）
     // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
   },
   events: {
@@ -501,6 +502,7 @@ class Store {
 
   // —— 假种子受众（P0 真实源未接前的占位，§5①） ——
   seedAudience() {
+    const STYLES = ['tech', 'fashion', 'business', 'outdoor'];
     const seed = [
       ['林晚','wan.lin@example.com','加购未付','高','高',0.92,1280],
       ['陈默','mo.chen@example.com','弃购','高','中',0.88,860],
@@ -520,7 +522,8 @@ class Store {
         id: uid('aud_'), name, email, intent, risk, price, score, abandoned_value,
         source: 'seed', created_at: Date.now(),
         at_risk_at: Date.now() - atRiskDaysAgo * 86400000,
-        locale: 'en'   // UI v4 整改 3：种子补 locale（前端邮件卡片「EN · 跟随收件人」）
+        locale: 'en',                       // UI v4 整改 3：种子补 locale（前端邮件卡片「EN · 跟随收件人」）
+        style: STYLES[i % 4]                // 风格品类轮转分布（style_preference 标签来源）
       };
     });
     this._write('audience', seed);
