@@ -14,6 +14,11 @@ const TAG_TYPE_LABEL: Record<string, string> = {
   price_sensitivity: '价格敏感',
   category_like: '品类偏好',
   style_preference: '风格品类',
+  gender: '性别',
+  age_range: '年龄段',
+  device: '设备',
+  customer_segment: '客户分层',
+  language: '语种',
 };
 
 /** 标签效果区块（PRD §5 UI：标签飞轮资产的价值可见——Top 区块 + 样本数） */

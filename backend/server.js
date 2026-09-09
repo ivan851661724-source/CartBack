@@ -601,6 +601,18 @@ function applyTagExpiryWeights() {
   return { touched };
 }
 
+// send job 持有 draft 的 stale 快照（job 开头读一次）；upsert 前从当前行刷新异步 job（posters/mailgen）
+// 写入的字段，避免整行覆盖回退 posters/html/image_path（posters job 与 send job 并发写竞态修复）。
+function upsertDraftPreservingAsync(draft) {
+  const cur = store.getDraft(draft.id);
+  if (cur) {
+    for (const k of ['posters', 'html', 'image_path', 'variants', 'variants_provider', 'strategy_card_ids', 'audience_conditions']) {
+      if (cur[k] != null) draft[k] = cur[k];
+    }
+  }
+  return store.upsertDraft(draft);
+}
+
 async function sendDraft(draft) {
   const all = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid');
   // 预检不通过（无人可发）直接失败并分类提示
@@ -608,7 +620,7 @@ async function sendDraft(draft) {
   if (!check.ok) {
     draft.status = 'failed';
     draft.fail_reason = (check.problems.find(p => p.type !== 'quota_warning') || {}).human || 'precheck_failed';
-    store.upsertDraft(draft);
+    upsertDraftPreservingAsync(draft);
     metricsInc('send_fail');
     logEvent('send_fail', { draft_id: draft.id, reason: draft.fail_reason });
     return { error: draft.fail_reason, problems: check.problems, recipients: 0, cost: 0, estGmv: draft.estGmv };
@@ -616,7 +628,7 @@ async function sendDraft(draft) {
   const { allow, skipped } = frequencyFilter(all, draft);
   metricsInc('send_volume', allow.length);
   const real = (config.mode === 'real' && config.espKey && config.espFrom);
-  draft.status = 'sending'; store.upsertDraft(draft);
+  draft.status = 'sending'; upsertDraftPreservingAsync(draft);
   if (!real) {
     draft.status = 'sent';
     draft.sent_at = Date.now();
@@ -624,7 +636,7 @@ async function sendDraft(draft) {
     draft.cost = +(allow.length * 0.02).toFixed(2); // 仿真混合成本
     draft.skipped_by_frequency = skipped;
     draft.g0_blocked = [];   // 仿真档不做 G0 拦截（内容为商家确认过的原稿）
-    store.upsertDraft(draft);
+    upsertDraftPreservingAsync(draft);
     scheduleSimEvents(draft, allow);
     benchmarkMod.rebuildBenchmark(store);
     metricsInc('send_sim');
@@ -644,7 +656,7 @@ async function sendDraft(draft) {
     // 全部被 G0 拦截 → 置失败并给出人话修复指引（绝不把「0 人已发送」标成成功）
     draft.status = 'failed';
     draft.fail_reason = 'G0 语种护栏拦截了全部邮件（检出非白名单中文）。请到设置页把品牌名/专有名词加入白名单，或修正文案后重试。';
-    store.upsertDraft(draft);
+    upsertDraftPreservingAsync(draft);
     metricsInc('send_fail');
     logEvent('send_fail', { draft_id: draft.id, reason: 'g0_blocked_all' });
     return { error: draft.fail_reason, g0Blocked: blockedList.length, recipients: 0, cost: 0, estGmv: draft.estGmv };
@@ -673,7 +685,7 @@ async function sendDraft(draft) {
           esp_id: espIds[i] || null, ts: Date.now()
         });
       }
-      store.upsertDraft(draft);
+      upsertDraftPreservingAsync(draft);
       benchmarkMod.rebuildBenchmark(store);
       metricsInc('send_real');
       logEvent('send', { real: true, recipients: sendable.length, skipped_by_frequency: skipped, g0_blocked: blockedList.length, attempt, cost: draft.cost });
@@ -682,7 +694,7 @@ async function sendDraft(draft) {
   }
   draft.status = 'failed';
   draft.fail_reason = String(lastErr && lastErr.message || lastErr);
-  store.upsertDraft(draft);
+  upsertDraftPreservingAsync(draft);
   metricsInc('send_fail');
   logEvent('send_fail', { recipients: sendable.length, error: draft.fail_reason });
   return { real: true, error: draft.fail_reason, recipients: (sendable || []).length, cost: draft.cost || 0, estGmv: draft.estGmv };
@@ -759,6 +771,11 @@ function parseCsv(text) {
       price: row.price || '中',
       abandoned_value: parseFloat(row.abandoned_value) || 0,
       style: tagsMod.normalizeStyle(row.style) || null,   // 风格品类列（tech/fashion/business/outdoor，含中文别名）
+      gender: tagsMod.normalizeGender(row.gender) || null,          // 性别列（female/male/other，含中文别名）
+      age_range: row.age_range || null,                              // 年龄段原样（18-24/25-34/…）
+      device: row.device || null,                                    // 设备原样（iPhone 15 等）
+      customer_segment: tagsMod.normalizeSegment(row.customer_segment) || null, // 客户分层 new/returning/vip
+      locale: row.locale || null,                                    // 语种（language 标签来源，en-US/en/zh…）
       source: 'import'
     });
   }
@@ -1194,7 +1211,12 @@ const server = http.createServer(async (req, res) => {
           intent: e.intent || '导入', risk: e.risk || '中', price: e.price || '中',
           abandoned_value: parseFloat(e.abandoned_value) || 0, source: 'store',
           at_risk_at: Number(e.at_risk_at) || Date.now(),   // 真实店铺事件自带流失时间（30 天窗口过滤依据）
-          style: tagsMod.normalizeStyle(e.style) || null    // 风格品类归一（tech/fashion/business/outdoor）
+          style: tagsMod.normalizeStyle(e.style) || null,            // 风格品类归一（tech/fashion/business/outdoor）
+          gender: tagsMod.normalizeGender(e.gender) || null,        // 性别归一（female/male/other）
+          age_range: e.age_range || null,                            // 年龄段原样
+          device: e.device || null,                                  // 设备原样
+          customer_segment: tagsMod.normalizeSegment(e.customer_segment) || null, // 客户分层
+          locale: e.locale || null                                   // 语种（language 标签来源）
         }))
         .filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.email || ''));
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
@@ -1225,7 +1247,13 @@ const server = http.createServer(async (req, res) => {
         locale: r.locale || null,   // 收件人语种（邮件本地化依据）
         country: r.country || null,
         created_at: Date.now(),
-        at_risk_at: Date.now()
+        at_risk_at: Date.now(),
+        // 人口/画像维度：Shopify 标准客户数据无这些字段，留空；tagsForAudienceRow 防御跳过。
+        // 连接器若返回（如 CRM metafield 透传），原样落入供打分。
+        gender: tagsMod.normalizeGender(r.gender) || null,
+        age_range: r.age_range || null,
+        device: r.device || null,
+        customer_segment: tagsMod.normalizeSegment(r.customer_segment) || null
       };
     }
 
@@ -1496,12 +1524,25 @@ const server = http.createServer(async (req, res) => {
       const aud = store.getAudience().find(a => a.id === tm[1]);
       if (!aud) return sendJson(res, 404, { error: 'audience not found' });
       const list = Array.isArray(body.tags) ? body.tags.slice(0, 20) : [];
+      const ALLOWED = ['price_sensitivity', 'intent', 'category_like', 'style_preference', 'gender', 'age_range', 'device', 'customer_segment', 'language'];
       for (const t of list) {
-        if (!t || !['price_sensitivity', 'intent', 'category_like', 'style_preference'].includes(t.tag_type)) continue;
-        // style_preference 归一到 tech/fashion/business/outdoor 四值，归一失败不写入
+        if (!t || !ALLOWED.includes(t.tag_type)) continue;
+        // 归一到合法取值，归一失败不写入
         let tagValue = String(t.tag_value || '').slice(0, 40);
         if (t.tag_type === 'style_preference') {
           const normalized = tagsMod.normalizeStyle(tagValue);
+          if (!normalized) continue;
+          tagValue = normalized;
+        } else if (t.tag_type === 'gender') {
+          const normalized = tagsMod.normalizeGender(tagValue);
+          if (!normalized) continue;
+          tagValue = normalized;
+        } else if (t.tag_type === 'customer_segment') {
+          const normalized = tagsMod.normalizeSegment(tagValue);
+          if (!normalized) continue;
+          tagValue = normalized;
+        } else if (t.tag_type === 'language') {
+          const normalized = tagsMod.localeToLanguage(tagValue);
           if (!normalized) continue;
           tagValue = normalized;
         }
@@ -1665,8 +1706,14 @@ server.listen(PORT, () => {
   console.log(`本地令牌: ${config.localToken}`);
 
   // —— 周期任务（PRD §0.5 jobs / G6 / ⑤ 标签窗口反哺）——
-  // 种子受众补打标签（首次启动 / 老库升级）
-  if (store.getAllAudienceTags().length === 0) tagsMod.scoreAudience(store, store.getAudience());
+  // 受众标签补打：首次启动（无标签）或老库升级（新增维度 tag_type 后一次性迁移）。
+  // 用 meta 标记保证迁移只跑一次，不在每次启动重复重打；upsertAudienceTag 同源取高、manual 不覆盖，幂等安全。
+  if (store.getAllAudienceTags().length === 0) {
+    tagsMod.scoreAudience(store, store.getAudience());
+  } else if (store.getMeta('tag_dims_v2_migrated') !== '1') {
+    tagsMod.scoreAudience(store, store.getAudience());
+    store.setMeta('tag_dims_v2_migrated', '1');
+  }
   // G6：竞品原文 30 天清除（每小时检查一次）
   setInterval(() => queue.enqueue({ type: 'g6_purge', payload: {} }), 3600 * 1000);
   // ⑤ 窗口期满未转化 → 标签 −0.5（每 6 小时检查一次）

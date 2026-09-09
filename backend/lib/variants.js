@@ -67,9 +67,20 @@ function standardVariants(draft = {}) {
   ];
 }
 
-/** 标签分布 → 一句话画像（供 system 注入；空分布返回空串，标准三档不受影响） */
+/** 标签分布 → 一句话画像（供 system 注入；空分布返回空串，标准三档不受影响）。
+ *  按 tag_type 去重，每类只取 count 最高的代表值——避免维度增多后人口标签把
+ *  intent/price_sensitivity 挤出（tagDistribution 已按 count 降序，同 type 取首条即最高）。 */
 function tagMixSummary(tagDist = []) {
-  const list = (Array.isArray(tagDist) ? tagDist : []).slice(0, 6);
+  const dist = Array.isArray(tagDist) ? tagDist : [];
+  if (!dist.length) return '';
+  const seenType = new Set();
+  const list = [];
+  for (const d of dist) {
+    if (!d || seenType.has(d.tag_type)) continue;
+    seenType.add(d.tag_type);
+    list.push(d);
+    if (list.length >= 10) break;   // 兜底上限，防极端长尾灌水 prompt
+  }
   if (!list.length) return '';
   return list.map(d => `${d.tag_type}=${d.tag_value}×${d.count}(均权${d.avg_weight})`).join('、');
 }

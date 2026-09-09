@@ -53,6 +53,51 @@ test('tags：打分规则 — intent 时效分层 hot/warm/cold，price/category
   assert.ok(!mid.some(t => t.tag_type === 'category_like'));
   const cat = tags.tagsForAudienceRow({ id: 'a8', intent: '弃购', category: '跑鞋' });
   assert.equal(cat.find(t => t.tag_type === 'category_like').tag_value, '跑鞋');
+  // price_sensitivity 归一：画像侧 premium/standard/value → high/mid/low
+  assert.equal(tags.tagsForAudienceRow({ id: 'p1', intent: '弃购', price: 'premium' }).find(t => t.tag_type === 'price_sensitivity').tag_value, 'high');
+  assert.equal(tags.tagsForAudienceRow({ id: 'p2', intent: '弃购', price: 'standard' }).find(t => t.tag_type === 'price_sensitivity').tag_value, 'mid');
+  assert.equal(tags.tagsForAudienceRow({ id: 'p3', intent: '弃购', price: 'value' }).find(t => t.tag_type === 'price_sensitivity').tag_value, 'low');
+  // 新维度：有值才造，无值不造
+  const full = tags.tagsForAudienceRow({ id: 'p4', intent: '弃购', gender: 'F', age_range: '18-24', device: 'iPhone 15', customer_segment: 'new', locale: 'en-US' });
+  assert.equal(full.find(t => t.tag_type === 'gender').tag_value, 'female');
+  assert.equal(full.find(t => t.tag_type === 'age_range').tag_value, '18-24');
+  assert.equal(full.find(t => t.tag_type === 'device').tag_value, 'iPhone 15');
+  assert.equal(full.find(t => t.tag_type === 'customer_segment').tag_value, 'new');
+  assert.equal(full.find(t => t.tag_type === 'language').tag_value, 'en');
+  // 缺字段不造标签
+  assert.ok(!tags.tagsForAudienceRow({ id: 'p5', intent: '弃购' }).some(t => ['gender', 'age_range', 'device', 'customer_segment', 'language'].includes(t.tag_type)));
+  // gender F/M 归一 + 已归一值原样 + 中文别名
+  assert.equal(tags.tagsForAudienceRow({ id: 'p6', intent: '弃购', gender: 'M' }).find(t => t.tag_type === 'gender').tag_value, 'male');
+  assert.equal(tags.tagsForAudienceRow({ id: 'p7', intent: '弃购', gender: 'female' }).find(t => t.tag_type === 'gender').tag_value, 'female');
+  assert.equal(tags.tagsForAudienceRow({ id: 'p7b', intent: '弃购', gender: '女' }).find(t => t.tag_type === 'gender').tag_value, 'female');
+  // 非法 customer_segment / gender 不造
+  assert.ok(!tags.tagsForAudienceRow({ id: 'p8', intent: '弃购', customer_segment: 'unknown' }).some(t => t.tag_type === 'customer_segment'));
+  assert.ok(!tags.tagsForAudienceRow({ id: 'p9', intent: '弃购', gender: 'x' }).some(t => t.tag_type === 'gender'));
+  // language 只认 2 字母主码
+  assert.equal(tags.tagsForAudienceRow({ id: 'p10', intent: '弃购', locale: 'de-DE' }).find(t => t.tag_type === 'language').tag_value, 'de');
+  assert.equal(tags.tagsForAudienceRow({ id: 'p11', intent: '弃购', locale: 'zh' }).find(t => t.tag_type === 'language').tag_value, 'zh');
+});
+
+test('tags：selftest5 画像维度 → audience 标签全打通', () => {
+  const profiles = [
+    { gender: 'F', age_range: '18-24', device: 'iPhone 15', price_sensitivity: 'value', customer_segment: 'new', locale: 'en-US' },
+    { gender: 'M', age_range: '35-44', device: 'iPhone 15 Pro Max', price_sensitivity: 'premium', customer_segment: 'returning', locale: 'en-US' },
+    { gender: 'M', age_range: '25-34', device: 'iPhone 14', price_sensitivity: 'premium', customer_segment: 'vip', locale: 'de-DE' },
+    { gender: 'F', age_range: '45-54', device: 'iPhone 13', price_sensitivity: 'value', customer_segment: 'returning', locale: 'en-CA' },
+    { gender: 'M', age_range: '18-24', device: 'iPhone 15 Pro', price_sensitivity: 'standard', customer_segment: 'new', locale: 'en-AU' },
+  ];
+  const priceMap = { value: 'low', premium: 'high', standard: 'mid' };
+  const genderMap = { F: 'female', M: 'male' };
+  for (const p of profiles) {
+    // 画像 price_sensitivity 经 audience.price 透传后由 priceTagValue 归一
+    const ts = tags.tagsForAudienceRow({ id: 'x', intent: '弃购', at_risk_at: Date.now(), price: p.price_sensitivity, ...p });
+    assert.equal(ts.find(t => t.tag_type === 'price_sensitivity').tag_value, priceMap[p.price_sensitivity]);
+    assert.equal(ts.find(t => t.tag_type === 'gender').tag_value, genderMap[p.gender]);
+    assert.equal(ts.find(t => t.tag_type === 'age_range').tag_value, p.age_range);
+    assert.equal(ts.find(t => t.tag_type === 'device').tag_value, p.device);
+    assert.equal(ts.find(t => t.tag_type === 'customer_segment').tag_value, p.customer_segment);
+    assert.equal(ts.find(t => t.tag_type === 'language').tag_value, p.locale.split('-')[0].toLowerCase());
+  }
 });
 
 test('tags：scoreAudience 批量入库 source=scoring；manual 权威不被机器覆盖', () => {

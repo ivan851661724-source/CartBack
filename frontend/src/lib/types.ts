@@ -106,6 +106,11 @@ export interface Audience {
   locale?: string;
   country?: string;
   email_status?: string; // 'email_invalid' = 退信剔除
+  style?: string; // 风格品类 tech/fashion/business/outdoor
+  gender?: string; // 性别 female/male/other
+  age_range?: string; // 年龄段 18-24/25-34/…
+  device?: string; // 设备 iPhone 15 等
+  customer_segment?: string; // 客户分层 new/returning/vip
 }
 
 /** 数据看板北极星 KPI（/api/state 的 kpis） */

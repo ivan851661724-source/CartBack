@@ -21,8 +21,9 @@ function intentTagValue(row) {
 
 function priceTagValue(row) {
   const p = row.price || '';
-  if (['高', 'high'].includes(p)) return 'high';
-  if (['低', 'low'].includes(p)) return 'low';
+  if (['高', 'high', 'premium'].includes(p)) return 'high';
+  if (['低', 'low', 'value'].includes(p)) return 'low';
+  if (['中', 'mid', 'standard'].includes(p)) return 'mid';
   return 'mid';
 }
 
@@ -46,6 +47,29 @@ function normalizeStyle(v) {
   return null;
 }
 
+// —— 性别（gender）：F/M/O → female/male/other，已归一值原样 ——
+const GENDER_ALIASES = { f: 'female', m: 'male', o: 'other', female: 'female', male: 'male', other: 'other', '女': 'female', '男': 'male' };
+function normalizeGender(v) {
+  if (!v) return null;
+  const key = String(v).trim().toLowerCase();
+  return GENDER_ALIASES[key] || null;
+}
+
+// —— 客户分层（customer_segment）：new/returning/vip ——
+const SEGMENTS = ['new', 'returning', 'vip'];
+function normalizeSegment(v) {
+  if (!v) return null;
+  const key = String(v).trim().toLowerCase();
+  return SEGMENTS.includes(key) ? key : null;
+}
+
+// —— 语种（language）：locale 主码（en-US→en、de-DE→de、zh→zh）——
+function localeToLanguage(v) {
+  if (!v) return null;
+  const primary = String(v).trim().toLowerCase().split(/[-_]/)[0];
+  return /^[a-z]{2}$/.test(primary) ? primary : null;
+}
+
 /** 由 audience 行计算标签集（[{tag_type, tag_value, weight}]，source=scoring） */
 function tagsForAudienceRow(row) {
   const tags = [];
@@ -60,6 +84,15 @@ function tagsForAudienceRow(row) {
   if (styleValue) tags.push({ tag_type: 'style_preference', tag_value: styleValue, weight: 4 });
   // category_like：种子/导入数据无品类字段时不造数（允许缺）
   if (row.category) tags.push({ tag_type: 'category_like', tag_value: String(row.category), weight: 3 });
+  // —— 人口/画像维度（仿 category_like 防御式：字段缺失不造；weight ≤3 不反客为主）——
+  const genderValue = normalizeGender(row.gender);
+  if (genderValue) tags.push({ tag_type: 'gender', tag_value: genderValue, weight: 2 });
+  if (row.age_range) tags.push({ tag_type: 'age_range', tag_value: String(row.age_range), weight: 2 });
+  if (row.device) tags.push({ tag_type: 'device', tag_value: String(row.device), weight: 2 });
+  const segValue = normalizeSegment(row.customer_segment);
+  if (segValue) tags.push({ tag_type: 'customer_segment', tag_value: segValue, weight: 3 });
+  const langValue = localeToLanguage(row.locale);
+  if (langValue) tags.push({ tag_type: 'language', tag_value: langValue, weight: 2 });
   return tags;
 }
 
@@ -130,6 +163,7 @@ function tagEffect(store, opts = {}) {
 
 module.exports = {
   STYLES, STYLE_ALIASES, normalizeStyle,
+  SEGMENTS, normalizeSegment, normalizeGender, localeToLanguage,
   INTENT_RANK, tagsForAudienceRow, scoreAudience,
   weightForConversion, weightForExpiry,
   tagDistribution, tagEffect

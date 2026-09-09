@@ -31,7 +31,11 @@ const SCHEMA = {
     locale: 'TEXT', country: 'TEXT',   // UI v4 整改 3：收件人语种/国家（邮件本地化依据，真实源 storeConnector 已带）
     email_status: 'TEXT',              // ⑤ bounced → 'email_invalid' 自动剔除后续名单（保护域名信誉）
     at_risk_at: 'INTEGER',             // ① 进入流失风险的时间（intent 时效分档 / 紧迫度倒计时依据）
-    style: 'TEXT'                      // 风格品类 tech/fashion/business/outdoor（style_preference 标签来源）
+    style: 'TEXT',                     // 风格品类 tech/fashion/business/outdoor（style_preference 标签来源）
+    gender: 'TEXT',                    // 性别 female/male/other（gender 标签来源）
+    age_range: 'TEXT',                 // 年龄段原样 18-24/25-34/35-44/45-54（age_range 标签来源）
+    device: 'TEXT',                    // 设备原样如 iPhone 15（device 标签来源）
+    customer_segment: 'TEXT'           // 客户分层 new/returning/vip（customer_segment 标签来源）
     // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
   },
   events: {
@@ -503,6 +507,10 @@ class Store {
   // —— 假种子受众（P0 真实源未接前的占位，§5①） ——
   seedAudience() {
     const STYLES = ['tech', 'fashion', 'business', 'outdoor'];
+    const GENDERS = ['female', 'male', 'female', 'male', 'female', 'male', 'male', 'female', 'male', 'female', 'female', 'male'];
+    const AGES = ['18-24', '25-34', '35-44', '45-54', '25-34', '35-44', '18-24', '45-54', '25-34', '35-44', '18-24', '25-34'];
+    const DEVICES = ['iPhone 15', 'iPhone 14', 'iPhone 15 Pro Max', 'iPhone 13', 'iPhone 15 Pro', 'iPhone 14', 'iPhone 15', 'iPhone 13', 'iPhone 15 Pro Max', 'iPhone 14', 'iPhone 15', 'iPhone 13'];
+    const SEGS = ['new', 'returning', 'vip', 'returning', 'new', 'vip', 'new', 'returning', 'new', 'vip', 'returning', 'new'];
     const seed = [
       ['林晚','wan.lin@example.com','加购未付','高','高',0.92,1280],
       ['陈默','mo.chen@example.com','弃购','高','中',0.88,860],
@@ -523,7 +531,11 @@ class Store {
         source: 'seed', created_at: Date.now(),
         at_risk_at: Date.now() - atRiskDaysAgo * 86400000,
         locale: 'en',                       // UI v4 整改 3：种子补 locale（前端邮件卡片「EN · 跟随收件人」）
-        style: STYLES[i % 4]                // 风格品类轮转分布（style_preference 标签来源）
+        style: STYLES[i % 4],                // 风格品类轮转分布（style_preference 标签来源）
+        gender: GENDERS[i],                  // 性别轮转（gender 标签来源）
+        age_range: AGES[i],                  // 年龄段轮转（age_range 标签来源）
+        device: DEVICES[i],                  // 设备轮转（device 标签来源）
+        customer_segment: SEGS[i]            // 客户分层轮转（customer_segment 标签来源）
       };
     });
     this._write('audience', seed);
