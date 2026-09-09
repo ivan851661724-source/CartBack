@@ -300,6 +300,7 @@ function makeLlmClient() {
     baseUrl: config.aiBaseUrl,
     model: config.aiModel,
     apiKey: config.aiKey,
+    timeoutMs: 45000,   // 并发压测下 LLM 偶发 >20s：20s 超时会把整轮对话打成空回复（实测 r6 B套件）
     contextWindowTokens: config.aiContextWindowTokens,
     contextSafetyMargin: config.aiContextSafetyMargin,
     extraBody: config.aiExtraBody || null

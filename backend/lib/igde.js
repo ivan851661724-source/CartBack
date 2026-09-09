@@ -62,13 +62,16 @@ const META_RE = /人机|机器人|是(个)?真人|自动回复|智能吗|ai\s*(�
 // —— 意图抽取（桩 / 离线，关键词启发式） ——
 function extractNeeds(text) {
   const t = (text || '').toLowerCase();
+  // 目标从句（"想让他们看看新款"）里的动词会误触发 audience 抽取（实测 A03「看看」→ 浏览未买），
+  // audience 判定前先剥离「想(让)他们…」类意图从句
+  const tAud = t.replace(/(想|希望)(让|请)?(他们|她们|客人|客户|顾客)[^，。？!?]*/g, '');
   const out = {};
   // audience（加购优先于「没付」，避免「加购没付」误判为弃购）
-  if (/加购|购物车/.test(t)) out.audience = '加购未付客户';
-  else if (/弃购|没付|未付|下单没|未下单/.test(t)) out.audience = '弃购 / 下单未付客户';
-  else if (/浏览|看看|逛/.test(t)) out.audience = '浏览未买客户';
-  else if (/老客|老顾客|会员|vip|沉睡|很久没|好久没|流失/.test(t)) out.audience = '沉睡 / 流失老客';
-  else if (/新客|新人|新用户/.test(t)) out.audience = '新客';
+  if (/加购|购物车/.test(tAud)) out.audience = '加购未付客户';
+  else if (/弃购|没付|未付|下单没|未下单/.test(tAud)) out.audience = '弃购 / 下单未付客户';
+  else if (/浏览|看看|逛/.test(tAud)) out.audience = '浏览未买客户';
+  else if (/老客|老顾客|会员|vip|沉睡|很久没|好久没|流失/.test(tAud)) out.audience = '沉睡 / 流失老客';
+  else if (/新客|新人|新用户/.test(tAud)) out.audience = '新客';
   // 收紧：裸「都/大家/所有」误伤率高（如"客人基本都是欧美的"），要求明确的人群指称才兜底
   else if (/全部(客户|老客|客人|人群)|所有(客户|客人|老客|人)|所有流失/.test(t)) out.audience = '全部流失人群';
   // pain（中英文双匹配）
@@ -84,14 +87,18 @@ function extractNeeds(text) {
   else if (/转化|成交|下单|购买/.test(t)) out.goal = '提升到转化 / 成交';
   else if (/逛|看看|活跃/.test(t)) out.goal = '唤回活跃 / 回来逛逛';
   // offer
-  if (/(不要|不用|不给|取消|不设|不打).{0,4}(折扣|优惠|券|包邮|钩子|折)/.test(t)) out.offer = '无额外优惠';
+  if (/(不要|不用|不给|别给|别整|别搞|别提|别弄|取消|不设|不打).{0,6}(折扣|优惠|码|券|包邮|钩子|折)/.test(t)) out.offer = '无额外优惠';
   else if (/([一二三四五六七八九]|\d+)\s*折/.test(t)) {
     const m = t.match(/([一二三四五六七八九]|\d+)\s*折/);
     const zhDigit = { 一: 1, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
     out.offer = (zhDigit[m[1]] || m[1]) + '折优惠';
   }
   else if (/满\s*(\d+)\s*减\s*(\d+)/.test(t)) { const m = t.match(/满\s*(\d+)\s*减\s*(\d+)/); out.offer = `满${m[1]}减${m[2]}`; }
-  else if (/优惠码|优惠券|券|折扣码|promo|coupon/.test(t)) out.offer = '专属优惠码';
+  else if (/(优惠码|优惠券|折扣码|promo|coupon|\bcode\b)/i.test(t)) {
+    // 用户自定义码名优先保留（实测 M10 KEYBOARD12 / M12 CAMP15），否则退回泛化表述
+    const m = t.match(/(?:code|码)\s*[^A-Za-z0-9]{0,6}([A-Za-z][A-Za-z0-9]{2,15})/i);
+    out.offer = m ? '优惠码' + m[1].toUpperCase() : '专属优惠码';
+  }
   else if (/包邮|免邮/.test(t)) out.offer = '包邮'; // 明确要包邮时优先于通用「折扣」词，避免"折扣改成包邮"被误抽成折扣
   else if (/(\d+)\s*%|打折|折扣/.test(t)) {
     const m = t.match(/(\d+)\s*%/);
@@ -99,8 +106,16 @@ function extractNeeds(text) {
     out.offer = (m && +m[1] !== 100) ? m[1] + '%优惠' : (m ? '' : '折扣优惠');
     if (!out.offer) delete out.offer;
   }
+  // 具体、低频的钩子先判（买二送一/积分），通用的「限时」兜底放最后——分支顺序即优先级
+  else if (/买\s*[一二三四五六七八九\d]+\s*送/.test(t)) { const m = t.match(/买\s*([一二三四五六七八九\d]+\s*送\s*[一二三四五六七八九\d]+)/); out.offer = '买' + m[1]; }
+  else if (/积分/.test(t)) out.offer = /双倍/.test(t) ? '双倍积分' : '积分回馈';
+  else if (/首月\s*(免费|0元|零元)/.test(t)) out.offer = '首月免费';
   else if (/限时|秒杀|紧迫|倒计时|赶紧/.test(t)) out.offer = '限时紧迫钩子';
-  else if (/送|赠|礼/.test(t)) out.offer = '赠送礼品';
+  else if (/送|赠|礼/.test(t)) {
+    // 保留赠送物细节（实测 M13「送升降支架」粗抽成「赠送礼品」丢失用户指定）
+    const m = t.match(/[送赠]([一-鿿A-Za-z0-9]{1,10})/);
+    out.offer = m ? '送' + m[1].replace(/[吧呢啦哦呀了]+$/, '') : '赠送礼品';
+  }
   return out;
 }
 
@@ -222,10 +237,12 @@ class IGDE {
       : 'suspicious';
   }
 
-  /** 已确认字段默认不覆盖；只有用户明确纠错时才更新。 */
-  applyNeeds(act, extracted, userText = '') {
+  /** 已确认字段默认不覆盖；只有用户明确纠错、或本轮用户原话直接命中该字段（kwTouched）时才更新。
+   *  kwTouched：本轮关键词抽取命中的字段集合（逐字有据）——短时记忆语义 = 用户最新明确表述优先，
+   *  防止模型编造/早期值被首字段优先锁死（实测 M5 浏览未买被锁成加购未付、M8 新客被锁成老客）。 */
+  applyNeeds(act, extracted, userText = '', kwTouched = null) {
     act.needs = act.needs || {};
-    const correction = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|rather|instead|actually|correction)/i.test(userText);
+    const correction = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|还是|改主意|rather|instead|actually|correction)/i.test(userText);
     const correctionTail = correction
       ? String(userText).split(/不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|rather|instead|actually|correction/i).pop()
       : '';
@@ -233,12 +250,12 @@ class IGDE {
     if (correction && /(受众|客户|顾客|人群|这拨人)/.test(correctionTail)) explicitCorrection.audience = explicitCorrection.audience || true;
     if (correction && /(痛点|原因|因为|为啥|为什么)/.test(correctionTail)) explicitCorrection.pain = explicitCorrection.pain || true;
     if (correction && /(目标|希望|回来干啥|想让)/.test(correctionTail)) explicitCorrection.goal = explicitCorrection.goal || true;
-    if (correction && /(优惠|折|券|包邮|免邮|钩子|满减|赠品)/.test(correctionTail)) explicitCorrection.offer = explicitCorrection.offer || true;
+    if (correction && /(优惠|折|券|包邮|免邮|钩子|满减|赠品|码|code)/i.test(correctionTail)) explicitCorrection.offer = explicitCorrection.offer || true;
     for (const f of NEEDED_FIELDS) {
       if (extracted && extracted[f] != null && String(extracted[f]).trim()) {
         // 注入防御：needs 值收口后再入库，防超长/带控制符文本把指令带进后续 prompt 与邮件插值
         const next = clampNeedValue(extracted[f]);
-        if (next && (!act.needs[f] || act.needs[f] === next || (correction && explicitCorrection[f]))) act.needs[f] = next;
+        if (next && (!act.needs[f] || act.needs[f] === next || (correction && explicitCorrection[f]) || (kwTouched && kwTouched.has(f)))) act.needs[f] = next;
       }
     }
     return act.needs;
@@ -338,26 +355,38 @@ class IGDE {
     let extracted;
     let reply = '';
     let aiDead = false;
+    let kwTouched = null;   // 本轮用户原话逐字命中的字段（applyNeeds 覆盖许可）
     let memoryPatch = null;
     let profilePatch = null;
     if (this.aiEnabled && this.callAI) {
       try {
         const r = await this._aiCoach(act, userText, runtime, opts.onReplyToken); // 一次对话同时抽取 needs + 生成话术
-        // 抽取合并：AI 抽取优先；AI 漏抽的字段用关键词启发式补缺（保证四要素迟早集齐，确认标签能弹出）
+        // 抽取合并：本轮用户原话关键词命中的字段以原话为准（覆盖模型编造/过期值）；模型漏抽的用关键词补缺
         extracted = { ...(r.needs || {}) };
         const kw = extractNeeds(userText);
-        for (const f of NEEDED_FIELDS) if (!extracted[f] && kw[f]) extracted[f] = kw[f];
+        // 问句守卫：recall 类提问（「…是多少？别记混」问号可在句中）是在查询记忆而非陈述新事实，
+        // 不得触发覆盖（实测 M8 探针问句把 offer 从「9折码」冲成「折扣优惠」、audience 冲回老客）。
+        // 含 ?/？ 或疑问词即视为问句——用户自己拿不准的问句也不构成 IGDE 拍板
+        const probeQuestion = /[?？]/.test(userText)
+          || /(多少|哪个|哪些|是不是|有没有|还记得|别记混|是多少)/.test(userText);
+        if (!probeQuestion) {
+          for (const f of NEEDED_FIELDS) {
+            if (kw[f]) { extracted[f] = kw[f]; (kwTouched || (kwTouched = new Set())).add(f); }
+          }
+        }
         reply = r.reply;
         memoryPatch = r.memoryPatch;
         profilePatch = r.profilePatch;
       } catch (e) {
         extracted = extractNeeds(userText); // AI 调用失败 → 离线降级（抽取走关键词启发式）
+        kwTouched = new Set(NEEDED_FIELDS.filter(f => extracted[f]));
         aiDead = true;
       }
     } else {
       extracted = extractNeeds(userText);
+      kwTouched = new Set(NEEDED_FIELDS.filter(f => extracted[f]));
     }
-    this.applyNeeds(act, extracted, userText);
+    this.applyNeeds(act, extracted, userText, kwTouched);
     // 用户明确指定的本次 offer 优先；没指定时才沿用其已确认的长期默认值。
     if (!act.needs.offer && runtime.agentProfile.default_offer) {
       act.needs.offer = runtime.agentProfile.default_offer;
@@ -401,7 +430,8 @@ class IGDE {
 
     // —— 护栏管线（L0→L1→L2→L4；违规重生成 1 次 + 轮换兜底）——
     //    注：L3 已软化（P0-4）—— 不再强制问号，问号与否交给模型人格（COACH_SYSTEM_PROMPT 要求"该问才问"）
-    if (!guardrailL0(reply)) { reply = this._pickFallback(act); guardrailHits.push('L0'); }
+    // L0：空回复或退化输出（实测出现过 3 字符 "[1]" 残渣）→ 落兜底池，绝不直达用户
+    if (!guardrailL0(reply) || reply.trim().length < 2) { reply = this._pickFallback(act); guardrailHits.push('L0'); }
     reply = guardrailL1(reply);
     // L2 说教/推销：本地正则先拦 + /critic 精判；违规先重生成 1 次（真模型），仍不过则兜底
     let l2ok = guardrailL2(reply);
@@ -830,7 +860,9 @@ class IGDE {
     const n = act.needs;
     const lang = this._collapseLang(opts.locale); // 仅 zh/en 有模板，其余语种回落 en
     const offer = this._offerText(n.offer, lang);
-    const coupon = 'COMEBACK-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    // 用户指定过码名（needs.offer 含「优惠码KEYBOARD12」等）→ 用用户的码；否则生成随机码
+    const userCode = (n.offer || '').match(/优惠码([A-Za-z][A-Za-z0-9]{2,15})/i);
+    const coupon = userCode ? userCode[1].toUpperCase() : 'COMEBACK-' + Math.random().toString(36).slice(2, 8).toUpperCase();
     const subject = this._subject(n, lang);
     const body = this._body(n, coupon, lang);
     const posters = lang === 'en'

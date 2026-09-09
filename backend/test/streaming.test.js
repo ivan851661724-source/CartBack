@@ -81,7 +81,9 @@ test('IGDE 线程化：handle 传 onReplyToken → callAI 收到 {onReplyToken} 
   assert.equal(receivedOpts && typeof receivedOpts.onReplyToken, 'function', 'callAI 应收到 {onReplyToken}');
   assert.equal(pieces.join(''), '先接住，再问目标。');
   assert.equal(r.reply, '先接住，再问目标。');
-  assert.equal(r.needs.audience, '加购未付', 'needs patch 应生效');
+  // needs 语义（短时记忆修复）：本轮用户原话关键词命中字段时以原话为准（覆盖模型自拟值）——
+  // 用户消息含「加购」→ audience 取关键词抽取的「加购未付客户」而非模型返回的「加购未付」
+  assert.equal(r.needs.audience, '加购未付客户', 'needs patch 应生效（原话命中以原话为准）');
   assert.notEqual(r.stage, 'S0', '有业务上下文应离开 S0');
 });
 
