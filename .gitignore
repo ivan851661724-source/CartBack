@@ -80,3 +80,11 @@ backend/emailgen/emailgen_config.local.yml
 venv/
 backend/venv/
 backend/.venv/
+
+# ===== Python 邮件自动化原型（email-automation，生产链路已由 backend mailgen 接替）=====
+# AI 密钥 / 用户邮箱数据 / 运行时产物不入库；SMTP 授权码按用户要求写进 config.yaml.example 随仓库分发
+email-automation/config.yaml
+email-automation/user_data.jsonl
+email-automation/pending_approvals.json*
+email-automation/output/
+

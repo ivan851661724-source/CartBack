@@ -1,0 +1,60 @@
+# 邮件自动化工作流配置模板
+# 复制为 config.yaml 后填入 AI 密钥即可用（AI key 不入库；SMTP 段已配好真实授权码，按需替换）
+
+# MiniMax API（文案生成，备用）
+minimax:
+  api_key: "<your-minimax-api-key>"
+  model: "MiniMax-M2.7"
+  base_url: "https://api.minimax.chat/v1"
+
+# DeepSeek API（文案生成，主用；此处示例为阿里云百炼 Token Plan 兼容模式）
+deepseek:
+  api_key: "<your-deepseek-or-dashscope-api-key>"
+  model: "deepseek-v4-pro"
+  base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+
+# 通义万相（图片生成，Token Plan 兼容模式，走 /chat/completions 多模态协议）
+# 注意：model 用 Token Plan 控制台列出的万相模型名：
+#   wan2.7-image（快速/便宜）
+#   wan2.7-image-pro（高质量）
+qianwen_vision:
+  api_key: "<your-dashscope-api-key>"
+  model: "wan2.7-image-pro"
+  base_url: "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+  # 万相支持的尺寸：1024*1024 / 720*1280 / 768*1152 / 1280*720 / 960*1280 / 768*1024
+  image_size: "768*1152"
+
+# 邮件发送（SMTP；已配好 163 真实授权码，直接可用。授权码 ≠ 登录密码，在 163 邮箱设置 → POP3/SMTP 里生成/吊销）
+email:
+  smtp_host: "smtp.163.com"
+  smtp_port: 465
+  smtp_user: "gaoxin257@163.com"
+  smtp_password: "RWHpNNxe8eaxLESF"
+  sender_email: "gaoxin257@163.com"
+  sender_name: "Leo's PhoneCase"
+  use_tls: false
+  use_ssl: true
+
+# Brevo（备用；配置了 api_key 则优先走 Brevo API 而非 SMTP）
+brevo:
+  api_key: ""
+  sender_email: "hello@example.com"
+  sender_name: "Your Brand"
+
+# 营销规则
+marketing:
+  abandonment_recovery:
+    discount_priority: true
+    urgency_cta: true
+    send_window:
+      start: "10:30"
+      end: "21:00"
+    image_requirements:
+      main_text: "discount_percentage"
+      cta_button: "Shop Now"
+      style: "tech"
+      overlay_text: false   # false=文字由模型直接画进图；true=再用 Pillow 后期叠加
+
+# 用户数据
+data:
+  input_file: "user_data.jsonl"
