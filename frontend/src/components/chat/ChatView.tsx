@@ -19,7 +19,7 @@ export default function ChatView() {
     act, acts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
-    setEditingDraft, setEditOpen, setDraftGenerating,
+    setEditingDraft, setEditOpen, setDraftGenerating, toast_,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep,
   } = useApp();
 
@@ -141,7 +141,12 @@ export default function ChatView() {
                       const d = await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
                       await loadState();
                       setEditingDraft(d); setEditOpen(true);            // 草稿就绪→打开预览
-                    } catch(e) {}
+                    } catch (e: any) {
+                      // 失败必须可见（此前静默吞掉 → 跳到邮件页后无任何反馈）；拉回确认卡方便重试
+                      toast_('草稿生成失败：' + (e?.message || e));
+                      setPlanShown('confirm');
+                      switchTab('chat');
+                    }
                     setDraftGenerating(false);
                   }}>可以，去发</button>
                   <button className="btn ghost" onClick={onReconsider}>再聊聊</button>

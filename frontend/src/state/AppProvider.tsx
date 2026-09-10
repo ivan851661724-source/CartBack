@@ -140,13 +140,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const s = await api<any>('/api/state');
     const acts: Act[] = (s.acts || []) as Act[];
     const actIndex = buildActIndex(acts);
+    // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）
+    // /api/state 不返回 planCard（后端不持久化）——同一会话沿用内存值，否则确认发送/预览后 loadState 把卡片冲掉
+    const nextAct = actIndex.get(state.act?.id ?? '') || acts[0] || state.act;
     patch({
       status: s.status, kpis: s.kpis, trend: s.trend,
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
       acts,
-      // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）
-      act: actIndex.get(state.act?.id ?? '') || acts[0] || state.act,
+      act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
+        ? { ...nextAct, planCard: state.act.planCard }
+        : nextAct,
     });
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {
@@ -260,11 +264,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           messages: [...prev.act.messages, assistantMsg],
           planCard: r.planCard ?? prev.act.planCard ?? null,
         };
-        // 确认卡重现：首推（planPushed=false）或卡片未在流转中且用户用文字确认（「可以，去发」类）时拉卡。
-        // 修「卡片永远不再出现」死局：planPushed 全局一次性后，再聊聊/刷新后打字确认无法唤回卡片。
-        const CONFIRM_INTENT_RE = /(可以|行(的|吧)|好(的|吧|嘞)|去发|发送|确认|就这样|生成|ok|yes|send)/i;
-        const pushConfirm = !!r.planCard && prev.planShown === null
-          && (!prev.planPushed || CONFIRM_INTENT_RE.test(t));
+        // 确认卡重现：首推（planPushed=false）或用户用文字确认（「可以/好/行，去发」类）时拉卡。
+        // 修「卡片永远不再出现」死局：planPushed 全局一次性后，再聊聊/刷新后打字确认无法唤回卡片；
+        // 再修「点过一次可以去发后死锁」：planShown 卡在 plan/sent 不复位时同样拉不回卡 → 不再看 planShown。
+        // 光杆「好」「行」也算确认（好(的|吧|嘞)? ），但「不好/不行」不算（[^不没] 前置守卫）。
+        const CONFIRM_INTENT_RE = /(^|[^不没])(可以|行(的|吧)?|好(的|吧|嘞)?|去发|发送|确认|就这样|生成|ok|yes|send)/i;
+        const pushConfirm = !!r.planCard && (!prev.planPushed || CONFIRM_INTENT_RE.test(t));
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
