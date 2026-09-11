@@ -37,10 +37,15 @@ const DEFAULTS = {
   // 供应商专属参数透传（如 Token Plan thinking 系模型的 {"enable_thinking": false}：
   // 思考 token 计入输出预算且把 JSON envelope 挤截断，关掉后 JSON 合规 3/10 → 6/6、延迟减半）
   aiExtraBody: null,
-  espProvider: 'resend',
+  espProvider: 'resend',        // 'resend' | 'brevo' | 'smtp'（163/QQ 等标准 SMTP，授权码作密码）
   espApiUrl: 'https://api.resend.com/emails',
   espKey: '',                   // 仅服务端持有
   espFrom: '',                  // 真实发信用「已验证发件域名」邮箱，如 onear@yourdomain.com
+  espSenderName: 'CartBack',    // 发件人显示名（Brevo sender.name）
+  smtpHost: '',                 // 如 smtp.163.com（espProvider=smtp 时必填）
+  smtpPort: 465,                // 465 implicit TLS
+  smtpUser: '',                 // 完整邮箱
+  smtpPass: '',                 // SMTP 授权码（非登录密码），仅服务端持有
   localToken: '',               // 端点鉴权令牌（本地生成）
   webhookSecret: '',            // /api/attribution webhook 校验密钥（本地生成；整改 2）
   attributionWindowDays: 7,
@@ -107,7 +112,9 @@ function status(cfg) {
   return {
     mode: cfg.mode,
     aiConfigured: Boolean(cfg.aiKey),
-    espConfigured: Boolean(cfg.espKey),
+    espConfigured: cfg.espProvider === 'smtp'
+      ? Boolean(cfg.smtpHost && cfg.smtpUser && cfg.smtpPass)
+      : Boolean(cfg.espKey),
     espFrom: cfg.espFrom ? cfg.espFrom.replace(/(.{2}).*(@.*)/, '$1***$2') : '',
     aiProvider: cfg.aiProvider,
     aiModel: cfg.aiModel || '',          // 回显给前端设置页（P1-3：避免刷新后模型名丢失）

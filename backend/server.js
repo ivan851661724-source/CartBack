@@ -22,6 +22,7 @@ const tagsMod = require('./lib/tags');
 const benchmarkMod = require('./lib/benchmark');
 const competitorsMod = require('./lib/competitors');
 const { JobQueue } = require('./lib/queue');
+const { sendSmtp } = require('./lib/smtp');
 const { BreakerRegistry } = require('./lib/breaker');
 const postersMod = require('./lib/posters');
 
@@ -392,6 +393,50 @@ async function fetchResend(draft, messages, c) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+// —— Brevo 发送适配器（配置迁移自 email-automation 的 emailgen_config.yaml → .server/config.json 变量）——
+// espProvider='brevo'：POST /v3/smtp/email，鉴权走 api-key 头（非 Bearer）；逐收件人单发
+async function fetchBrevo(draft, messages, c) {
+  const url = String(c.espApiUrl || 'https://api.brevo.com/v3/smtp/email');
+  const headers = { 'Content-Type': 'application/json', 'accept': 'application/json', 'api-key': c.espKey };
+  const sender = { name: c.espSenderName || 'CartBack', email: c.espFrom };
+  const ids = [];
+  let batches = 0;
+  for (const r of messages) {
+    const body = {
+      sender,
+      to: [{ email: r.email }],
+      subject: String(r.subject || '').slice(0, 200),
+      textContent: String(r.body || '').slice(0, 20000),
+    };
+    const html = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    if (html) body.htmlContent = html;
+    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!resp.ok) throw new Error('Brevo HTTP ' + resp.status + ': ' + JSON.stringify(await resp.json().catch(() => ({}))).slice(0, 160));
+    const j = await resp.json().catch(() => ({}));
+    if (j && j.messageId) ids.push(j.messageId);
+    batches++;
+    if (messages.length > 1) await sleep(120);   // Brevo 限速保护
+  }
+  return { id: ids.join(','), ids, batches };
+}
+
+// —— SMTP 发送适配器（163/QQ 等标准邮箱；配置迁移自用户提供：espProvider='smtp'）——
+// 逐收件人直邮（SMTP 无批量协议）；限速 500ms 防邮箱商频控
+async function fetchSmtp(draft, messages, c) {
+  const ids = [];
+  for (const r of messages) {
+    const html = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    const out = await sendSmtp({
+      host: c.smtpHost, port: c.smtpPort, user: c.smtpUser, pass: c.smtpPass,
+      from: c.espFrom, senderName: c.espSenderName,
+      to: r.email, subject: r.subject, text: r.body, html,
+    });
+    ids.push((out && out.messageId) || 'smtp-' + Date.now().toString(36));
+    if (messages.length > 1) await sleep(500);
+  }
+  return { id: ids.join(','), ids, batches: messages.length };
+}
+
 // 依据方案卡受众描述解析真实收件人（P0 真实源未接前用假种子/导入名单）
 function matchAudienceByDesc(desc) {
   const all = store.getAudience();
@@ -608,7 +653,12 @@ async function sendDraft(draft) {
   while (attempt < 3) {
     attempt++;
     try {
-      const r = await breakers.get('esp').exec(() => fetchResend(draft, sendable, config));
+      const sendViaEsp = (c) => {
+        if (c.espProvider === 'brevo') return fetchBrevo(draft, sendable, c);
+        if (c.espProvider === 'smtp') return fetchSmtp(draft, sendable, c);
+        return fetchResend(draft, sendable, c);
+      };
+      const r = await breakers.get('esp').exec(() => sendViaEsp(config));
       draft.status = 'sent';
       draft.sent_at = Date.now();
       draft.esp_message_id = r.id || ('real_' + uid());
@@ -1208,6 +1258,14 @@ const server = http.createServer(async (req, res) => {
       if (typeof body.aiKey === 'string') config.aiKey = body.aiKey.trim();
       if (typeof body.espKey === 'string') config.espKey = body.espKey.trim();
       if (typeof body.espFrom === 'string') config.espFrom = body.espFrom.trim();
+      // ESP 供应商变量：resend（默认）| brevo（api-key 头 + /v3/smtp/email）| smtp（163/QQ 等，授权码作密码）
+      if (typeof body.espProvider === 'string' && ['resend', 'brevo', 'smtp'].includes(body.espProvider.trim())) config.espProvider = body.espProvider.trim();
+      if (typeof body.espApiUrl === 'string') config.espApiUrl = body.espApiUrl.trim();
+      if (typeof body.espSenderName === 'string') config.espSenderName = body.espSenderName.trim().slice(0, 40);
+      if (typeof body.smtpHost === 'string') config.smtpHost = body.smtpHost.trim();
+      if (Number.isFinite(body.smtpPort)) config.smtpPort = Math.max(1, Math.min(65535, body.smtpPort | 0));
+      if (typeof body.smtpUser === 'string') config.smtpUser = body.smtpUser.trim();
+      if (typeof body.smtpPass === 'string') config.smtpPass = body.smtpPass.trim();
       if (typeof body.aiModel === 'string') config.aiModel = body.aiModel.trim();
       if (typeof body.aiProvider === 'string') config.aiProvider = body.aiProvider.trim();
       if (typeof body.aiBaseUrl === 'string') config.aiBaseUrl = body.aiBaseUrl.trim();
