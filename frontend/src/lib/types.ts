@@ -88,6 +88,7 @@ export interface Draft {
   locale?: string;
   estGmv: number;
   cost: number;
+  tag_distribution?: Array<{ tag_type: string; tag_value: string; count: number; avg_weight: number }>;
 }
 
 /** 受众 / 高意向流失个体（CSV 导入或店铺拉取） */

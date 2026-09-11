@@ -25,6 +25,7 @@ export interface UserRecord {
   preferred_language: string;
   price_sensitivity: string;
   customer_segment: string;
+  style_preference: string; // tech / fashion / business / outdoor（受众风格品类标签代表值）
   cart_url: string;
   raw: Record<string, unknown>;
 }
@@ -41,6 +42,17 @@ function stableHash(s: string): number {
     h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
   }
   return Math.abs(h);
+}
+
+/** 标签分布快照取某类 count 最高的代表值（tagDistribution 已按 count 降序，同 type 首条即最高）。 */
+function topTagByType(dist: unknown, type: string): string {
+  if (!Array.isArray(dist)) return '';
+  for (const item of dist) {
+    if (item && typeof item === 'object' && String((item as Record<string, unknown>).tag_type || '') === type) {
+      return String((item as Record<string, unknown>).tag_value || '').trim();
+    }
+  }
+  return '';
 }
 
 export function fromPlanCard(card: Record<string, unknown>, draft?: Record<string, unknown> | null): UserRecord {
@@ -61,6 +73,13 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
   const cartUrl = strVal(card.cart_url ?? d.cart_url, 'https://cartback.demo').trim();
   const uid = strVal(d.id ?? card.id) || `dr_${String(stableHash(audience + brand) % 1_000_000).padStart(6, '0')}`;
 
+  // 受众标签分布快照（server.js 传入）：每类取 count 最高代表值填充画像——
+  // 此前恒为硬编码默认值（O/25-34/iPhone/空），新 5 维标签实际没进文案与图片 prompt
+  const dist = card.tag_distribution ?? d.tag_distribution;
+  const tagGender = topTagByType(dist, 'gender');
+  const tagAge = topTagByType(dist, 'age_range');
+  const tagDevice = topTagByType(dist, 'device');
+
   return {
     user_id: uid,
     email: '',
@@ -72,13 +91,14 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
     locale,
     preferred_language: preferredLanguage,
     cart_url: cartUrl,
-    gender: 'O',
-    age_range: '25-34',
-    device: 'iPhone',
+    gender: tagGender === 'male' ? 'M' : tagGender === 'female' ? 'F' : 'O',
+    age_range: tagAge || '25-34',
+    device: tagDevice || 'iPhone',
     goal: 'abandonment_recovery',
     send_window: '10:30-21:00',
-    price_sensitivity: '',
-    customer_segment: '',
+    price_sensitivity: topTagByType(dist, 'price_sensitivity'),
+    customer_segment: topTagByType(dist, 'customer_segment'),
+    style_preference: topTagByType(dist, 'style_preference'),
     raw: { ...card, draft: d },
   };
 }
@@ -102,6 +122,7 @@ export function makeUser(overrides: Record<string, unknown>): UserRecord {
     preferred_language: '',
     price_sensitivity: '',
     customer_segment: '',
+    style_preference: '',
     cart_url: 'https://cartback.demo',
     raw: {},
   };
@@ -146,6 +167,7 @@ export async function loadUserData(filePath: string): Promise<JsonlLoadResult> {
         send_window: strVal(data.send_window, '10:30-21:00'),
         locale: strVal(data.locale, 'en-US'),
         preferred_language: strVal(data.preferred_language),
+        style_preference: strVal(data.style_preference),
         price_sensitivity: strVal(data.price_sensitivity),
         customer_segment: strVal(data.customer_segment),
         cart_url: strVal(data.cart_url, 'https://cartback.demo'),

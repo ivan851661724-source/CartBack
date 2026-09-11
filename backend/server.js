@@ -208,6 +208,9 @@ async function generateMailHtml(draft, card) {
     force_regen_copy: Boolean(card.force_regen_copy),  // 若商家点了「换一批文案」则用 LLM 重写
     skip_image:        Boolean(card.skip_image),        // 纯文案调试时跳过图片生成
     product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
+    // 受众标签分布快照（圈中人群的性别/年龄段/机型/分层/风格品类代表值）——
+    // mailgen 据此填充 UserRecord 画像（文案 toneHint + 图片人群风格），此前恒为硬编码默认值
+    tag_distribution: Array.isArray(draft.tag_distribution) ? draft.tag_distribution : [],
     // 配置注入（零重复录入）
     ai_config,
     // 公网基址：邮件内联图片 src 用 ${publicBaseUrl}/api/image/<path>，留空则退回本地路径（仅预览可用）
@@ -1090,6 +1093,7 @@ const server = http.createServer(async (req, res) => {
         subject: card.subject, body: card.body, audience: card.audience,
         discount: card.discount, coupon: card.coupon, posters: card.posters,
         estGmv, matchedCount: matched.length, sendTiming: card.sendTiming || null,
+        tag_distribution: tagDist,   // 圈中受众的标签分布快照（邮件卡展示产品分类/年龄段/机型代表值）
         status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
         user_id: req.userId || null,
         locale: card.locale || null,
@@ -1706,11 +1710,14 @@ server.listen(PORT, () => {
   console.log(`本地令牌: ${config.localToken}`);
 
   // —— 周期任务（PRD §0.5 jobs / G6 / ⑤ 标签窗口反哺）——
-  // 受众标签补打：首次启动（无标签）或老库升级（新增维度 tag_type 后一次性迁移）。
-  // 用 meta 标记保证迁移只跑一次，不在每次启动重复重打；upsertAudienceTag 同源取高、manual 不覆盖，幂等安全。
+  // 老库种子维度回填：schema 升级后存量种子行新列是 NULL，按姓名回填（幂等，只在缺值时写）。
+  // 回填改了行 → 需重打分让 style/age_range/device 等标签补出来（dimsChanged 触发重打）。
+  const dimsChanged = store.backfillSeedDimensions();
+  // 受众标签补打：首次启动（无标签）/ 老库升级新增维度 / 种子维度刚回填。
+  // 用 meta 标记 + dimsChanged 控制只跑一次；upsertAudienceTag 同源取高、manual 不覆盖，幂等安全。
   if (store.getAllAudienceTags().length === 0) {
     tagsMod.scoreAudience(store, store.getAudience());
-  } else if (store.getMeta('tag_dims_v2_migrated') !== '1') {
+  } else if (dimsChanged || store.getMeta('tag_dims_v2_migrated') !== '1') {
     tagsMod.scoreAudience(store, store.getAudience());
     store.setMeta('tag_dims_v2_migrated', '1');
   }

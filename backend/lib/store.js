@@ -23,7 +23,8 @@ const SCHEMA = {
     discount: 'TEXT', coupon: 'TEXT', posters: 'JSON', status: 'TEXT',
     estGmv: 'REAL', matchedCount: 'INTEGER', sendTiming: 'TEXT',
     created_at: 'INTEGER', sent_at: 'INTEGER', esp_message_id: 'TEXT', cost: 'REAL',
-    user_id: 'TEXT', locale: 'TEXT', html: 'TEXT', image_path: 'TEXT'
+    user_id: 'TEXT', locale: 'TEXT', html: 'TEXT', image_path: 'TEXT',
+    tag_distribution: 'JSON'   // 创建时圈中受众的标签分布快照（卡片展示产品分类/年龄段/机型等代表值）
   },
   audience: {
     id: 'TEXT', name: 'TEXT', email: 'TEXT', intent: 'TEXT', risk: 'TEXT',
@@ -541,7 +542,34 @@ class Store {
     this._write('audience', seed);
   }
 
-  // —— KPI 汇总（数据模块，真实/演示分离由调用方控制标注；整改 1c：userId 过滤只统计本人 drafts） ——
+  // —— 老库种子维度回填：schema 升级加了 gender/age_range/device/customer_segment/style 列后，
+  //    存量种子行（source=seed）这几列是 NULL（seedAudience 只在表空时跑）。按姓名回填规范值，保 ID 不变。
+  backfillSeedDimensions() {
+    const DIMS = {
+      '林晚': { gender: 'female', age_range: '18-24', device: 'iPhone 15', customer_segment: 'new', style: 'tech' },
+      '陈默': { gender: 'male', age_range: '25-34', device: 'iPhone 14', customer_segment: 'returning', style: 'fashion' },
+      '苏小': { gender: 'female', age_range: '35-44', device: 'iPhone 15 Pro Max', customer_segment: 'vip', style: 'business' },
+      '周野': { gender: 'male', age_range: '45-54', device: 'iPhone 13', customer_segment: 'returning', style: 'outdoor' },
+      '何夕': { gender: 'female', age_range: '25-34', device: 'iPhone 15 Pro', customer_segment: 'new', style: 'tech' },
+      '顾言': { gender: 'male', age_range: '35-44', device: 'iPhone 14', customer_segment: 'vip', style: 'fashion' },
+      '白桥': { gender: 'male', age_range: '18-24', device: 'iPhone 15', customer_segment: 'new', style: 'business' },
+      '夏一': { gender: 'female', age_range: '45-54', device: 'iPhone 13', customer_segment: 'returning', style: 'outdoor' },
+      '江临': { gender: 'male', age_range: '25-34', device: 'iPhone 15 Pro Max', customer_segment: 'new', style: 'tech' },
+      '温言': { gender: 'female', age_range: '35-44', device: 'iPhone 14', customer_segment: 'vip', style: 'fashion' },
+      '宋词': { gender: 'female', age_range: '18-24', device: 'iPhone 15', customer_segment: 'returning', style: 'business' },
+      '楚河': { gender: 'male', age_range: '25-34', device: 'iPhone 13', customer_segment: 'new', style: 'outdoor' },
+    };
+    const rows = this._read('audience');
+    let changed = false;
+    for (const a of rows) {
+      if (a.source !== 'seed') continue;
+      const d = DIMS[a.name];
+      if (d && (a.gender == null || a.style == null)) { Object.assign(a, d); changed = true; }
+    }
+    if (changed) this._write('audience', rows);
+    return changed;
+  }
+
   getKpis(mode, userId) {
     this.refreshDraftStates(userId); // FSM 超时态写回（sent → recovering/timeout）
     const drafts = userId ? this.getDraftsByUser(userId) : this.getDrafts();

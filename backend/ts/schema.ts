@@ -54,6 +54,9 @@ export const MailgenPayloadSchema = z
     force_regen_copy: z.boolean().optional(),
     skip_image: z.boolean().optional(),
     product_image_path: z.string().optional(),
+    // 受众标签分布快照（server.js /api/draft 传入）：[{tag_type, tag_value, count, avg_weight}]
+    // 宽松 unknown[]，由 fromPlanCard 取每类 count 最高代表值填充画像
+    tag_distribution: z.array(z.unknown()).optional(),
     ai_config: AiConfigSchema.optional(),
     draft: DraftSchema.optional(),
   })

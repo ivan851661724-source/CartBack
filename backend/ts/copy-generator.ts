@@ -71,13 +71,17 @@ export function buildPrompt(user: UserRecord): string {
   const userExtras: string[] = [];
   if (user.price_sensitivity) userExtras.push(`price sensitivity: ${user.price_sensitivity}`);
   if (user.customer_segment) userExtras.push(`customer segment: ${user.customer_segment}`);
+  if (user.style_preference) userExtras.push(`style preference: ${user.style_preference}`);
   const extrasStr = userExtras.length ? `, ${userExtras.join(', ')}` : '';
   let toneHint = '';
   if (userExtras.length) {
     toneHint =
       '5. Adapt tone to the shopper tags: ' +
-      'value-sensitive → lead with savings/deal urgency; premium → lead with quality/exclusivity; ' +
-      'new customer → welcoming; returning → "glad to have you back"; VIP → exclusive VIP offer.\n';
+      'price sensitivity high → lead with savings/deal urgency; low → lead with quality/exclusivity; mid → balanced; ' +
+      'new customer → welcoming; returning → "glad to have you back"; VIP → exclusive VIP offer.\n' +
+      '6. If style preference is given, pick the content angle accordingly: ' +
+      'tech → performance & specs; fashion → style & pairing; business → efficiency & professionalism; ' +
+      'outdoor → durability & adventure. Angle only — never invent new facts.\n';
   }
 
   const productLine = `PRODUCT: ${user.product_en || user.product || 'premium product'}${user.product_cn ? ` (${user.product_cn})` : ''}`;
@@ -289,6 +293,14 @@ const ETHNICITY_BY_LANG: Record<string, string> = {
   italian: '意裔',
 };
 
+// 风格品类标签 → 背景质感加味（不覆盖年龄性别风格表，只追加；与文案角度指令同口径）
+const STYLE_FLAVOR_BY_PREFERENCE: Record<string, string> = {
+  tech: '科技感',
+  fashion: '时尚杂志感',
+  business: '商务质感',
+  outdoor: '户外自然光',
+};
+
 // 取年龄区间代表值：18-24→20，25-34→30，35-44→40，45-54→50，55+→58
 function representativeAge(ageRange: string): number {
   const m = ageRange.match(/\s*(\d+)/);
@@ -321,6 +333,8 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   }
   const override = (config.marketing.image_style || '').trim();
   if (override && override.toLowerCase() !== 'tech') style = override;
+  // 受众风格品类标签（来自 tag_distribution 代表值）→ 质感加味
+  const flavor = STYLE_FLAVOR_BY_PREFERENCE[(user.style_preference || '').trim().toLowerCase()] || '';
 
   const ageNum = representativeAge(age);
   const ethnicity = ETHNICITY_BY_LANG[(user.preferred_language || '').toLowerCase()] || '';
@@ -335,5 +349,5 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   if (!Number.isNaN(d)) discountPct = Math.trunc(d);
   const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
 
-  return `${demographic}手持${device}${product}的电商广告图，${style}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+  return `${demographic}手持${device}${product}的电商广告图，${style}${flavor ? `，${flavor}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
 }
