@@ -30,7 +30,7 @@ function CountUp({ value, brand }: { value: string; brand: boolean }) {
 /** KPI 六宫格 + 迷你趋势线 + 数字滚动 —— 对应 app.js renderData 的 kpis 段。 */
 export default function KpiGrid({ k }: { k: Kpis }) {
   const kpis = [
-    { l: '触达', v: String(k.sent || 0), dot: '#FF7F4D', brand: false, sparkSeed: 40 },
+    { l: '已发送', v: String(k.sent || 0), dot: '#FF7F4D', brand: false, sparkSeed: 40 },
     { l: '打开率', v: ((k.openRate || 0) * 100).toFixed(1) + '%', dot: '#16A34A', brand: false, sparkSeed: 57 },
     { l: '点击率', v: ((k.clickRate || 0) * 100).toFixed(1) + '%', dot: '#16A34A', brand: false, sparkSeed: 74 },
     { l: '转化订单', v: String(k.convert || 0), dot: '#16A34A', brand: false, sparkSeed: 91 },

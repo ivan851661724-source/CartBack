@@ -88,6 +88,7 @@ export interface Draft {
   locale?: string;
   estGmv: number;
   cost: number;
+  act_id?: string;    // 所属会话（刷新后由数据反推方案卡状态用，走查 P1-9）
 }
 
 /** 受众 / 高意向流失个体（CSV 导入或店铺拉取） */

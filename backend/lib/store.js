@@ -541,8 +541,9 @@ class Store {
     const sentIds = new Set(sent.map(d => d.id));
     const sentAt = {}; sent.forEach(d => { sentAt[d.id] = d.sent_at || d.created_at; });
     const ev = events.filter(e => sentIds.has(e.draft_id));
-    const open = ev.filter(e => e.type === 'open').length;
-    const click = ev.filter(e => e.type === 'click').length;
+    // 分子按草稿去重（一封邮件开/点 N 次仍算 1），与分母「已发送草稿数」同口径 —— 否则打开率能超 100%（走查 P1-2）
+    const open = new Set(ev.filter(e => e.type === 'open').map(e => e.draft_id)).size;
+    const click = new Set(ev.filter(e => e.type === 'click').map(e => e.draft_id)).size;
     // 归因窗口：仅计「点击/发送后 N 天内」的转化（PRD §5⑤ / 算法 v1 环节⑤）
     const convert = ev.filter(e => e.type === 'convert' && (e.ts - (sentAt[e.draft_id] || e.ts)) <= windowMs);
     const gmv = convert.reduce((s, e) => s + (e.value || 0), 0);

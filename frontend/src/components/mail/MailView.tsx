@@ -26,7 +26,7 @@ export default function MailView() {
         </div>
         <div className="stat glass-card">
           <div className="s-ic ok"><ReachCheck /></div>
-          <div><div className="s-n num">{reach}</div><div className="s-l">累计触达</div></div>
+          <div><div className="s-n num">{reach}</div><div className="s-l">累计收件人</div></div>
         </div>
         <div className="stat glass-card">
           <div className="s-ic brand"><Arrow /></div>

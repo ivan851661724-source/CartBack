@@ -13,6 +13,12 @@ import OpportunityCard from './OpportunityCard';
 
 const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时机…';
 
+// 圈选条件展示白名单：后端漏发内部枚举时兜底成人话，绝不把 email_invalid 之类的值直接给商家（走查 P1-8）
+const FILTER_LABEL: Record<string, string> = {
+  email_invalid: '排除无效邮箱',
+  valid: '邮箱有效',
+};
+
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
   const {
@@ -20,7 +26,7 @@ export default function ChatView() {
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
     setEditingDraft, setEditOpen, setDraftGenerating,
-    onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep,
+    onboardingStep, onboardingSkipped, skipOnboarding,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -85,7 +91,7 @@ export default function ChatView() {
                 <div className="avatar agent"><NavChat /></div>
                 <div className="bubble">
                   {!onboardingSkipped && onboardingStep < 4
-                    ? '点击下方快捷描述，告诉助手你的品牌信息'
+                    ? '点下方快捷描述开始，或直接打字聊聊你的品牌和想挽回的客户'
                     : '你好，我是你的挽回邮件教练。\n告诉我你想挽回哪类人、为什么、希望拿到什么结果，我帮你一步步生成方案卡。'}
                 </div>
               </div>
@@ -125,7 +131,7 @@ export default function ChatView() {
                 {audConditions && (
                   <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'1px dashed #DDE2E8',fontSize:'12.5px'}}>
                     <div style={{fontWeight:600,color:'#1E293B',marginBottom:'2px'}}>受众圈选条件（发送前请核对）</div>
-                    <div style={{color:'#5B6773'}}>条件：{audConditions.filters.map((f) => String(f.value)).join(' · ')}</div>
+                    <div style={{color:'#5B6773'}}>条件：{audConditions.filters.map((f) => FILTER_LABEL[String(f.value)] || String(f.value)).join(' · ')}</div>
                     <div style={{color:'#5B6773'}}>预计触达 {audConditions.matchedCount} 人 · 预估可挽回 ¥{audConditions.estGmv}（预估）</div>
                     <div style={{color:'#5B6773'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
                   </div>
@@ -156,20 +162,21 @@ export default function ChatView() {
             )}
           </div>
 
-          {/* 初始引导快捷描述词 */}
+          {/* 初始引导快捷描述词：只带意图、不带任何具体品牌/品类/价格（走查 P0-4），
+              避免硬编码模板把商家真实品牌静默覆盖成示例品牌 */}
           {!onboardingSkipped && onboardingStep < 4 && (
             <div style={{display:'flex',gap:'8px',padding:'8px 16px',flexWrap:'wrap',flexShrink:0}}>
               {[
-                { label: '品牌名称', msg: '我的品牌叫 Leo\'s PhoneCase，专门做手机壳的' },
-                { label: '品牌类目', msg: '我们主要做手机配件，主打手机壳和贴膜' },
-                { label: '客单价', msg: '客单价大概 30-50 美元，手机壳为主' },
-                { label: '发送时段', msg: '我想在晚上 8 点发送挽回邮件' },
-                { label: '目标受众', msg: '我要挽回加购未付的客户，主要是 25-35 岁年轻人' },
-                { label: '挽回原因', msg: '他们加购了但没付款，可能是价格或运费问题' },
-                { label: '折扣力度', msg: '我想给 8 折优惠，再加免邮费' },
-                { label: '产品特色', msg: '我们手机壳主打防摔设计，有 50 多种图案可选' },
-                { label: '营销目标', msg: '希望他们回来完成购买，顺便看看新品' },
-                { label: '发送频率', msg: '先发一封试试，效果好的话 3 天后再发第二封' },
+                { label: '挽回对象', msg: '我想挽回加购了还没付款的客户' },
+                { label: '流失原因', msg: '他们加购后一直没付款，可能是忘了或者还在犹豫' },
+                { label: '挽回目标', msg: '希望他们回来把订单完成' },
+                { label: '优惠钩子', msg: '想给个折扣或者免邮的钩子，具体力度你帮我建议' },
+                { label: '浏览召回', msg: '也想召回看过商品但没下单的人' },
+                { label: '老客唤醒', msg: '还有一批很久没来的老客，想唤醒一下' },
+                { label: '发送时机', msg: '发送时机什么时候合适？' },
+                { label: '话术风格', msg: '语气自然一点，别太像促销' },
+                { label: '发送节奏', msg: '先发一封试试，效果好再安排跟进' },
+                { label: '效果目标', msg: '主要目标是把流失的订单捞回来' },
               ].map((chip, i) => {
                 const clicked = clickedChips.has(i);
                 return (
@@ -180,8 +187,14 @@ export default function ChatView() {
                       const next = new Set(clickedChips);
                       next.add(i);
                       setClickedChips(next);
-                      if (next.size >= 10 && onboardingStep < 4) setOnboardingStep(onboardingStep + 1);
-                      sendMsg(chip.msg);
+                      // 全新会话第一条可直发（保留快速开聊）；会话已有上下文后只填入输入框，
+                      // 由商家确认后再发，防止快捷词把已聊的品牌信息带走（走查 P0-4）
+                      const fresh = messages.filter((m) => m.role === 'user').length === 0 && n === 0;
+                      if (fresh) sendMsg(chip.msg);
+                      else {
+                        setChatInput(chip.msg);
+                        inputRef.current?.focus();
+                      }
                     }}
                     style={{
                       display:'inline-flex',alignItems:'center',gap:'6px',

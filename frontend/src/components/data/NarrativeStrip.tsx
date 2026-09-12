@@ -6,7 +6,8 @@ import { Arrow } from '@/components/ui/icons';
 /** 叙事条：本周回流 GMV / ROI / 明细 / 模式标签 —— 对应 flow.html .narrative + renderData。 */
 export default function NarrativeStrip({ k, real }: { k: Kpis; real: boolean }) {
   const net = (+k.gmv || 0) - (+k.cost || 0);
-  const sub = `${k.sent || 0} 封邮件 · 触达 ${k.sent || 0} 人 · 花费 ¥${(+k.cost || 0).toFixed(0)} · 净赚 ¥${net.toFixed(0)}`;
+  // 口径：k.sent = 已发送邮件数（不是收件人数），别再写成「触达 N 人」与邮件卡打架（走查 P1-3）
+  const sub = `已发送 ${k.sent || 0} 封邮件 · 花费 ¥${(+k.cost || 0).toFixed(0)} · 净赚 ¥${net.toFixed(0)}`;
   return (
     <div className="narrative">
       <div className="nv-ic"><Arrow /></div>

@@ -18,7 +18,15 @@ export function getToken(): string | null {
   return authToken;
 }
 
-/** 统一 JSON 请求；403 → 抛出（本地令牌不匹配） */
+/** 401/403 = 未登录/本地令牌不匹配 —— 不是故障，调用方据此引导注册登录，而不是报错（走查 P0-1） */
+export class ApiAuthError extends Error {
+  constructor(message = '请先注册或登录') {
+    super(message);
+    this.name = 'ApiAuthError';
+  }
+}
+
+/** 统一 JSON 请求；401/403 → 抛 ApiAuthError（引导登录），其余错误由响应体/调用方处理 */
 export async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -27,7 +35,7 @@ export async function api<T = any>(path: string, opts: RequestInit = {}): Promis
   if (authToken) headers['x-local-token'] = authToken;
   // 同源显式带 cookie：登录后自动携带 cb_session（session 优先鉴权）
   const res = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
-  if (res.status === 403) throw new Error('鉴权失败（本地令牌不匹配）');
+  if (res.status === 401 || res.status === 403) throw new ApiAuthError();
   return res.json() as Promise<T>;
 }
 

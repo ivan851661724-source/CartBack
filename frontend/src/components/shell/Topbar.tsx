@@ -7,7 +7,7 @@ import { initial } from '@/lib/format';
 
 /** 顶栏：logo / 面包屑 / needs 进度提示 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
-  const { status, act, me, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep } = useApp();
+  const { status, act, me, drafts, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep } = useApp();
   const real = status?.mode === 'real';
   const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
 
@@ -15,11 +15,18 @@ export default function Topbar() {
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
   const isLastStep = onboardingStep >= 3; // 第 4 步（显示 4/4）
 
+  // 引导文案陈述当前真实状态（有草稿/已发送从数据判断），绝不提前宣告「已跑通」（走查 P0-3）
+  const hasDraft = (drafts || []).length > 0;
+  const hasSentDraft = (drafts || []).some((d) => ['queued', 'sending', 'sent', 'recovering'].includes(d.status));
   const ONBOARDING_TEXTS: Record<number, string> = {
-    0: '点击左侧「助手」，依次点上方 10 个快捷描述告诉助手你的品牌信息。',
-    1: '太棒了！去「邮件配置」查看 10 个要点，选好受众和折扣后点「发送」。',
-    2: '邮件已发出！切到「数据看板」查看点击 / 转化 / GMV / ROI。',
-    3: '完整闭环已跑通！',
+    0: '点下方快捷描述或直接打字：告诉助手你想挽回谁、为啥、要什么结果。',
+    1: '信息收集中——助手会一项项问，也可以直接补充。',
+    2: hasDraft
+      ? '草稿已生成——去「邮件配置」核对后点「发送」。'
+      : '需求齐了——对话里核对确认卡，点「可以，去发」生成草稿。',
+    3: hasSentDraft
+      ? '邮件已发出！切到「数据看板」看点击 / 转化 / GMV / ROI。'
+      : '下一步：去「邮件配置」核对草稿后点「发送」。',
   };
 
   const hpText = showOnboarding

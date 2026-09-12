@@ -85,14 +85,21 @@ export default function EditModal() {
     <Modal open={editOpen} onClose={() => setEditOpen(false)} title="邮件预览">
       <div className="m-body">
         {previewHtml ? (
-          <iframe
-            srcDoc={previewHtml}
-            style={{ width: '100%', height: '400px', border: '1px solid #DDE2E8', borderRadius: '10px' }}
-            title="邮件预览"
-          />
+          <>
+            <iframe
+              srcDoc={previewHtml}
+              style={{ width: '100%', height: '400px', border: '1px solid #DDE2E8', borderRadius: '10px' }}
+              title="邮件预览"
+            />
+            <p style={{ marginTop: 9 }}>上方为收件效果预览；主题与正文可在下方直接微调，保存并发送时以修改后内容为准。</p>
+            <input type="text" placeholder="邮件主题" style={{ marginBottom: 9 }}
+              value={subj} onChange={(e) => setSubj(e.target.value)} />
+            <textarea spellCheck={false} placeholder="邮件正文…"
+              value={body} onChange={(e) => setBody(e.target.value)} />
+          </>
         ) : (
           <>
-            <p>主题与正文可直接微调，保存并发送时以最新内容为准。</p>
+            <p>主题与正文可直接微调，保存并发送时以修改后内容为准。</p>
             <input type="text" placeholder="邮件主题" style={{ marginBottom: 9 }}
               value={subj} onChange={(e) => setSubj(e.target.value)} />
             <textarea spellCheck={false} placeholder="邮件正文…"

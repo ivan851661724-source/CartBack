@@ -285,14 +285,40 @@ class IGDE {
     return { reply: this.s0Open(), stage: 'S0' };
   }
 
-  /** 追问单点字段；若与上一句助手回复相同则换一种说法，避免连续重复（防复读） */
+  /** 追问单点字段；与上一句重复则轮换说法（桩模型路径的防复读；真模型由提示词硬约束 + 交付层相似度检查兜底） */
   _probe(act, field) {
     const p = this.probeFor(field);
-    const last = act.messages[act.messages.length - 1];
-    if (last && last.role === 'assistant' && last.content === p) {
-      return '再帮我想想这一项就行：' + p;
-    }
-    return p;
+    const assistantMsgs = act.messages.filter(m => m.role === 'assistant').map(m => m.content || '');
+    const last = assistantMsgs[assistantMsgs.length - 1];
+    if (!last || !last.includes(p)) return p;
+    // 防复读：本体不变时轮换包装说法，优先给没用过的；问过 3 轮以上给例子式追问
+    const variants = [
+      `换个说法——${p}`,
+      `再帮我想想这一项就行：${p}`,
+      `这项还没聊到：${p}`,
+      `比如「${this._probeExample(field)}」——你的情况是？`
+    ];
+    return variants.find(v => !assistantMsgs.includes(v)) || variants[variants.length - 1];
+  }
+
+  /** 字段追问示例（第 4 次仍未采集到时给例子引导，避免无限复读） */
+  _probeExample(field) {
+    const map = {
+      audience: '加购没付款的、浏览没买的、还是很久没来的老客',
+      pain: '忘了结账、被别家勾走、还是单纯没需求',
+      goal: '回来下单、领券复购、还是先回店铺逛逛',
+      offer: '9 折、满减、还是免邮'
+    };
+    return map[field] || '加购未付的客户';
+  }
+
+  /** 复读判定：去空白/标点后全文相等，或一方（≥12 字符）被另一方完整包含 */
+  _similarEnough(a, b) {
+    const norm = (s) => String(s || '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    const x = norm(a), y = norm(b);
+    if (!x || !y) return false;
+    if (x === y) return true;
+    return (x.length >= 12 && y.includes(x)) || (y.length >= 12 && x.includes(y));
   }
 
   /** 主入口：处理一条用户消息；opts.onReplyToken：真模型首轮 coach 的 reply 增量回调
@@ -455,6 +481,16 @@ class IGDE {
       const regen = await this._tryRegen(act, userText, 'preempt', runtime);
       if (regen && guardrailL4(regen, act.stage)) { reply = regen; guardrailHits.push('L4regen'); }
       else { reply = this._pickFallback(act); guardrailHits.push('L4'); }
+    }
+
+    // 交付层防复读（走查 P1-1）：与上一句助手回复高度相似 → 重生成 1 次，仍相似则轮换兜底。
+    // 放在 push 之前，比对对象才是「上一轮」的回复。
+    // 例外：四要素已齐的确认阶段，提示词本来就要求「复述要点 + 问同一句确认」，回复天然相似，不做此检查
+    const lastAssistant = [...act.messages].reverse().find(m => m.role === 'assistant');
+    if (lastAssistant && this.missingFields(act).length > 0 && this._similarEnough(lastAssistant.content, reply)) {
+      const regen = await this._tryRegen(act, userText, 'repeat', runtime);
+      if (regen && !this._similarEnough(lastAssistant.content, regen)) { reply = regen; guardrailHits.push('REPEATregen'); }
+      else { reply = this._pickFallback(act); guardrailHits.push('REPEAT'); }
     }
 
     act.messages.push({ role: 'user', content: userText, ts: Date.now() });
@@ -711,8 +747,10 @@ class IGDE {
     const isPreachy = why === 'preachy';
     const constraint = isPreachy
       ? '严禁说教、列清单、推销框架或替用户下结论；用极简口语追问或确认。'
-      : '严禁在确认前输出方案卡/主题行/优惠码等配置内容；只做引导对话。';
-    const regenText = `用户刚才说：「${userText}」。上一轮回复触发了护栏（${isPreachy ? '说教/推销' : '抢跑'}），${constraint}请重新组织一句回复。`;
+      : why === 'repeat'
+        ? '严禁重复你上一句回复的原文或近似原文；必须换个角度、给例子或把对话往前推一步。'
+        : '严禁在确认前输出方案卡/主题行/优惠码等配置内容；只做引导对话。';
+    const regenText = `用户刚才说：「${userText}」。上一轮回复触发了护栏（${isPreachy ? '说教/推销' : why === 'repeat' ? '复读上一句' : '抢跑'}），${constraint}请重新组织一句回复。`;
     const promptNeeds = { ...act.needs };
     if (!promptNeeds.offer && runtime.agentProfile.default_offer) {
       promptNeeds.offer = runtime.agentProfile.default_offer;
@@ -757,13 +795,19 @@ class IGDE {
   _offerText(o, lang) {
     o = o || '';
     if (lang === 'en') {
+      const zheM = o.match(/(\d+(?:\.\d+)?)\s*折/);       // 「8 折」→ 20% off（商家说折、邮件说 %，必须换算）
+      if (zheM) {
+        const raw = parseFloat(zheM[1]);
+        const zhe = raw > 10 ? raw / 10 : raw;             // 「85 折」= 8.5 折
+        return Math.round((10 - zhe) * 10) + '% off';
+      }
       const m = o.match(/(\d+)\s*%/);
       if (m) return m[1] + '% off';
       if (/包邮|免邮|运费|free\s*shipping|shipping/i.test(o)) return 'free shipping';
       if (/优惠码|券|coupon|promo|discount\s*code/i.test(o)) return 'an exclusive coupon';
-      return 'a special offer';
+      return '10% off'; // 兜底必须带数字：下游变体/海报默认就是 10% off，不能让「a special offer」和实际数字打架（走查 P1-5）
     }
-    return o || '专属优惠';
+    return o || '10% off 专属优惠';
   }
 
   /** 目标动作短语（先判意图·中英文都认，再按语种输出；避免把 goal 原样直插句子造成语法断裂） */
@@ -793,17 +837,17 @@ class IGDE {
     return "haven't finished your order";
   }
 
-  /** 推荐发送时机（按受众紧迫度 + 语种） */
+  /** 推荐发送时机（按受众紧迫度 + 语种；加购未付走分钟级黄金窗口，走查 P1-10） */
   _sendTiming(n, lang) {
     const a = (n.audience || '');
     const zh = [
-      [/加购|未付/, '24 小时内发送（紧迫，趁购物车未清空）'],
+      [/加购|未付/, '30–60 分钟内发送（弃购挽回黄金窗口，趁购物车未清空）'],
       [/弃购/, '48 小时内发送（弃购挽回窗口）'],
       [/老客|沉睡|流失/, '7 天内唤醒（低频，避免打扰）'],
       [/浏览/, '3 天内种草召回']
     ];
     const en = [
-      [/加购|未付|cart|unpaid|abandon/i, 'Send within 24h (urgent — cart still active)'],
+      [/加购|未付|cart|unpaid|abandon/i, 'Send within 30–60 min (golden window — cart still active)'],
       [/弃购|abandoned/i, 'Send within 48h (abandoned-checkout window)'],
       [/老客|沉睡|流失|dormant|lapsed/i, 'Re-engage within 7 days (low frequency)'],
       [/浏览|brows/i, 'Reach within 3 days (retargeting)']
@@ -860,12 +904,26 @@ class IGDE {
     const n = act.needs;
     const lang = this._collapseLang(opts.locale); // 仅 zh/en 有模板，其余语种回落 en
     const offer = this._offerText(n.offer, lang);
+    // 折扣数值只在这里产生一处（% off 口径）：变体 / 海报 / 营销图统一读它，
+    // 消除「8 / 10 / a special offer」三处默认值各说各话（走查 P1-5）。
+    // 「8 折」= 20% off；「85 折」= 8.5 折 = 15% off（两位数写法归一化）；「20%」= 20% off；都缺省 = 10
+    const offerSrc = String(n.offer || '');
+    const zheToOff = (raw) => {
+      const zhe = raw > 10 ? raw / 10 : raw;   // 「85 折」「95 折」= 8.5 / 9.5 折
+      return +((10 - zhe) * 10).toFixed(1);
+    };
+    const zheM = offerSrc.match(/(\d+(?:\.\d+)?)\s*折/);
+    const pctM = offerSrc.match(/(\d+(?:\.\d+)?)\s*%/);
+    const discountNum = zheM ? zheToOff(parseFloat(zheM[1]))
+      : (pctM ? +pctM[1] : 10);
+    // 给商家看的文案（时机建议 / 海报方向）跟随商家对话语言，不跟店铺语种 —— 邮件正文才跟收件人（走查 P1-6）
+    const merchantLang = this._collapseLang(this.detectLang(act));
     // 用户指定过码名（needs.offer 含「优惠码KEYBOARD12」等）→ 用用户的码；否则生成随机码
-    const userCode = (n.offer || '').match(/优惠码([A-Za-z][A-Za-z0-9]{2,15})/i);
+    const userCode = offerSrc.match(/优惠码([A-Za-z][A-Za-z0-9]{2,15})/i);
     const coupon = userCode ? userCode[1].toUpperCase() : 'COMEBACK-' + Math.random().toString(36).slice(2, 8).toUpperCase();
     const subject = this._subject(n, lang);
     const body = this._body(n, coupon, lang);
-    const posters = lang === 'en'
+    const posters = merchantLang === 'en'
       ? [
           { title: 'Pain-resonance', copy: `"You left something behind" + ${offer} hook` },
           { title: 'Scarcity-urgency', copy: `"Only X left / ${offer} limited-time" countdown` },
@@ -878,12 +936,15 @@ class IGDE {
         ];
     return {
       audience: n.audience || '高意向流失人群',
+      pain: n.pain || '',            // 确认卡「为什么挽回」直接读这两个字段，之前一直缺省显示 —（走查 P0-3/P2）
+      goal: n.goal || '',
       subject,
       body,
       discount: offer,
+      discountNum,
       coupon,
       posters,
-      sendTiming: this._sendTiming(n, lang),
+      sendTiming: this._sendTiming(n, merchantLang),
       needs: n,        // 保留 needs，供 renderForRecipient 逐收件人重新本地化
       locale: lang,
       generatedAt: Date.now()

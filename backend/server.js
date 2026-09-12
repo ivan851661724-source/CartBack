@@ -194,7 +194,8 @@ async function generateMailHtml(draft, card) {
     // IGDE 方案卡字段（邮件主题/正文优先复用 Agent 产出，避免重复花 Token）
     subject: card.subject || '',
     body: card.body || '',
-    discount: parseFloat(card.discount) || 8,
+    // 折扣数值口径唯一：优先方案卡 discountNum（producePlanCard 统一产生，% off），文本兜底解析；默认与 variants/render 一致（10）
+    discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
     brand: (card.brand || config.shopBrand || 'CartBack') + '',
     audience: card.audience || '',
     cart_url: card.cart_url || config.shopCartUrl || 'https://cartback.demo',
@@ -478,9 +479,10 @@ function audienceConditions(desc) {
   else if (/加购/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '加购未付' });
   else if (/浏览/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '浏览未买' });
   else if (/老客|沉睡|流失/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '老客/沉睡/流失' });
-  filters.push({ field: 'email', op: 'valid', value: '真实邮箱' });
-  filters.push({ field: 'email_status', op: 'not_equals', value: 'email_invalid' });
-  filters.push({ field: 'window', op: 'within_days', value: 30 });
+  // value 一律给人看的文案（确认卡原样渲染）；内部枚举不出库（走查 P1-8：email_invalid 曾直接露给商家）
+  filters.push({ field: 'email', op: 'valid', value: '邮箱有效' });
+  filters.push({ field: 'email_status', op: 'not_equals', value: '排除无效邮箱' });
+  filters.push({ field: 'window', op: 'within_days', value: '30 天内互动' });
   const matched = filterTargetable(matchAudienceByDesc(desc));   // 与发送端同一口径
   return {
     desc: desc || '全部受众',
@@ -1057,7 +1059,10 @@ const server = http.createServer(async (req, res) => {
       const needs = (act && act.needs) || {};
       const tagDist = tagsMod.tagDistribution(store, matched);
       const draftFacts = {
-        brand: config.shopBrand || 'CartBack', discount: card.discount, coupon: card.coupon,
+        brand: config.shopBrand || 'CartBack',
+        // 折扣数值唯一出处 = 方案卡 discountNum（% off）；文本「8 折」等已在 producePlanCard 换算
+        discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
+        coupon: card.coupon,
         product: card.product || '', offer: card.offer || ''
       };
       const llmJSON = config.aiKey ? async (messages) => {
@@ -1071,7 +1076,9 @@ const server = http.createServer(async (req, res) => {
       const draft = {
         id: uid('dr_'), act_id: body.actId || null,
         subject: card.subject, body: card.body, audience: card.audience,
-        discount: card.discount, coupon: card.coupon, posters: card.posters,
+        // 数值口径（% off）：变体/逐收件人渲染统一读数值；「给什么钩子」的展示文案在 planCard.discount
+        discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
+        coupon: card.coupon, posters: card.posters,
         estGmv, matchedCount: matched.length, sendTiming: card.sendTiming || null,
         status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
         user_id: req.userId || null,
