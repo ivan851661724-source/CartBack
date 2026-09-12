@@ -29,6 +29,7 @@ export default function Sidebar() {
             role="tab"
             aria-selected={on ? 'true' : 'false'}
             onClick={() => switchTab(key)}
+            data-guide-target={key === 'mail' ? 'guide-nav-mail' : key === 'data' ? 'guide-nav-data' : undefined}
           >
             <span className="nav-ic"><Icon /></span>
             <span className="txt">{label}</span>

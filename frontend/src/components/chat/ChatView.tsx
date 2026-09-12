@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
+import { BRAND_POINTS } from '@/lib/constants';
 import { api } from '@/lib/api';
 import type { Draft } from '@/lib/types';
 import MessageBubble from './MessageBubble';
@@ -30,6 +31,8 @@ export default function ChatView() {
   const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
   const messages = act?.messages || [];
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
+  // 初始态（引导期）：右侧显示需求收集 checklist；引导走完/跳过后切回机会列表
+  const showOnboarding = !onboardingSkipped && onboardingStep < 4;
 
   // ② 受众圈选条件预览（确认卡核对用；与发送端 /api/draft 同口径）
   const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
@@ -48,6 +51,25 @@ export default function ChatView() {
     const el = areaRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, streamingText, planShown, streaming]);
+
+  // 步骤1→2 自动跳步：10 项收集完 + 回复结束 + planCard 就绪 → 推进到步骤2（邮件配置）+ 生成草稿
+  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由 GuideOverlay 气泡指向侧栏让用户点）
+  const advanced0Ref = useRef(false);
+  useEffect(() => { if (clickedChips.size === 0) advanced0Ref.current = false; }, [clickedChips.size]);
+  useEffect(() => {
+    if (onboardingStep !== 0 || advanced0Ref.current) return;
+    if (clickedChips.size >= BRAND_POINTS.length && !streaming && act?.planCard) {
+      advanced0Ref.current = true;
+      const card = act.planCard;
+      (async () => {
+        setOnboardingStep(1);
+        setDraftGenerating(true);
+        try { await createCardDraft(act.id, card); await loadState(); }
+        catch (e: any) { toast_('草稿生成失败：' + (e?.message || e)); }
+        setDraftGenerating(false);
+      })();
+    }
+  }, [onboardingStep, clickedChips, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
 
   const focusInput = () => {
     const i = inputRef.current;
@@ -114,20 +136,20 @@ export default function ChatView() {
 
             {/* 对话流内联卡（planShown 状态机） */}
             {planShown === 'confirm' && act?.planCard && (
-              <div style={{background:'#fff',border:'2px solid #FF7F4D',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'0 2px 24px rgba(0,0,0,.06)'}}>
+              <div style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>针对谁</span><span>{act.planCard.audience || '—'}</span></div>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>为什么挽回</span><span>{act.planCard.pain || '—'}</span></div>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'1px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>要什么结果</span><span>{act.planCard.goal || '—'}</span></div>
+                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>针对谁</span><span>{act.planCard.audience || '—'}</span></div>
+                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>为什么挽回</span><span>{act.planCard.pain || '—'}</span></div>
+                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>要什么结果</span><span>{act.planCard.goal || '—'}</span></div>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>给什么钩子</span><span>{act.planCard.discount || act.planCard.offer || '—'}</span></div>
                 </div>
                 {audConditions && (
-                  <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'1px dashed #DDE2E8',fontSize:'12.5px'}}>
+                  <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'.5px dashed #DDE2E8',fontSize:'12.5px'}}>
                     <div style={{fontWeight:600,color:'#1E293B',marginBottom:'2px'}}>受众圈选条件（发送前请核对）</div>
-                    <div style={{color:'#5B6773'}}>条件：{audConditions.filters.map((f) => String(f.value)).join(' · ')}</div>
-                    <div style={{color:'#5B6773'}}>预计触达 {audConditions.matchedCount} 人 · 预估可挽回 ¥{audConditions.estGmv}（预估）</div>
-                    <div style={{color:'#5B6773'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
+                    <div style={{color:'var(--muted)'}}>条件：{audConditions.filters.map((f) => String(f.value)).join(' · ')}</div>
+                    <div style={{color:'var(--muted)'}}>预计触达 {audConditions.matchedCount} 人 · 预估可挽回 ¥{audConditions.estGmv}（预估）</div>
+                    <div style={{color:'var(--muted)'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
                   </div>
                 )}
                 <div style={{display:'flex',gap:'9px'}}>
@@ -161,50 +183,42 @@ export default function ChatView() {
             )}
           </div>
 
-          {/* 初始引导快捷描述词 */}
-          {!onboardingSkipped && onboardingStep < 4 && (
+          <div data-guide-target="guide-compose" style={{display:'flex',flexDirection:'column',flexShrink:0}}>
+          {/* 初始引导快捷描述词（与右侧 checklist 共用 BRAND_POINTS） */}
+          {showOnboarding && (
             <div style={{display:'flex',gap:'8px',padding:'8px 16px',flexWrap:'wrap',flexShrink:0}}>
-              {[
-                { label: '品牌名称', msg: '我的品牌叫 Leo\'s PhoneCase，专门做手机壳的' },
-                { label: '品牌类目', msg: '我们主要做手机配件，主打手机壳和贴膜' },
-                { label: '客单价', msg: '客单价大概 30-50 美元，手机壳为主' },
-                { label: '发送时段', msg: '我想在晚上 8 点发送挽回邮件' },
-                { label: '目标受众', msg: '我要挽回加购未付的客户，主要是 25-35 岁年轻人' },
-                { label: '挽回原因', msg: '他们加购了但没付款，可能是价格或运费问题' },
-                { label: '折扣力度', msg: '我想给 8 折优惠，再加免邮费' },
-                { label: '产品特色', msg: '我们手机壳主打防摔设计，有 50 多种图案可选' },
-                { label: '营销目标', msg: '希望他们回来完成购买，顺便看看新品' },
-                { label: '发送频率', msg: '先发一封试试，效果好的话 3 天后再发第二封' },
-              ].map((chip, i) => {
+              {BRAND_POINTS.map((chip, i) => {
                 const clicked = clickedChips.has(i);
                 return (
                   <button
                     key={i}
                     type="button"
+                    disabled={streaming}
                     onClick={() => {
                       const next = new Set(clickedChips);
                       next.add(i);
                       setClickedChips(next);
-                      if (next.size >= 10 && onboardingStep < 4) setOnboardingStep(onboardingStep + 1);
                       sendMsg(chip.msg);
                     }}
                     style={{
                       display:'inline-flex',alignItems:'center',gap:'6px',
                       padding:'7px 13px',borderRadius:'9px',
                       border: clicked ? '0.5px solid #FF7F4D' : '0.5px solid #DDE2E8',
-                      background: clicked ? '#FFF8F4' : '#fff',
-                      color: clicked ? '#FF7F4D' : '#1E293B',
+                      background: clicked ? 'var(--brand-soft)' : '#fff',
+                      color: clicked ? 'var(--brand)' : 'var(--text)',
                       fontSize:'12.5px',fontWeight:500,
-                      cursor:'pointer',whiteSpace:'nowrap',transition:'all .15s',
+                      cursor: streaming ? 'not-allowed' : 'pointer',
+                      opacity: streaming && !clicked ? 0.45 : 1,
+                      whiteSpace:'nowrap',transition:'all .15s',
                     }}
                     onMouseEnter={(e) => {
-                      if (!clicked) {
+                      if (!clicked && !streaming) {
                         e.currentTarget.style.borderColor = '#FF7F4D';
-                        e.currentTarget.style.background = '#FFF8F4';
+                        e.currentTarget.style.background = 'var(--brand-soft)';
                       }
                     }}
                     onMouseLeave={(e) => {
-                      if (!clicked) {
+                      if (!clicked && !streaming) {
                         e.currentTarget.style.borderColor = '#DDE2E8';
                         e.currentTarget.style.background = '#fff';
                       }
@@ -241,15 +255,99 @@ export default function ChatView() {
             </button>
           </div>
           <div className="compose-hint">开放式对话 · 信息后台静默采集 · 齐了才弹确认</div>
+          </div>
         </div>
         </section>
 
-        {hasOpportunities && (
-          <aside className="opportunity-rail" aria-label="待处理机会">
-            <OpportunityCard />
+        {(showOnboarding || hasOpportunities) && (
+          <aside className="opportunity-rail" aria-label={showOnboarding ? '需求收集进度' : '待处理机会'}>
+            {showOnboarding ? (
+              <OnboardingChecklist
+                collected={clickedChips}
+                onAdvance={async () => {
+                  // 手动兜底（自动跳步 effect 通常先触发）：推进步骤2 + 生成草稿。
+                  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由引导气泡指向侧栏）。
+                  const card = act?.planCard;
+                  if (!card) { toast_('需求尚未收集完整，回到对话补全四要素后再生成邮件'); return; }
+                  setOnboardingStep(1);
+                  setDraftGenerating(true);
+                  try { await createCardDraft(act.id, card); await loadState(); }
+                  catch (e: any) { toast_('草稿生成失败：' + (e?.message || e)); }
+                  setDraftGenerating(false);
+                }}
+              />
+            ) : (
+              <OpportunityCard />
+            )}
           </aside>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * 初始引导右侧 checklist —— 对齐 Figma AgentPage「📋 需求收集进度」(App.tsx:352-401)。
+ * 圆勾选框 + 标签 + 右侧已填短值 + 虚线分隔 + 进度条 + 底部完成按钮。
+ * collected 为已点 chip 的索引集合；完成按钮推进引导下一步（引导走完才切回机会列表）。
+ */
+function OnboardingChecklist({ collected, onAdvance }: { collected: Set<number>; onAdvance: () => void }) {
+  const total = BRAND_POINTS.length;
+  const done = collected.size;
+  const allDone = done >= total;
+  return (
+    <div className="opp-card" style={{ gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+        <span className="disp" style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>📋 需求收集进度</span>
+        <span style={{ color: 'var(--brand)', fontWeight: 800, fontFamily: 'var(--font-disp)', fontSize: 15 }}>
+          {done}<span style={{ color: 'var(--soft)', fontWeight: 400, fontSize: 12 }}>/{total}</span>
+        </span>
+      </div>
+
+      <div style={{ height: 6, background: 'var(--bg-input)', borderRadius: 999, overflow: 'hidden' }}>
+        <div style={{
+          height: '100%', width: `${(done / total) * 100}%`, background: 'var(--brand)',
+          borderRadius: 999, transition: 'width .5s var(--ease)',
+        }} />
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {BRAND_POINTS.map((p, i) => {
+          const c = collected.has(i);
+          return (
+            <div key={p.key} style={{
+              display: 'flex', gap: 9, alignItems: 'flex-start',
+              padding: '7px 0', borderBottom: '.5px dashed var(--line)', fontSize: 12,
+            }}>
+              <div style={{
+                width: 17, height: 17, borderRadius: '50%', flexShrink: 0, marginTop: 1,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                background: c ? 'var(--brand)' : '#fff', border: `.5px solid ${c ? 'var(--brand)' : 'var(--line)'}`,
+                color: '#fff', fontSize: 9, fontWeight: 700, transition: 'all .2s',
+              }}>{c ? '✓' : ''}</div>
+              <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
+                <span style={{ color: c ? 'var(--text)' : 'var(--muted)', flexShrink: 0 }}>{p.label}</span>
+                {c && p.val && (
+                  <span style={{
+                    color: 'var(--muted)', fontSize: 11, textAlign: 'right',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>{p.val}</span>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {allDone ? (
+        <button className="btn primary" onClick={onAdvance} style={{ width: '100%', justifyContent: 'center', border: 'none' }}>
+          设置完成！进入下一步 →
+        </button>
+      ) : (
+        <button className="btn ghost" disabled style={{ width: '100%', justifyContent: 'center', border: 'none' }}>
+          还需补全 {total - done} 个要点
+        </button>
+      )}
     </div>
   );
 }

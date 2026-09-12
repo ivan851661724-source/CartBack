@@ -1116,8 +1116,8 @@ const server = http.createServer(async (req, res) => {
         store.upsertDraft(draft);
       }
 
-      // 海报异步生成入队（确认弹出时生成一次；失败占位+重试，不阻塞发送）
-      queue.enqueue({ type: 'posters', payload: { draftId: draft.id }, dedupeKey: 'posters:' + draft.id });
+      // 海报已下线（前端不再展示，改展示主图）——不再入队生成，省 LLM/万相算力。
+      // /api/posters 路由与 posters 队列 handler 暂留为死代码，待后续整体清理 posters.js。
 
       return sendJson(res, 200, {
         draft, estGmv, matchedCount: matched.length,

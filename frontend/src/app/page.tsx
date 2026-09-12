@@ -16,6 +16,7 @@ import ImportModal from '@/components/audience/ImportModal';
 import EditModal from '@/components/mail/EditModal';
 import AuthModal from '@/components/auth/AuthModal';
 import HistoryModal from '@/components/chat/HistoryModal';
+import GuideOverlay from '@/components/shell/GuideOverlay';
 
 function Shell() {
   const { activeTab } = useApp();
@@ -42,6 +43,7 @@ function Shell() {
         </main>
       </div>
       {/* 全局浮层 */}
+      <GuideOverlay />
       <AudienceDrawer />
       <ImportModal />
       <EditModal />

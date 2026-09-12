@@ -29,7 +29,7 @@ export default function MailCard({ d, onOpen }: { d: Draft; onOpen: () => void }
       {(d as any).g0_blocked && (d as any).g0_blocked.length > 0 && (
         <div
           className="mc-meta"
-          style={{ color: 'var(--danger, #d33)', fontWeight: 600, marginTop: 4 }}
+          style={{ color: 'var(--danger)', fontWeight: 600, marginTop: 4 }}
           title={(d as any).g0_blocked.map((b: any) => `${b.email}: ${(b.hits || []).join('、')}`).join('；')}
         >
           ⛔ G0 拦截 {(d as any).g0_blocked.length} 封（含非白名单中文，未发送）

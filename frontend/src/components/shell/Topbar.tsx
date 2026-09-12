@@ -7,28 +7,18 @@ import { initial } from '@/lib/format';
 
 /** 顶栏：logo / 面包屑 / needs 进度提示 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
-  const { status, act, me, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep } = useApp();
+  const { status, act, me, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding } = useApp();
   const real = status?.mode === 'real';
   const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
 
-  // 引导态在所有页面都稳定显示当前步骤，切页不再回退到 0/4
+  // 引导期由 GuideOverlay（蒙层+气泡）接管，顶栏 HintPill 仅在非引导态显示 needs 进度
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
-  const isLastStep = onboardingStep >= 3; // 第 4 步（显示 4/4）
 
-  const ONBOARDING_TEXTS: Record<number, string> = {
-    0: '点击左侧「助手」，依次点上方 10 个快捷描述告诉助手你的品牌信息。',
-    1: '太棒了！去「邮件配置」查看 10 个要点，选好受众和折扣后点「发送」。',
-    2: '邮件已发出！切到「数据看板」查看点击 / 转化 / GMV / ROI。',
-    3: '完整闭环已跑通！',
-  };
-
-  const hpText = showOnboarding
-    ? ONBOARDING_TEXTS[onboardingStep] || ONBOARDING_TEXTS[0]
-    : n === 4
-      ? '信息齐了！看一下对话里的确认卡，点「可以，去发」就能生成邮件方案。'
-      : n === 0
-        ? '跟助手聊聊想挽回谁、为啥、要什么结果，信息齐了自动出方案。'
-        : `已收集 ${n} 项，继续聊（还差：${FIELDS.filter(([k]) => !(act?.needs?.[k])).map(([, l]) => l).join('、')}）`;
+  const hpText = n === 4
+    ? '信息齐了！看一下对话里的确认卡，点「可以，去发」就能生成邮件方案。'
+    : n === 0
+      ? '跟助手聊聊想挽回谁、为啥、要什么结果，信息齐了自动出方案。'
+      : `已收集 ${n} 项，继续聊（还差：${FIELDS.filter(([k]) => !(act?.needs?.[k])).map(([, l]) => l).join('、')}）`;
 
   const onUser = () => {
     if (me?.user) {
@@ -49,16 +39,9 @@ export default function Topbar() {
         <span className="logo-name">Cart<b>Back</b></span>
       </div>
 
-      <HintPill n={showOnboarding ? onboardingStep + 1 : n} text={hpText} onboarding={showOnboarding}
-        nextLabel={isLastStep ? '完成' : '下一步 →'}
-        onNext={() => {
-          if (isLastStep) { setOnboardingStep(4); return; } // 第 4 步：完成引导
-          const next = onboardingStep + 1;
-          setOnboardingStep(next);
-          if (next === 2) switchTab('mail');
-          else if (next === 3) switchTab('data');
-        }}
-        onSkip={skipOnboarding} />
+      {!showOnboarding && (
+        <HintPill n={n} text={hpText} onSkip={skipOnboarding} />
+      )}
 
       <span className="spacer" />
       <span className={`mode-pill${real ? ' real' : ''}`}>{real ? '真实' : '演示'}</span>

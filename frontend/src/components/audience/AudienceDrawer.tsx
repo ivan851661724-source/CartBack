@@ -99,7 +99,7 @@ export default function AudienceDrawer() {
                   <span style={{ opacity: 0.65 }}>w{t.weight}</span>
                   <span style={{
                     fontSize: 10.5, padding: '0 5px', borderRadius: 999,
-                    background: t.source === 'manual' ? '#FF7F4D' : t.source === 'attribution' ? '#3ddc84' : '#9aa7b2',
+                    background: t.source === 'manual' ? 'var(--brand)' : t.source === 'attribution' ? 'var(--ok)' : 'var(--muted)',
                     color: '#fff',
                   }}>{SOURCE_LABEL[t.source] || t.source}</span>
                 </span>

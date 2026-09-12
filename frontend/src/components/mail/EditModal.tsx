@@ -22,8 +22,6 @@ export default function EditModal() {
   const [err, setErr] = useState(false);
   const [previewHtml, setPreviewHtml] = useState('');
   const [preview, setPreview] = useState<DraftPreview | null>(null);
-  const [posters, setPosters] = useState<{ url: string; method: string }[]>([]);
-  const [posterBusy, setPosterBusy] = useState(false);
 
   useEffect(() => {
     if (editOpen && editingDraft) {
@@ -44,7 +42,6 @@ export default function EditModal() {
         if (escPath) html = html.split(escPath).join(imgUrl);
       }
       setPreviewHtml(html);
-      setPosters(((editingDraft as any).posters || []).filter((x: any) => x && x.url));
       // ④ 按人群/语言预览（渲染管线实际产物；失败静默不打扰编辑）
       if (editingDraft.id) {
         api<DraftPreview>(`/api/draft/${editingDraft.id}/preview`)
@@ -56,30 +53,14 @@ export default function EditModal() {
     }
   }, [editOpen, editingDraft]);
 
-  // ③ 海报「换一批」：重新入队生成，轮询任务完成后刷新缩略图
-  const regenPosters = async () => {
-    if (!editingDraft?.id || posterBusy) return;
-    setPosterBusy(true);
-    try {
-      const r = await api<{ job_id: string }>('/api/posters', {
-        method: 'POST',
-        body: JSON.stringify({ draftId: editingDraft.id, regenerate: true }),
-      });
-      if (r.job_id) {
-        for (let i = 0; i < 60; i++) {
-          const j = await api<{ status: string; result?: { posters?: { url: string; method: string }[] } }>(`/api/jobs/${r.job_id}`);
-          if (j.status === 'done') { setPosters((j.result?.posters || []).filter((x) => x.url)); break; }
-          if (j.status === 'failed') break;
-          await new Promise((res) => setTimeout(res, 900));
-        }
-      }
-    } catch { /* 静默 */ } finally { setPosterBusy(false); }
-  };
-
   const onSubmit = async () => {
     const ok = await sendEditedDraft(subj.trim(), body);
     if (!ok) { setMsg('主题和正文不能为空'); setErr(true); }
   };
+
+  // 主图：邮件正文里的 Hero 图（draft.image_path → 同源 /api/image 端点）
+  const heroPath = editOpen && editingDraft ? String((editingDraft as any).image_path || '') : '';
+  const heroUrl = heroPath ? '/api/image/' + encodeURIComponent(heroPath) : '';
 
   return (
     <Modal open={editOpen} onClose={() => setEditOpen(false)} title="邮件预览">
@@ -99,25 +80,16 @@ export default function EditModal() {
               value={body} onChange={(e) => setBody(e.target.value)} />
           </>
         )}
-        {posters.length > 0 && (
+        {heroUrl && (
           <div style={{ marginTop: 10 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
-              海报（3 款）{' '}
-              <button className="btn ghost sm" disabled={posterBusy} onClick={regenPosters} style={{ marginLeft: 6 }}>
-                {posterBusy ? '生成中…' : '换一批'}
-              </button>
-            </div>
-            <div style={{ display: 'flex', gap: 8 }}>
-              {posters.map((p, i) => (
-                <a key={i} href={p.url} target="_blank" rel="noreferrer" title={`${p.method} · 点击看大图`}>
-                  <img
-                    src={p.url}
-                    alt={`poster-${i + 1}`}
-                    style={{ width: 150, height: 75, objectFit: 'cover', borderRadius: 8, border: '1px solid #DDE2E8' }}
-                  />
-                </a>
-              ))}
-            </div>
+            <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>主图（邮件正文配图）</div>
+            <a href={heroUrl} target="_blank" rel="noreferrer" title="点击看大图">
+              <img
+                src={heroUrl}
+                alt="邮件主图"
+                style={{ width: '100%', maxHeight: 180, objectFit: 'cover', borderRadius: 10, border: '1px solid #DDE2E8' }}
+              />
+            </a>
           </div>
         )}
         {preview && preview.tiers.some((t) => t.count > 0) && (
@@ -130,12 +102,12 @@ export default function EditModal() {
                 <div key={t.tier} style={{ padding: '8px 10px', borderRadius: 10, background: 'rgba(125,125,125,.08)', fontSize: 12.5 as any }}>
                   <b>{TIER_LABEL[t.tier] || t.tier}</b>
                   <span style={{ opacity: 0.6 }}> · {t.count} 人 · {(t.locale || 'en').toUpperCase()}</span>
-                  {t.blocked && <span style={{ color: '#d33', fontWeight: 700 }}> · ⛔ G0 拦截</span>}
+                  {t.blocked && <span style={{ color: 'var(--danger)', fontWeight: 700 }}> · ⛔ G0 拦截</span>}
                   <div style={{ marginTop: 4, opacity: 0.85 }}>主题样例：{t.subject}</div>
                 </div>
               ))}
               {preview.g0_blocked.length > 0 && (
-                <div style={{ color: '#d33', fontSize: 12.5, fontWeight: 600 }}>
+                <div style={{ color: 'var(--danger)', fontSize: 12.5, fontWeight: 600 }}>
                   ⛔ {preview.g0_blocked.length} 封被 G0 拦截（非白名单中文）：{preview.g0_blocked.map((b) => b.email).join('、')}
                 </div>
               )}
