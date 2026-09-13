@@ -88,8 +88,8 @@ test('mailgen: 空 subject/body + skip_image → fallback_template + skip', asyn
     assert.ok(draft.html.includes('CartBack'), 'html 应包含统一后的商家品牌名');
     assert.equal(draft.mailgen_meta.copy_provider, 'fallback_template');
     assert.equal(draft.mailgen_meta.image_method, 'skip');
-    // skip_image 时 mailgen 返回空，/api/draft 兜底写入 FALLBACK_IMAGE 哨兵（迁移前既有行为）
-    assert.equal(draft.image_path, 'FALLBACK_IMAGE');
+    // skip_image / 万相未配 → image_path 留空（436a06e 起：EditModal 据此不渲染碎图，不再写 FALLBACK 哨兵）
+    assert.equal(draft.image_path, '');
     // subject/body 被回填为 fallback 模板文案
     assert.ok(draft.subject.includes('12% OFF'));
   } finally {

@@ -253,6 +253,6 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
   // —— /api/image 只允许 output/ 目录树内文件（P1 路径穿越修复） ——
   const outside = await fetch(base + '/api/image/' + encodeURIComponent(require('path').join(__dirname, '..', 'server.js')));
   assert.equal(outside.status, 403);
-  const posterImg = await fetch(base + '/api/image/' + encodeURIComponent(sentDraft.posters[0].file));
-  assert.equal(posterImg.status, 200);
+  // 海报已下线（436a06e：前端不再展示，改展示主图，省 LLM/万相算力）——skip_image 场景无海报图片文件
+  assert.ok(!sentDraft.posters || sentDraft.posters.every((p) => !p.file), '海报下线后 draft 不应再有生成的海报文件');
 });
