@@ -859,7 +859,7 @@ const server = http.createServer(async (req, res) => {
       const password = String(body.password || '');
       const name = String(body.name || '').trim();
       if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return sendJson(res, 400, { error: '邮箱格式不正确' });
-      if (password.length < 8 || !/[a-zA-Z]/.test(password) || !/\d/.test(password)) return sendJson(res, 400, { error: '密码至少 8 位，且同时包含字母和数字' });
+      // 密码格式限制已移除（前端守卫保证非空）；如需恢复强度校验在此加回
       if (!name || name.length > 40) return sendJson(res, 400, { error: '昵称不能为空且不超过 40 字' });
       if (store.getUserByEmail(email)) return sendJson(res, 409, { error: '该邮箱已注册' });
       const user = store.createUser({ email, name, password_hash: authMod.hashPassword(password), status: 'active' });

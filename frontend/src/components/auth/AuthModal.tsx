@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import Modal from '@/components/ui/Modal';
 
@@ -12,14 +12,22 @@ export default function AuthModal() {
   const [name, setName] = useState('');
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState(false);
+  // 受控 state 在浏览器/密码管理器 autofill 时可能不触发 onChange（state 仍空），
+  // 提交时以 input DOM 真实值为准兜底，避免「填了却报邮箱密码为空」。
+  const emailRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (authOpen) { setMsg(''); setErr(false); }
   }, [authOpen, authMode]);
 
   const onSubmit = async () => {
-    const ok = await authSubmit(email.trim(), password, name.trim());
-    if (!ok) { setMsg('邮箱和密码不能为空'); setErr(true); }
+    const e = (emailRef.current?.value ?? email).trim();
+    const p = passwordRef.current?.value ?? password;
+    const n = (nameRef.current?.value ?? name).trim();
+    const r = await authSubmit(e, p, n);
+    if (r !== true) { setMsg(r); setErr(true); }
   };
   const isReg = authMode === 'register';
 
@@ -27,9 +35,9 @@ export default function AuthModal() {
     <Modal open={authOpen} onClose={() => setAuthOpen(false)} title={isReg ? '登录 / 注册' : '登录'} width="min(380px,100%)">
       <div className="m-body">
         <div className="auth-field">
-          <input type="email" placeholder="邮箱" value={email} onChange={(e) => setEmail(e.target.value)} />
-          <input type="password" placeholder="密码（≥8 位含字母和数字）" value={password} onChange={(e) => setPassword(e.target.value)} />
-          {isReg && <input type="text" placeholder="昵称（仅注册时填）" value={name} onChange={(e) => setName(e.target.value)} />}
+          <input ref={emailRef} type="email" placeholder="邮箱" value={email} onChange={(e) => setEmail(e.target.value)} />
+          <input ref={passwordRef} type="password" placeholder="密码" value={password} onChange={(e) => setPassword(e.target.value)} />
+          {isReg && <input ref={nameRef} type="text" placeholder="昵称（仅注册时填）" value={name} onChange={(e) => setName(e.target.value)} />}
         </div>
       </div>
       <div className="m-foot">

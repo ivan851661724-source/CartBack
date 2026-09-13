@@ -87,12 +87,12 @@ test('默认模式：bootstrap 不下发 token，未鉴权业务端点一律 403
 test('注册 → 会话 cookie → 业务端点放行；登出后会话失效', async () => {
   const { baseUrl, stop } = await startServer(false);
   try {
-    // 弱密码应被拒
-    const weak = await fetch(baseUrl + '/api/auth/register', {
+    // 邮箱格式不正确应被拒（密码格式限制已移除，不再校验强度）
+    const bad = await fetch(baseUrl + '/api/auth/register', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'sec-test@example.com', password: 'short', name: 'T' })
+      body: JSON.stringify({ email: 'not-an-email', password: 'short', name: 'T' })
     });
-    assert.equal(weak.status, 400);
+    assert.equal(bad.status, 400);
 
     const reg = await fetch(baseUrl + '/api/auth/register', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

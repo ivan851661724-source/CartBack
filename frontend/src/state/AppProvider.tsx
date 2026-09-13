@@ -76,7 +76,7 @@ interface AppContextValue extends AppState {
   saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string }) => Promise<void>;
   resetData: () => Promise<void>;
   doImport: (csv: string) => Promise<boolean>;
-  authSubmit: (email: string, password: string, name: string) => Promise<boolean>;
+  authSubmit: (email: string, password: string, name: string) => Promise<string | true>;
   authLogout: () => Promise<void>;
   jumpToConfig: (intent: string, aud?: Audience) => Promise<void>;
   confirmSendPlan: (card: PlanCard) => Promise<void>;
@@ -380,8 +380,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [patch, toast_]);
 
   // —— 鉴权 ——
-  const authSubmit = useCallback(async (email: string, password: string, name: string) => {
-    if (!email || !password) { toast_('邮箱和密码不能为空'); return false; }
+  const authSubmit = useCallback(async (email: string, password: string, name: string): Promise<string | true> => {
+    if (!email || !password) return '邮箱和密码不能为空';
     const isReg = state.authMode === 'register';
     const path = isReg ? '/api/auth/register' : '/api/auth/login';
     const body = isReg ? { email, password, name } : { email, password };
@@ -390,7 +390,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       body: JSON.stringify(body), credentials: 'same-origin',
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) { toast_(j.error || '请求失败'); return false; }
+    if (!r.ok) return j.error || '请求失败';
     patch({ authOpen: false });
     // 会话重建：注册/登录成功后必须补上 boot 阶段因未登录而没建好的会话，
     // 否则 sendMsg 命中「无会话」分支，助手静默失效（走查 P0-2）
