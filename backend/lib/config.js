@@ -95,12 +95,52 @@ function load() {
     cfg.webhookSecret = crypto.randomBytes(24).toString('hex');
     save(cfg);
   }
+  // 环境变量最后覆盖（部署注入密钥用）；覆盖结果只留在内存，不回写 config.json
+  applyEnvOverlay(cfg);
   return cfg;
 }
 
 function save(cfg) {
   ensureDir();
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+}
+
+/** 环境变量覆盖层（部署引导用，走查工程建议 #1）：设置页写入 config.json，重启后环境变量对这些字段优先。
+ *  只有非空的环境变量才生效；结构化字段（JSON）解析失败时忽略该变量、保留原值。 */
+function applyEnvOverlay(cfg) {
+  const str = (k) => { const v = process.env[k]; return (v && v.trim()) ? v.trim() : null; };
+  const int = (k) => { const v = str(k); return v && /^\d+$/.test(v) ? parseInt(v, 10) : null; };
+  const json = (k) => { const v = str(k); if (!v) return null; try { return JSON.parse(v); } catch (e) { return null; } };
+  const m = {
+    mode: str('CARTBACK_MODE'),
+    aiProvider: str('CARTBACK_AI_PROVIDER'),
+    aiKey: str('CARTBACK_AI_KEY'),
+    aiBaseUrl: str('CARTBACK_AI_BASE_URL'),
+    aiModel: str('CARTBACK_AI_MODEL'),
+    aiExtraBody: json('CARTBACK_AI_EXTRA_BODY'),
+    espProvider: str('CARTBACK_ESP_PROVIDER'),
+    espKey: str('CARTBACK_ESP_KEY'),
+    espApiUrl: str('CARTBACK_ESP_API_URL'),
+    espFrom: str('CARTBACK_ESP_FROM'),
+    espSenderName: str('CARTBACK_ESP_SENDER_NAME'),
+    smtpHost: str('CARTBACK_SMTP_HOST'),
+    smtpPort: int('CARTBACK_SMTP_PORT'),
+    smtpUser: str('CARTBACK_SMTP_USER'),
+    smtpPass: str('CARTBACK_SMTP_PASS'),
+    visionKey: str('CARTBACK_VISION_KEY'),
+    visionBaseUrl: str('CARTBACK_VISION_BASE_URL'),
+    visionModel: str('CARTBACK_VISION_MODEL'),
+    shopDefaultLocale: str('CARTBACK_SHOP_DEFAULT_LOCALE'),
+    shopBrand: str('CARTBACK_SHOP_BRAND'),
+    shopCartUrl: str('CARTBACK_SHOP_CART_URL'),
+    publicBaseUrl: str('CARTBACK_PUBLIC_BASE_URL'),
+    g0Whitelist: json('CARTBACK_G0_WHITELIST')
+  };
+  let changed = false;
+  for (const [k, v] of Object.entries(m)) {
+    if (v != null && cfg[k] !== v) { cfg[k] = v; changed = true; }
+  }
+  return changed;
 }
 
 /** 返回给前端的「配置状态」——绝不包含密钥明文 */
