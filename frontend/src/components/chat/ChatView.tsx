@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
-import { BRAND_POINTS } from '@/lib/constants';
+import { BRAND_POINTS, INTENT_POINTS } from '@/lib/constants';
 import { api } from '@/lib/api';
 import type { Draft } from '@/lib/types';
 import MessageBubble from './MessageBubble';
@@ -17,11 +17,11 @@ const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时�
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
   const {
-    act, acts, opportunities, streaming, streamingText, planShown, lastSent,
+    act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
     setEditingDraft, setEditOpen, setDraftGenerating, toast_,
-    onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep,
+    onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -33,6 +33,19 @@ export default function ChatView() {
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
   // 初始态（引导期）：右侧显示需求收集 checklist；引导走完/跳过后切回机会列表
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
+  // 引导风格开关：demo=硬编码品牌词+浮层引导+checklist；safe=纯意图词+顶栏串联引导
+  const isDemoGuide = guideStyle === 'demo';
+  const chips = isDemoGuide ? BRAND_POINTS : INTENT_POINTS;
+  // 已收集的品牌信息条数：从持久化的 messages 派生（clickedChips 是 ChatView 局部 state，
+  // 切页卸载会重置 → 之前用 clickedChips.size 门控确认卡导致切页回来卡消失；改用持久计数）
+  const collectedCount = isDemoGuide
+    ? messages.filter((m) => m.role === 'user' && BRAND_POINTS.some((bp) => bp.msg === m.content)).length
+    : 0;
+  const collectedAll = isDemoGuide ? collectedCount >= BRAND_POINTS.length : true;
+  // 本会话是否已发过邮件（确认卡据此隐藏「可以，去发」）
+  const hasSentForAct = (drafts || []).some(
+    (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
+  );
 
   // ② 受众圈选条件预览（确认卡核对用；与发送端 /api/draft 同口径）
   const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
@@ -57,7 +70,7 @@ export default function ChatView() {
   const advanced0Ref = useRef(false);
   useEffect(() => { if (clickedChips.size === 0) advanced0Ref.current = false; }, [clickedChips.size]);
   useEffect(() => {
-    if (onboardingStep !== 0 || advanced0Ref.current) return;
+    if (!isDemoGuide || onboardingStep !== 0 || advanced0Ref.current) return;
     if (clickedChips.size >= BRAND_POINTS.length && !streaming && act?.planCard) {
       advanced0Ref.current = true;
       const card = act.planCard;
@@ -69,7 +82,7 @@ export default function ChatView() {
         setDraftGenerating(false);
       })();
     }
-  }, [onboardingStep, clickedChips, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
+  }, [isDemoGuide, onboardingStep, clickedChips, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
 
   const focusInput = () => {
     const i = inputRef.current;
@@ -135,7 +148,10 @@ export default function ChatView() {
             )}
 
             {/* 对话流内联卡（planShown 状态机） */}
-            {planShown === 'confirm' && act?.planCard && (
+            {/* demo：10 个 chip 全点完才弹确认卡（后端在 4 项 needs 攒齐时就产出 planCard，
+                约第 6 个 chip，太早；demo 要求攒满 10 再展示）。safe：planCard 一到就弹。
+                门控用 collectedAll（从持久 messages 派生），切页回来不会因局部 state 重置而消失。 */}
+            {planShown === 'confirm' && act?.planCard && (!isDemoGuide || collectedAll) && (
               <div style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
@@ -152,26 +168,34 @@ export default function ChatView() {
                     <div style={{color:'var(--muted)'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
                   </div>
                 )}
-                <div style={{display:'flex',gap:'9px'}}>
-                  <button className="btn primary" onClick={async () => {
-                    const card = act.planCard;
-                    if (!card) return;
-                    setPlanShown('plan');
-                    switchTab('mail');          // 立即跳转邮件 tab（不等草稿生成）
-                    setDraftGenerating(true);
-                    try {
-                      const d = await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
-                      await loadState();
-                      setEditingDraft(d); setEditOpen(true);            // 草稿就绪→打开预览
-                    } catch (e: any) {
-                      // 失败必须可见（此前静默吞掉 → 跳到邮件页后无任何反馈）；拉回确认卡方便重试
-                      toast_('草稿生成失败：' + (e?.message || e));
-                      setPlanShown('confirm');
-                      switchTab('chat');
-                    }
-                    setDraftGenerating(false);
-                  }}>可以，去发</button>
-                  <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
+                <div style={{display:'flex',gap:'9px',alignItems:'center'}}>
+                  {hasSentForAct ? (
+                    <>
+                      <span style={{fontSize:'13px',color:'var(--ok2)',fontWeight:600}}>✓ 邮件已发送</span>
+                      <button className="btn ghost" onClick={() => switchTab('data')}>查看数据看板 →</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="btn primary" onClick={async () => {
+                        const card = act.planCard;
+                        if (!card) return;
+                        // 不切 planShown（保留确认卡在对话流中）；跳邮件 tab + 预建草稿 + 打开预览
+                        switchTab('mail');
+                        setDraftGenerating(true);
+                        try {
+                          const d = await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
+                          await loadState();
+                          setEditingDraft(d); setEditOpen(true);            // 草稿就绪→打开预览
+                        } catch (e: any) {
+                          // 失败必须可见（此前静默吞掉 → 跳到邮件页后无任何反馈）；留在确认卡方便重试
+                          toast_('草稿生成失败：' + (e?.message || e));
+                          switchTab('chat');
+                        }
+                        setDraftGenerating(false);
+                      }}>可以，去发</button>
+                      <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
+                    </>
+                  )}
                 </div>
               </div>
             )}
@@ -187,7 +211,7 @@ export default function ChatView() {
           {/* 初始引导快捷描述词（与右侧 checklist 共用 BRAND_POINTS） */}
           {showOnboarding && (
             <div style={{display:'flex',gap:'8px',padding:'8px 16px',flexWrap:'wrap',flexShrink:0}}>
-              {BRAND_POINTS.map((chip, i) => {
+              {chips.map((chip, i) => {
                 const clicked = clickedChips.has(i);
                 return (
                   <button
@@ -198,7 +222,16 @@ export default function ChatView() {
                       const next = new Set(clickedChips);
                       next.add(i);
                       setClickedChips(next);
-                      sendMsg(chip.msg);
+                      // demo：点击即发（驱动 LLM 对话 + 攒齐自动跳步）
+                      // safe（P0-4）：全新会话首条直发，已有上下文只填入输入框待商家确认，
+                      //               防止快捷词把已聊的品牌信息带走
+                      if (isDemoGuide) {
+                        sendMsg(chip.msg);
+                      } else {
+                        const fresh = messages.filter((m) => m.role === 'user').length === 0 && n === 0;
+                        if (fresh) sendMsg(chip.msg);
+                        else { setChatInput(chip.msg); inputRef.current?.focus(); }
+                      }
                     }}
                     style={{
                       display:'inline-flex',alignItems:'center',gap:'6px',
@@ -259,9 +292,9 @@ export default function ChatView() {
         </div>
         </section>
 
-        {(showOnboarding || hasOpportunities) && (
-          <aside className="opportunity-rail" aria-label={showOnboarding ? '需求收集进度' : '待处理机会'}>
-            {showOnboarding ? (
+        {(isDemoGuide && showOnboarding) || hasOpportunities ? (
+          <aside className="opportunity-rail" aria-label={isDemoGuide && showOnboarding ? '需求收集进度' : '待处理机会'}>
+            {isDemoGuide && showOnboarding ? (
               <OnboardingChecklist
                 collected={clickedChips}
                 onAdvance={async () => {
@@ -280,7 +313,7 @@ export default function ChatView() {
               <OpportunityCard />
             )}
           </aside>
-        )}
+        ) : null}
       </div>
     </div>
   );

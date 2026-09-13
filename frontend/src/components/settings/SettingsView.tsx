@@ -6,7 +6,7 @@ import Tag from '@/components/ui/Tag';
 
 /** 设置四步向导（AI / ESP / 店铺 / 模式）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
 export default function SettingsView() {
-  const { status, setMode, saveConfig, resetData } = useApp();
+  const { status, setMode, saveConfig, resetData, guideStyle, setGuideStyle } = useApp();
   const s = status || ({} as any);
   const [aiKey, setAiKey] = useState('');
   const [espKey, setEspKey] = useState('');
@@ -128,6 +128,20 @@ export default function SettingsView() {
 
         <div className="setup-card glass-card">
           <div className="s-no">5</div>
+          <div className="s-body">
+            <div className="s-head"><h3>引导风格</h3><Tag kind={guideStyle === 'demo' ? 'intent' : 'gray'}>{guideStyle === 'demo' ? '演示硬编码' : '安全纯意图'}</Tag></div>
+            <div className="s-desc">与运行模式解耦的独立开关。演示：硬编码 Leo\'s PhoneCase 快捷词 + 浮层蒙层引导，适合演示；安全：纯意图快捷词不覆盖真实品牌 + 顶栏串联引导，适合真实商家。仅前端、记忆本机。</div>
+            <div className="row">
+              <div className="seg">
+                <button className={`seg-btn${guideStyle === 'demo' ? ' active' : ''}`} onClick={() => setGuideStyle('demo')}>演示（硬编码+浮层引导）</button>
+                <button className={`seg-btn${guideStyle === 'safe' ? ' active' : ''}`} onClick={() => setGuideStyle('safe')}>安全（纯意图+顶栏引导）</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="setup-card glass-card">
+          <div className="s-no">6</div>
           <div className="s-body">
             <div className="s-head"><h3>中文白名单（G0 语种护栏）</h3><Tag kind="default">{g0Terms.length} 个词条</Tag></div>
             <div className="s-desc">发往消费者的邮件默认零中文；品牌名 / 专有名词加进白名单后不拦截（店铺品牌名已自动包含）。</div>

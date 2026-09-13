@@ -191,7 +191,8 @@ async function generateMailHtml(draft, card) {
   };
 
   const payload = {
-    // IGDE 方案卡字段（邮件主题/正文优先复用 Agent 产出，避免重复花 Token）
+    // IGDE 方案卡文案：作为 LLM 失败时的兜底透传（generateCopy 有 AI key 时一律走专门文案 LLM，
+    // 与本地 email-automation 一致；不再「优先复用 Agent 产出省 Token」，那样质量明显更低且与设计不符）
     subject: card.subject || '',
     body: card.body || '',
     // 折扣数值口径唯一：优先方案卡 discountNum（producePlanCard 统一产生，% off），文本兜底解析；默认与 variants/render 一致（10）
@@ -206,7 +207,7 @@ async function generateMailHtml(draft, card) {
     coupon: card.coupon || '',
     posters: Array.isArray(card.posters) ? card.posters : [],
     // 新能力开关
-    force_regen_copy: Boolean(card.force_regen_copy),  // 若商家点了「换一批文案」则用 LLM 重写
+    force_regen_copy: Boolean(card.force_regen_copy),  // 兼容字段：generateCopy 有 AI key 时一律走 LLM，此开关现无实际作用（保留供「换一批文案」语义复用）
     skip_image:        Boolean(card.skip_image),        // 纯文案调试时跳过图片生成
     product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
     // 受众标签分布快照（圈中人群的性别/年龄段/机型/分层/风格品类代表值）——
@@ -1114,8 +1115,9 @@ const server = http.createServer(async (req, res) => {
       // 同步生成 HTML 邮件 + 营销图片（标准档直出 html；变体在发送环节逐收件人渲染）
       try {
         await generateMailHtml(draft, card);
-        draft.html = draft.html || 'FALLBACK_HTML';
-        draft.image_path = draft.image_path || 'FALLBACK_IMAGE';
+        // image_path 为空（万相失败/未配）时留空，EditModal 据此不渲染碎图；
+        // html 由 email-builder 兜底始终非空，无需 FALLBACK 占位。
+        draft.image_path = draft.image_path || '';
         store.upsertDraft(draft);
       } catch (err) {
         draft.html = 'ERROR: ' + (err.message || err);

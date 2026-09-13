@@ -239,33 +239,39 @@ export async function generateCopy(
   opts: { maxRetries?: number; forceRegenerate?: boolean; existing?: ExistingCopy | null } = {},
 ): Promise<CopyResult> {
   const maxRetries = opts.maxRetries ?? 2;
-  const forceRegenerate = opts.forceRegenerate ?? false;
   const existing = opts.existing ?? null;
 
-  // 快速路径：Agent 已写好，直接用
-  if (!forceRegenerate && existing) {
+  const hasDeepseek = Boolean(config.deepseek && config.deepseek.api_key);
+  const hasMinimax = Boolean(config.minimax && config.minimax.api_key);
+  const hasAI = hasDeepseek || hasMinimax;
+
+  // 透传 Agent 已写好的文案（IGDE 规则模板）——仅作「无 AI key」或「LLM 失败」时的兜底
+  const passthrough = (): CopyResult | null => {
+    if (!existing) return null;
     const subj = String(existing.subject ?? '').trim();
     const body = String(existing.body ?? '').trim();
-    if (subj && body) {
-      return {
-        subject: subj,
-        body,
-        user_id: user.user_id,
-        email: user.email,
-        discount: user.discount,
-        regenerated: false,
-        provider: 'igde_pass_through',
-      };
-    }
+    if (!subj || !body) return null;
+    return {
+      subject: subj, body, user_id: user.user_id, email: user.email,
+      discount: user.discount, regenerated: false, provider: 'igde_pass_through',
+    };
+  };
+
+  // 无 AI key：透传 Agent 文案，再不行用 fallback 模板（生产降级路径）
+  if (!hasAI) {
+    return passthrough() || fallbackCopy(user);
   }
 
-  if (config.deepseek && config.deepseek.api_key) {
-    return callProvider('deepseek', config, user, maxRetries);
+  // 有 AI key：默认走专门文案 LLM（与本地 email-automation 一致）。
+  // 此前的「省 token 透传快速路径」已弃用——IGDE 规则模板文案质量明显低于 LLM copywriter，
+  // 且与设计稿/本地测得的转化文案不一致。forceRegenerate 现无实际作用，保留参数仅为兼容。
+  try {
+    if (hasDeepseek) return await callProvider('deepseek', config, user, maxRetries);
+    return await callProvider('minimax', config, user, maxRetries);
+  } catch (e) {
+    console.error(`[copy] LLM 调用失败，降级透传 Agent 文案: ${(e as Error).message}`);
+    return passthrough() || fallbackCopy(user);
   }
-  if (config.minimax.api_key) {
-    return callProvider('minimax', config, user, maxRetries);
-  }
-  return fallbackCopy(user);
 }
 
 // ---------------------------------------------------------------------------
@@ -284,14 +290,22 @@ const STYLE_CN_BY_AGE_GENDER: Record<string, string> = {
   '45-54|M': '经典高级木皮质感背景',
 };
 
-// preferred_language → 人群族裔描述（中文简短）
+// preferred_language / locale → 人群族裔描述（中文简短）。兼容全称(English)与 locale 码(en/en-US)
 const ETHNICITY_BY_LANG: Record<string, string> = {
-  english: '白人',
-  spanish: '西语裔',
-  german: '德裔',
-  french: '法裔',
-  italian: '意裔',
+  english: '白人', en: '白人', 'en-us': '白人', 'en-gb': '白人', 'en-au': '白人', 'en-ca': '白人',
+  spanish: '西语裔', es: '西语裔', 'es-es': '西语裔', 'es-mx': '西语裔',
+  german: '德裔', de: '德裔', 'de-de': '德裔',
+  french: '法裔', fr: '法裔', 'fr-fr': '法裔', 'fr-ca': '法裔',
+  italian: '意裔', it: '意裔', 'it-it': '意裔',
 };
+// 解析族裔：优先全称/locale 码精确命中，再取主语言子串兜底（preferred_language 此前恒空 → 族裔恒空，现已由 fromPlanCard 从 language 标签回填）
+function resolveEthnicity(lang: string): string {
+  const k = (lang || '').toLowerCase().trim();
+  if (!k) return '';
+  if (ETHNICITY_BY_LANG[k]) return ETHNICITY_BY_LANG[k];
+  const main = k.split(/[-_]/)[0];
+  return ETHNICITY_BY_LANG[main] || '';
+}
 
 // 风格品类标签 → 背景质感加味（不覆盖年龄性别风格表，只追加；与文案角度指令同口径）
 const STYLE_FLAVOR_BY_PREFERENCE: Record<string, string> = {
@@ -299,6 +313,20 @@ const STYLE_FLAVOR_BY_PREFERENCE: Record<string, string> = {
   fashion: '时尚杂志感',
   business: '商务质感',
   outdoor: '户外自然光',
+};
+
+// price_sensitivity 标签 → 视觉氛围加味（价格敏感人群突出折扣紧迫感，premium 突出轻奢）
+const PRICE_FLAVOR: Record<string, string> = {
+  high: '突出折扣优惠的促销紧迫感',
+  value: '突出折扣优惠的促销紧迫感',
+  premium: '高级轻奢质感',
+  low: '高级轻奢质感',
+};
+// customer_segment 标签 → 关系氛围加味
+const SEGMENT_FLAVOR: Record<string, string> = {
+  new: '亲切欢迎氛围',
+  returning: '老友重逢氛围',
+  vip: '专属尊享感',
 };
 
 // 取年龄区间代表值：18-24→20，25-34→30，35-44→40，45-54→50，55+→58
@@ -337,17 +365,23 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   const flavor = STYLE_FLAVOR_BY_PREFERENCE[(user.style_preference || '').trim().toLowerCase()] || '';
 
   const ageNum = representativeAge(age);
-  const ethnicity = ETHNICITY_BY_LANG[(user.preferred_language || '').toLowerCase()] || '';
+  // 族裔：preferred_language（fromPlanCard 已从 language 标签回填）→ 兜底 locale，避免恒空
+  const ethnicity = resolveEthnicity(user.preferred_language || user.locale);
   const genderWord = gender === 'F' ? '女性' : gender === 'M' ? '男性' : '';
   const demographic = `${ageNum}岁${ethnicity}${genderWord}`;
 
   const product = (user.product_cn || user.product_en || user.product || '手机壳').trim();
   const device = (user.device || 'iPhone').trim();
 
+  // price_sensitivity / customer_segment 标签 → 视觉氛围加味（此前仅文案用，图片 prompt 未消费）
+  const priceFlavor = PRICE_FLAVOR[(user.price_sensitivity || '').trim().toLowerCase()] || '';
+  const segFlavor = SEGMENT_FLAVOR[(user.customer_segment || '').trim().toLowerCase()] || '';
+
   let discountPct = 10;
   const d = Number(user.discount);
   if (!Number.isNaN(d)) discountPct = Math.trunc(d);
   const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
 
-  return `${demographic}手持${device}${product}的电商广告图，${style}${flavor ? `，${flavor}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+  const extraFlavors = [flavor, priceFlavor, segFlavor].filter(Boolean).join('，');
+  return `${demographic}手持${device}${product}的电商广告图，${style}${extraFlavors ? `，${extraFlavors}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
 }

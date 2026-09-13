@@ -65,7 +65,6 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
   const audience = strVal(card.audience).trim();
   let locale = strVal(card.locale ?? d.locale, 'en').trim();
   if (locale.length === 2) locale = `${locale}-${locale.toUpperCase()}`;
-  const preferredLanguage = strVal(card.preferred_language ?? d.preferred_language).trim();
   const productEn = strVal(card.product ?? card.product_en, 'Premium Phone Case').trim();
   const productCn = strVal(card.product_cn).trim();
   const brandRaw = strVal(card.brand ?? d.brand, 'CartBack').trim();
@@ -79,6 +78,10 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
   const tagGender = topTagByType(dist, 'gender');
   const tagAge = topTagByType(dist, 'age_range');
   const tagDevice = topTagByType(dist, 'device');
+  // preferred_language：优先 card/draft 显式值，否则取 language 标签代表值
+  // （language tag 此前未被消费 → 图片人群族裔恒空，文案也拿不到语种）
+  const preferredLanguage = strVal(card.preferred_language ?? d.preferred_language).trim()
+    || topTagByType(dist, 'language');
 
   return {
     user_id: uid,

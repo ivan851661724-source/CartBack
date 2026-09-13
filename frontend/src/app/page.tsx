@@ -19,7 +19,7 @@ import HistoryModal from '@/components/chat/HistoryModal';
 import GuideOverlay from '@/components/shell/GuideOverlay';
 
 function Shell() {
-  const { activeTab } = useApp();
+  const { activeTab, guideStyle } = useApp();
   // 全部视图常驻挂载（仅 .active 切换），保 tab 间内存态（对话/输入/滚动不丢）—— 与原 SPA 一致。
   const views: [Tab, ReactNode][] = [
     ['chat', <ChatView key="chat" />],
@@ -43,7 +43,7 @@ function Shell() {
         </main>
       </div>
       {/* 全局浮层 */}
-      <GuideOverlay />
+      {guideStyle === 'demo' && <GuideOverlay />}
       <AudienceDrawer />
       <ImportModal />
       <EditModal />

@@ -59,6 +59,10 @@ interface AppState {
   // 初始引导
   onboardingStep: number; // 0=未开始, 1-4=当前步骤, 4=完成
   onboardingSkipped: boolean;
+  // 引导风格（与 demo/real 发送模式解耦的独立开关）：
+  //  'demo' = 硬编码 Leo's PhoneCase 快捷词 + GuideOverlay 浮层引导（演示用）
+  //  'safe' = 纯意图快捷词 + 顶栏 HintPill 串联引导（真实商家，不覆盖品牌）
+  guideStyle: 'demo' | 'safe';
 }
 
 interface AppContextValue extends AppState {
@@ -87,6 +91,7 @@ interface AppContextValue extends AppState {
   setDrawerAud: (a: Audience | null) => void;
   setOnboardingStep: (s: number) => void;
   skipOnboarding: () => void;
+  setGuideStyle: (s: 'demo' | 'safe') => void;
   setImportOpen: (v: boolean) => void;
   setHistoryOpen: (v: boolean) => void;
   setEditOpen: (v: boolean) => void;
@@ -116,6 +121,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     importOpen: false, historyOpen: false, editOpen: false, draftGenerating: false, authOpen: false, authMode: 'register',
     toast: { msg: '', shown: false },
     onboardingStep: 0, onboardingSkipped: false,
+    guideStyle: (typeof localStorage !== 'undefined' && localStorage.getItem('cb_guide_style') === 'safe') ? 'safe' : 'demo',
   });
 
   // 多会话 #2 性能：act 索引 Map（O(1) 查找，避免 O(n) scans on every loadState）
@@ -406,8 +412,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // —— 引导步骤里程碑自动推进（走查 P0-3）：步骤跟真实状态走（开始采集/方案就绪或已有草稿/已发送），
   // 不再按「点过几个快捷词」自增，避免未采集到需求就宣告前进或「闭环已跑通」 ——
+  // 仅 safe 模式启用（顶栏 HintPill 串联引导需要状态推进）；demo 模式由 GuideOverlay + chips 手动驱动，
+  // 否则 DB 里有历史已发送草稿时刷新即 hasSent→step 3，直接弹「引导已完成」
   useEffect(() => {
     setState(s => {
+      if (s.guideStyle !== 'safe') return s;
       if (s.onboardingSkipped || s.onboardingStep >= 4) return s;
       const needCount = s.act?.needs ? Object.values(s.act.needs).filter(Boolean).length : 0;
       const planReady = needCount >= 4 || Boolean(s.act?.planCard);
@@ -416,7 +425,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const target = hasSent ? 3 : (hasDraft || planReady) ? 2 : needCount > 0 ? 1 : 0;
       return target > s.onboardingStep ? { ...s, onboardingStep: target } : s;
     });
-  }, [state.act?.needs, state.act?.planCard, state.drafts]);
+  }, [state.guideStyle, state.act?.needs, state.act?.planCard, state.drafts]);
 
   // —— 受众「去聊这拨人」→ 新建 act（预选受众）+ 切对话 + 预填输入 ——
   const jumpToConfig = useCallback(async (intent: string, aud?: Audience) => {
@@ -524,6 +533,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setDrawerAud: (a) => patch({ drawerAud: a }),
     setOnboardingStep: (s) => patch({ onboardingStep: s }),
     skipOnboarding: () => patch({ onboardingStep: 4, onboardingSkipped: true }),
+    setGuideStyle: (s) => {
+      if (typeof localStorage !== 'undefined') localStorage.setItem('cb_guide_style', s);
+      patch({ guideStyle: s });
+    },
     setImportOpen: (v) => patch({ importOpen: v }),
     setHistoryOpen: (v) => patch({ historyOpen: v }),
     setEditOpen: (v) => patch({ editOpen: v }),

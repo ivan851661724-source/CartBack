@@ -28,6 +28,24 @@ export const BRAND_POINTS: { key: string; label: string; msg: string; val: strin
   { key: 'frequency', label: '发送频率', msg: '先发一封试试，效果好的话 3 天后再发第二封', val: '首封 + 3天追发' },
 ];
 
+/**
+ * 初始引导：纯意图快捷词 10 项（guideStyle='safe' 用，真实商家版）。
+ * 只表达挽回意图，不带任何具体品牌/品类/价格，避免示例数据覆盖商家真实品牌（P0-4）。
+ * 点击行为由 ChatView 控制：全新会话直发，已有上下文只填入输入框待确认。
+ */
+export const INTENT_POINTS: { key: string; label: string; msg: string }[] = [
+  { key: 'target', label: '挽回对象', msg: '我想挽回加购了还没付款的客户' },
+  { key: 'reason', label: '流失原因', msg: '他们加购后一直没付款，可能是忘了或者还在犹豫' },
+  { key: 'goal', label: '挽回目标', msg: '希望他们回来把订单完成' },
+  { key: 'hook', label: '优惠钩子', msg: '想给个折扣或者免邮的钩子，具体力度你帮我建议' },
+  { key: 'browse', label: '浏览召回', msg: '也想召回看过商品但没下单的人' },
+  { key: 'dormant', label: '老客唤醒', msg: '还有一批很久没来的老客，想唤醒一下' },
+  { key: 'timing', label: '发送时机', msg: '发送时机什么时候合适？' },
+  { key: 'tone', label: '话术风格', msg: '语气自然一点，别太像促销' },
+  { key: 'cadence', label: '发送节奏', msg: '先发一封试试，效果好再安排跟进' },
+  { key: 'objective', label: '效果目标', msg: '主要目标是把流失的订单捞回来' },
+];
+
 
 export const STAGE_TXT: Record<string, string> = {
   S0: 'S0 接入',
