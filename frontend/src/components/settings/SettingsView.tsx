@@ -130,7 +130,7 @@ export default function SettingsView() {
           <div className="s-no">5</div>
           <div className="s-body">
             <div className="s-head"><h3>引导风格</h3><Tag kind={guideStyle === 'demo' ? 'intent' : 'gray'}>{guideStyle === 'demo' ? '演示硬编码' : '安全纯意图'}</Tag></div>
-            <div className="s-desc">与运行模式解耦的独立开关。演示：硬编码 Leo\'s PhoneCase 快捷词 + 浮层蒙层引导，适合演示；安全：纯意图快捷词不覆盖真实品牌 + 顶栏串联引导，适合真实商家。仅前端、记忆本机。</div>
+            <div className="s-desc">与运行模式解耦的独立开关。演示：硬编码 Leo&apos;s PhoneCase 快捷词 + 浮层蒙层引导，适合演示；安全：纯意图快捷词不覆盖真实品牌 + 顶栏串联引导，适合真实商家。仅前端、记忆本机。</div>
             <div className="row">
               <div className="seg">
                 <button className={`seg-btn${guideStyle === 'demo' ? ' active' : ''}`} onClick={() => setGuideStyle('demo')}>演示（硬编码+浮层引导）</button>
