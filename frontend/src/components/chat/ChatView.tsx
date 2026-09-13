@@ -65,8 +65,8 @@ export default function ChatView() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, streamingText, planShown, streaming]);
 
-  // 步骤1→2 自动跳步：10 项收集完 + 回复结束 + planCard 就绪 → 推进到步骤2（邮件配置）+ 生成草稿
-  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由 GuideOverlay 气泡指向侧栏让用户点）
+  // 步骤1→2 自动跳步：10 项收集完 + 回复结束 + planCard 就绪 → 推进到步骤2（需求确认卡）+ 生成草稿
+  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由 GuideOverlay 气泡指向确认卡让用户点「可以，去发」）
   const advanced0Ref = useRef(false);
   useEffect(() => { if (clickedChips.size === 0) advanced0Ref.current = false; }, [clickedChips.size]);
   useEffect(() => {
@@ -120,7 +120,7 @@ export default function ChatView() {
                 <div className="avatar agent"><NavChat /></div>
                 <div className="bubble">
                   {!onboardingSkipped && onboardingStep < 4
-                    ? '点击下方快捷描述，告诉助手你的品牌信息'
+                    ? '点击左侧快捷描述，告诉助手你的品牌信息'
                     : '你好，我是你的挽回邮件教练。\n告诉我你想挽回哪类人、为什么、希望拿到什么结果，我帮你一步步生成方案卡。'}
                 </div>
               </div>
@@ -152,7 +152,7 @@ export default function ChatView() {
                 约第 6 个 chip，太早；demo 要求攒满 10 再展示）。safe：planCard 一到就弹。
                 门控用 collectedAll（从持久 messages 派生），切页回来不会因局部 state 重置而消失。 */}
             {planShown === 'confirm' && act?.planCard && (!isDemoGuide || collectedAll) && (
-              <div style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
+              <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
                   <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>针对谁</span><span>{act.planCard.audience || '—'}</span></div>
@@ -236,7 +236,7 @@ export default function ChatView() {
                     style={{
                       display:'inline-flex',alignItems:'center',gap:'6px',
                       padding:'7px 13px',borderRadius:'9px',
-                      border: clicked ? '0.5px solid #FF7F4D' : '0.5px solid #DDE2E8',
+                      border: clicked ? '0.5px solid transparent' : '0.5px solid #DDE2E8',
                       background: clicked ? 'var(--brand-soft)' : '#fff',
                       color: clicked ? 'var(--brand)' : 'var(--text)',
                       fontSize:'12.5px',fontWeight:500,

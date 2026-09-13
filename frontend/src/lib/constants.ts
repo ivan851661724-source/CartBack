@@ -61,8 +61,8 @@ export const CHAT_PLACEHOLDER = '说清楚你想挽回谁、为啥、要什么�
  * 由 GuideOverlay 复用。
  */
 export const ONBOARDING_TEXTS: Record<number, string> = {
-  0: '点击下方 10 个快捷描述，告诉助手你的品牌信息。',
-  1: '太棒了！点左侧「邮件配置」查看邮件详情',
+  0: '点击左侧 10 个快捷描述，告诉助手你的品牌信息。',
+  1: '需求已收集完整！点「可以，去发」生成邮件',
   2: '点左侧「数据看板」查看点击 / 转化 / GMV / ROI。',
   3: '完整闭环已跑通！',
 };

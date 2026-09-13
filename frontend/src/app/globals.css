@@ -345,9 +345,9 @@ input,textarea{font-family:inherit}
 .mc-foot{display:flex;align-items:center;gap:7px;margin-top:7px}
 .mc-foot .tag{margin-right:auto}
 /* 生成中骨架卡（方案卡「可以，去发」后、草稿就绪前） */
-.generating-card{cursor:default;overflow:hidden}
+.generating-card{cursor:default;overflow:hidden;display:flex;flex-direction:column}
 .generating-card:hover{transform:none;box-shadow:none;border-color:var(--border)}
-.gen-thumb{height:120px;border-radius:9px;margin-bottom:11px}
+.gen-thumb{flex:1;min-height:56px;border-radius:9px;margin-bottom:11px}
 .gen-body{display:flex;flex-direction:column;gap:7px}
 .gen-line{height:11px;border-radius:6px}
 .gen-line.w80{width:80%}.gen-line.w60{width:60%}.gen-line.w40{width:40%}
@@ -615,7 +615,9 @@ input,textarea{font-family:inherit}
 /* ============================ 新手引导蒙层 + 完成弹窗 ============================ */
 .guide-done-overlay{position:fixed;inset:0;background:rgba(75,85,105,.42);z-index:60;display:flex;align-items:center;justify-content:center;padding:16px;animation:fade .2s ease}
 .guide-done-modal{background:var(--bg-modal);border:.5px solid var(--line);border-radius:16px;
-  box-shadow:0 12px 40px rgba(0,0,0,.18);width:min(520px,100%);padding:22px 24px;animation:pop .3s var(--ease)}
+  box-shadow:0 12px 40px rgba(0,0,0,.18);width:min(360px,100%);min-height:200px;padding:24px;
+  display:flex;flex-direction:column;animation:pop .3s var(--ease)}
+.guide-done-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
 .guide-done-modal h3{font-size:16px;font-weight:700;font-family:var(--font-disp);color:var(--text);margin-bottom:8px}
-.guide-done-modal p{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:16px}
+.guide-done-modal p{font-size:13px;color:var(--muted);line-height:1.6;margin-bottom:0}
 

@@ -6,14 +6,15 @@ import { ONBOARDING_TEXTS } from '@/lib/constants';
 
 /**
  * 分步聚焦式新手引导：蒙层 spotlight（box-shadow 镂空目标）+ 右侧气泡 + 步骤4 底部完成弹窗。
- * 锚点靠 data-guide-target（ChatView 的 chips+输入区、Sidebar 的邮件配置/数据看板 项）。
- * 自动跳步：step1→2 点邮件配置侧栏、step2→3 点数据看板侧栏；step0→1 由 ChatView 收集完成触发。
+ * 锚点靠 data-guide-target（ChatView 的 chips+输入区、需求确认卡；Sidebar 的数据看板 项）。
+ * 自动跳步：step1→2 由 ChatView 收集完成触发（确认卡出现）；step2→3 点确认卡「可以，去发」
+ *           切到邮件 tab（activeTab=mail）触发；step3→4 点数据看板侧栏触发。
  * 蒙层色值 rgba(75,85,105,0.42)（#4B5569 @42%）；步骤1-3 蒙层 2 秒渐隐，步骤4 蒙层常驻。
  */
 
 const TARGETS: Record<number, string> = {
   0: '[data-guide-target="guide-compose"]',
-  1: '[data-guide-target="guide-nav-mail"]',
+  1: '[data-guide-target="guide-confirm"]',
   2: '[data-guide-target="guide-nav-data"]',
 };
 
@@ -73,8 +74,9 @@ export default function GuideOverlay() {
     return (
       <div className="guide-done-overlay">
         <div className="guide-done-modal">
-          <h3>引导已完成</h3>
-          <p>（引导内容占位，待补充）</p>
+          <div className="guide-done-body">
+            <h3>引导已完成</h3>
+          </div>
           <button className="btn primary" onClick={skipOnboarding} style={{ width: '100%', justifyContent: 'center', border: 'none' }}>
             开始使用
           </button>
