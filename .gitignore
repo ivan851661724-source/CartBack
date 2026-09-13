@@ -88,3 +88,5 @@ email-automation/user_data.jsonl
 email-automation/pending_approvals.json*
 email-automation/output/
 
+*.pem
+*.key

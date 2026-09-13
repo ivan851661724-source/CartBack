@@ -513,11 +513,19 @@ function frequencyFilter(recipients, draft) {
   return { allow, skipped: recipients.length - allow.length };
 }
 
+// —— ESP 发信就绪判定（按供应商取凭证；走查部署 P0：smtp 供应商此前被 espKey 门槛永远判成未配置）——
+function espReady() {
+  if (config.espProvider === 'smtp') {
+    return Boolean(config.smtpHost && config.smtpUser && config.smtpPass && config.espFrom);
+  }
+  return Boolean(config.espKey && config.espFrom);
+}
+
 // —— ③ 发送前预检 + 失败分类（PRD §3.4：域名验证/邮箱格式/限额，失败给分类人话提示）——
 function precheckSend(draft, { dryRun = false } = {}) {
   const problems = [];
   if (config.mode === 'real') {
-    if (!config.espKey) problems.push({ type: 'esp_not_configured', human: '还没有配置发信密钥（ESP），去设置页填好再发。' });
+    if (!espReady()) problems.push({ type: 'esp_not_configured', human: config.espProvider === 'smtp' ? 'SMTP 还没配全（服务器 / 用户 / 授权码），去设置页填好再发。' : '还没有配置发信密钥（ESP），去设置页填好再发。' });
     if (!config.espFrom) problems.push({ type: 'from_missing', human: '还没有设置发件人地址，去设置页填「发件邮箱」。' });
     else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(config.espFrom)) problems.push({ type: 'from_invalid', human: '发件人地址格式不对，请检查设置页的「发件邮箱」。' });
     // 域名验证（MVP：与店铺域名/公开基址一致性提示；Resend 域名验证状态经预检调用探测）
@@ -633,7 +641,7 @@ async function sendDraft(draft) {
   }
   const { allow, skipped } = frequencyFilter(all, draft);
   metricsInc('send_volume', allow.length);
-  const real = (config.mode === 'real' && config.espKey && config.espFrom);
+  const real = (config.mode === 'real' && espReady());
   draft.status = 'sending'; upsertDraftPreservingAsync(draft);
   if (!real) {
     draft.status = 'sent';
@@ -1493,7 +1501,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         ok: true, uptime_s: Math.floor(process.uptime()),
         mode: config.mode,
-        aiConfigured: Boolean(config.aiKey), espConfigured: Boolean(config.espKey),
+        aiConfigured: Boolean(config.aiKey), espConfigured: espReady(),
         storage: store.b ? store.b.kind : 'unknown',
         queue: queue.stats(),
         breakers: breakers.snapshotAll()
