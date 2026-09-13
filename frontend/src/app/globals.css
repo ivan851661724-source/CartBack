@@ -462,10 +462,14 @@ input,textarea{font-family:inherit}
 .danger-zone{margin-top:8px;display:flex;align-items:center;gap:12px;padding:13px 4px;border-top:.5px dashed var(--line-2);font-size:11.5px;color:var(--soft)}
 
 /* ============================ 抽屉 / 弹窗 ============================ */
-.drawer{position:absolute;top:0;right:0;bottom:0;width:390px;max-width:92vw;background:var(--card);
-  border-left:.5px solid var(--line);transform:translateX(102%);transition:transform .32s var(--ease);z-index:50;
+/* 关闭态 position:fixed + visibility:hidden：absolute+transform 的盒子仍计入文档 scrollWidth，
+   375px 窄屏下关闭的抽屉会把页面撑到横向溢出；fixed 盒子脱离文档流、永不产生滚动溢出（走查 P1-7）。
+   visibility 延迟到滑出动画结束后生效，保留开合动画 */
+.drawer{position:fixed;top:0;right:0;bottom:0;width:390px;max-width:92vw;background:var(--card);
+  border-left:.5px solid var(--line);transform:translateX(102%);visibility:hidden;
+  transition:transform .32s var(--ease),visibility 0s .32s;z-index:50;
   display:flex;flex-direction:column;box-shadow:-20px 0 50px rgba(0,0,0,.1)}
-.drawer.open{transform:translateX(0)}
+.drawer.open{transform:translateX(0);visibility:visible;transition:transform .32s var(--ease),visibility 0s 0s}
 .d-head{display:flex;align-items:center;gap:12px;padding:16px 18px;border-bottom:.5px solid var(--line-2);background:var(--bg-sec)}
 .d-head .av{width:46px;height:46px;border-radius:50%;background:linear-gradient(135deg,var(--indigo),var(--indigo2));color:#fff;
   font-weight:800;font-size:17px;display:flex;align-items:center;justify-content:center;font-family:var(--font-disp);

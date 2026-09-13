@@ -89,6 +89,7 @@ export interface Draft {
   estGmv: number;
   cost: number;
   tag_distribution?: Array<{ tag_type: string; tag_value: string; count: number; avg_weight: number }>;
+  act_id?: string;    // 所属会话（刷新后由数据反推方案卡状态用，走查 P1-9）
 }
 
 /** 受众 / 高意向流失个体（CSV 导入或店铺拉取） */

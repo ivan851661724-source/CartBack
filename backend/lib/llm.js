@@ -103,7 +103,7 @@ function buildCoachContext({ act, userText, needs, stage, missing, agentProfile,
     ? `【本轮任务·硬约束】All four elements are set: recap what you heard in plain words, then ask ${confirmLine} No more questions, no config dumps.`
     : `【本轮任务·硬约束】四要素已齐：用大白话复述你听到的要点，再问一句${confirmLine}禁止再问任何问题，禁止输出任何配置内容。`;
   const directive = miss.length
-    ? `\n【本轮任务·硬约束】只补缺的：${miss.join('、')}。一轮只问一个字段（问句里可以列选项，但绝不同时问两个字段），换个自然的新问法；已确认的绝不再提、不复述。问 offer 用中性措辞（如"想给个什么钩子？折扣/满减/包邮，还是别的？"）。`
+    ? `\n【本轮任务·硬约束】只补缺的：${miss.join('、')}。一轮只问一个字段（问句里可以列选项，但绝不同时问两个字段），换个自然的新问法；已确认的绝不再提、不复述。问 offer 用中性措辞（如"想给个什么钩子？折扣/满减/包邮，还是别的？"）。【防复读·硬约束】reply 绝不能重复你上一句回复的原文或近似原文；连续追问同一项时必须换角度、给例子或补充新信息。`
     : `\n${readyDirective}`;
   const langDirective = isEn
     ? '\n【语言硬约束·最高优先级】用户正在用英文交流：reply 必须全程英文（口语、自然，像跟朋友发消息），needs 值保持简短中文短语。'

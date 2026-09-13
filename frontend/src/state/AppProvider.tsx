@@ -7,7 +7,7 @@
  * 声明式 state。对话流卡片（confirm/plan/sent）的 planShown 状态机原样保留。
  */
 import React, { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
-import { api, setToken, streamMessage, createAct } from '@/lib/api';
+import { api, setToken, streamMessage, createAct, ApiAuthError } from '@/lib/api';
 import type {
   Act, Audience, Draft, Kpis, Me, Metrics, Mode, Opportunities,
   PlanCard, SendResult, Status, TrendPoint,
@@ -120,6 +120,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 多会话 #2 性能：act 索引 Map（O(1) 查找，避免 O(n) scans on every loadState）
   const actIndexRef = useRef<Map<string, Act>>(new Map());
+  // P1-9 方案卡召回只做一次/会话：用户点「再聊聊」关掉确认卡后，后续 loadState 不得强行弹回
+  const planRestoredRef = useRef<Set<string>>(new Set());
   const buildActIndex = useCallback((acts: Act[]) => {
     const m = new Map<string, Act>();
     for (const a of acts) m.set(a.id, a);
@@ -154,17 +156,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     });
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {
+      let next = prev;
       if (prev.act && (!prev.act.messages || !prev.act.messages.length) && !s.acts?.[0]) {
-        return { ...prev, planPushed: false };
+        next = { ...next, planPushed: false };
       }
-      return prev;
+      // 刷新后方案卡召回（走查 P1-9）：后端 act.planCard 还在、本会话又没有草稿 → 重现确认卡（每会话仅一次）。
+      // 已有草稿的会话不反推（「可以，去发」复用暂存草稿防僵尸草稿；刷新后暂存丢失，再去发会走邮件页）。
+      if (!next.planShown && next.act?.planCard && !((s.drafts || []) as Draft[]).some(d => d.act_id === next.act!.id)
+          && !planRestoredRef.current.has(next.act.id)) {
+        planRestoredRef.current.add(next.act.id);
+        next = { ...next, planShown: 'confirm', planPushed: true };
+      }
+      return next;
     });
   }, [patch, state.act, buildActIndex]);
 
-  const ensureAct = useCallback(async () => {
-    if (!state.act) {
+  const ensureAct = useCallback(async (): Promise<Act | null> => {
+    if (state.act) return state.act;
+    try {
       const act = await createAct();
       patch({ act, acts: [act, ...state.acts] });
+      return act;
+    } catch {
+      // 未登录/网络失败等导致建不了会话：返回 null，由调用方决定引导方式（不再静默丢消息）
+      return null;
     }
   }, [state.act, state.acts, patch]);
 
@@ -206,6 +221,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         await ensureAct();
         patch({ booted: true });
       } catch (e: any) {
+        if (e instanceof ApiAuthError) {
+          // 401/403 = 未登录/安全模式：引导注册登录，不算故障（走查 P0-1：不再反复弹「初始化失败」toast）
+          patch({ booted: true, authOpen: true, authMode: 'register' });
+          return;
+        }
         toast_('初始化失败：' + (e?.message || e));
       }
     })();
@@ -246,11 +266,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 发消息（SSE 流式 + 一次性降级） ——
   const sendMsg = useCallback(async (text: string) => {
     const t = text.trim();
-    if (!t || !state.act || state.streaming) return;
+    if (!t || state.streaming) return;
+    // 无会话（未登录 / 注册后未重建）先补建；补不了就明确引导注册，绝不静默丢弃（走查 P0-2）
+    const act = state.act || await ensureAct();
+    if (!act) {
+      patch({ authOpen: true, authMode: 'register' });
+      toast_('请先注册或登录后再发送');
+      return;
+    }
     patch({ chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER });
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
-    const actWithUser: Act = { ...state.act, messages: [...state.act.messages, userMsg] };
+    const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
     patch({ act: actWithUser, streaming: true, streamingText: '' });
 
     const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null }) => {
@@ -283,7 +310,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     let got = false;       // 是否已收到 token 帧（= 服务端已开始交付，本轮 LLM 已计费）
     let last = '';         // 最近一帧累计文本（流中断时保留已到内容）
     try {
-      const result = await streamMessage(state.act.id, t, (full) => { got = true; last = full; patch({ streamingText: full }); });
+      const result = await streamMessage(act.id, t, (full) => { got = true; last = full; patch({ streamingText: full }); });
       finalize(result);
     } catch {
       if (got) {
@@ -294,7 +321,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       // 降级：一次性 /message（未收到任何 token，本轮未交付，可安全重试）
       try {
-        const r = await api<any>(`/api/act/${state.act.id}/message`, {
+        const r = await api<any>(`/api/act/${act.id}/message`, {
           method: 'POST', body: JSON.stringify({ message: t }),
         });
         if (r.error) { toast_(r.error); patch({ streaming: false, streamingText: '' }); return; }
@@ -304,7 +331,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         patch({ streaming: false, streamingText: '' });
       }
     }
-  }, [state.act, state.streaming, patch, toast_]);
+  }, [state.act, state.streaming, patch, ensureAct, toast_]);
 
   // —— 模式切换 ——
   const setMode = useCallback(async (m: Mode) => {
@@ -359,10 +386,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const j = await r.json().catch(() => ({}));
     if (!r.ok) { toast_(j.error || '请求失败'); return false; }
     patch({ authOpen: false });
-    refreshMe();
+    // 会话重建：注册/登录成功后必须补上 boot 阶段因未登录而没建好的会话，
+    // 否则 sendMsg 命中「无会话」分支，助手静默失效（走查 P0-2）
+    try {
+      await refreshMe();
+      await loadState();
+      await ensureAct();
+    } catch { /* 会话重建失败时下次进入页面由 boot 兜底 */ }
     toast_(isReg ? '注册成功，欢迎！' : '登录成功');
     return true;
-  }, [state.authMode, patch, refreshMe, toast_]);
+  }, [state.authMode, patch, refreshMe, loadState, ensureAct, toast_]);
 
   const authLogout = useCallback(async () => {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
@@ -370,6 +403,20 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     refreshMe();
     toast_('已退出登录');
   }, [patch, refreshMe, toast_]);
+
+  // —— 引导步骤里程碑自动推进（走查 P0-3）：步骤跟真实状态走（开始采集/方案就绪或已有草稿/已发送），
+  // 不再按「点过几个快捷词」自增，避免未采集到需求就宣告前进或「闭环已跑通」 ——
+  useEffect(() => {
+    setState(s => {
+      if (s.onboardingSkipped || s.onboardingStep >= 4) return s;
+      const needCount = s.act?.needs ? Object.values(s.act.needs).filter(Boolean).length : 0;
+      const planReady = needCount >= 4 || Boolean(s.act?.planCard);
+      const hasDraft = s.drafts.length > 0;
+      const hasSent = s.drafts.some(d => ['queued', 'sending', 'sent', 'recovering'].includes(d.status));
+      const target = hasSent ? 3 : (hasDraft || planReady) ? 2 : needCount > 0 ? 1 : 0;
+      return target > s.onboardingStep ? { ...s, onboardingStep: target } : s;
+    });
+  }, [state.act?.needs, state.act?.planCard, state.drafts]);
 
   // —— 受众「去聊这拨人」→ 新建 act（预选受众）+ 切对话 + 预填输入 ——
   const jumpToConfig = useCallback(async (intent: string, aud?: Audience) => {
