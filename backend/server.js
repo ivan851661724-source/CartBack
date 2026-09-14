@@ -497,17 +497,21 @@ function audienceConditions(desc) {
 }
 
 // —— ③ 72h 频控：同收件人同活动（受众口径）72h 内不重发（PRD §3.4）——
+// 按商家（user_id）隔离：防打扰是商家自己的发送礼仪，不跨账号共享 ——
+// demo 多账号共享同一批演示受众，A 家发过不应封住 B 家（线上 zhaizhai 被 N4D 的发送误伤实锤）
 const FREQ_WINDOW_MS = 72 * 3600 * 1000;
 function frequencyFilter(recipients, draft) {
   const cutoff = Date.now() - FREQ_WINDOW_MS;
   const campaignKey = (draft.audience || '').toLowerCase();
   const emailedEvents = store.getEvents().filter(e => e.type === 'emailed' && e.ts >= cutoff);
-  // 已发过的收件人（72h 内任意草稿）；同活动（同受众口径）的才拦截，跨活动放行
+  // 已发过的收件人（72h 内任意草稿）；同活动（同受众口径）且同商家的才拦截，跨活动/跨商家放行
   const draftsById = new Map(store.getDrafts().map(d => [d.id, d]));
   const recentlyEmailed = new Set();
   for (const e of emailedEvents) {
     const d = draftsById.get(e.draft_id);
-    if (d && (d.audience || '').toLowerCase() === campaignKey) recentlyEmailed.add(e.audience_id);
+    if (!d || (d.audience || '').toLowerCase() !== campaignKey) continue;
+    if ((d.user_id || null) !== (draft.user_id || null)) continue;
+    recentlyEmailed.add(e.audience_id);
   }
   const allow = recipients.filter(r => !recentlyEmailed.has(r.id));
   return { allow, skipped: recipients.length - allow.length };
