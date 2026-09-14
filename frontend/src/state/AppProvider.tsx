@@ -395,6 +395,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 会话重建：注册/登录成功后必须补上 boot 阶段因未登录而没建好的会话，
     // 否则 sendMsg 命中「无会话」分支，助手静默失效（走查 P0-2）
     try {
+      planRestoredRef.current.clear();
       await refreshMe();
       await loadState();
       await ensureAct();
@@ -405,7 +406,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const authLogout = useCallback(async () => {
     await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
-    patch({ me: null });
+    // 会话级数据一并清空：否则登出后 UI 仍揣着上一账号的 act/受众，换账号登录后
+    // loadState 的 `|| state.act` 兜底会把幻影 act 带回来，所有消息 404（线上 selftest 实锤）
+    planRestoredRef.current.clear();
+    patch({
+      me: null, act: null, acts: [], drafts: [], audience: [], opportunities: null,
+      planPushed: false, planShown: null, lastSent: null,
+      chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER, drawerAud: null, historyOpen: false,
+    });
     refreshMe();
     toast_('已退出登录');
   }, [patch, refreshMe, toast_]);
