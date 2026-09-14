@@ -36,12 +36,6 @@ export default function ChatView() {
   // 引导风格开关：demo=硬编码品牌词+浮层引导+checklist；safe=纯意图词+顶栏串联引导
   const isDemoGuide = guideStyle === 'demo';
   const chips = isDemoGuide ? BRAND_POINTS : INTENT_POINTS;
-  // 已收集的品牌信息条数：从持久化的 messages 派生（clickedChips 是 ChatView 局部 state，
-  // 切页卸载会重置 → 之前用 clickedChips.size 门控确认卡导致切页回来卡消失；改用持久计数）
-  const collectedCount = isDemoGuide
-    ? messages.filter((m) => m.role === 'user' && BRAND_POINTS.some((bp) => bp.msg === m.content)).length
-    : 0;
-  const collectedAll = isDemoGuide ? collectedCount >= BRAND_POINTS.length : true;
   // 本会话是否已发过邮件（确认卡据此隐藏「可以，去发」）
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
@@ -65,13 +59,14 @@ export default function ChatView() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, streamingText, planShown, streaming]);
 
-  // 步骤1→2 自动跳步：10 项收集完 + 回复结束 + planCard 就绪 → 推进到步骤2（需求确认卡）+ 生成草稿
+  // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
+  // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
   // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由 GuideOverlay 气泡指向确认卡让用户点「可以，去发」）
   const advanced0Ref = useRef(false);
-  useEffect(() => { if (clickedChips.size === 0) advanced0Ref.current = false; }, [clickedChips.size]);
+  useEffect(() => { if (!act?.planCard) advanced0Ref.current = false; }, [act?.planCard]);
   useEffect(() => {
     if (!isDemoGuide || onboardingStep !== 0 || advanced0Ref.current) return;
-    if (clickedChips.size >= BRAND_POINTS.length && !streaming && act?.planCard) {
+    if (planShown === 'confirm' && act?.planCard && !streaming) {
       advanced0Ref.current = true;
       const card = act.planCard;
       (async () => {
@@ -82,7 +77,7 @@ export default function ChatView() {
         setDraftGenerating(false);
       })();
     }
-  }, [isDemoGuide, onboardingStep, clickedChips, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
+  }, [isDemoGuide, onboardingStep, planShown, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
 
   const focusInput = () => {
     const i = inputRef.current;
@@ -147,11 +142,10 @@ export default function ChatView() {
               </div>
             )}
 
-            {/* 对话流内联卡（planShown 状态机） */}
-            {/* demo：10 个 chip 全点完才弹确认卡（后端在 4 项 needs 攒齐时就产出 planCard，
-                约第 6 个 chip，太早；demo 要求攒满 10 再展示）。safe：planCard 一到就弹。
-                门控用 collectedAll（从持久 messages 派生），切页回来不会因局部 state 重置而消失。 */}
-            {planShown === 'confirm' && act?.planCard && (!isDemoGuide || collectedAll) && (
+            {/* 确认卡：渲染只由数据驱动（planShown='confirm' + 后端 planCard）。
+                曾经 demo 模式要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
+                计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
+            {planShown === 'confirm' && act?.planCard && (
               <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
