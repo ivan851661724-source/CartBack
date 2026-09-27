@@ -6,7 +6,7 @@ import MailCard from './MailCard';
 
 /** 邮件配置视图：统计条 + 卡片网格 —— 对应 flow.html #view-mail + app.js renderDrafts */
 export default function MailView() {
-  const { drafts, setEditingDraft, setEditOpen, draftGenerating } = useApp();
+  const { drafts, setEditingDraft, setEditOpen, draftGenerating, sendDraft, deleteDraft } = useApp();
   const count = drafts.length;
   const reach = drafts.reduce((s, d) => s + (d.matchedCount || 0), 0);
   const gmv = drafts.reduce((s, d) => s + (+d.estGmv || 0), 0).toFixed(0);
@@ -48,7 +48,15 @@ export default function MailView() {
         {drafts.length === 0 && !draftGenerating ? (
           <div className="empty-note">还没有邮件。去「助手」跟 agent 聊完，会自动生成方案卡。</div>
         ) : (
-          drafts.map((d) => <MailCard key={d.id} d={d} onOpen={() => open(d)} />)
+          drafts.map((d) => (
+            <MailCard
+              key={d.id}
+              d={d}
+              onOpen={() => open(d)}
+              onSend={() => { sendDraft(d); }}
+              onDelete={() => { deleteDraft(d); }}
+            />
+          ))
         )}
       </div>
     </div>

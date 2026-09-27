@@ -12,7 +12,7 @@ import * as os from 'os';
 
 import { loadConfig, BACKEND_DIR } from './config';
 import { fromPlanCard, makeUser, type UserRecord } from './data-loader';
-import { generateCopy, type CopyResult } from './copy-generator';
+import { generateCopy, generateImagePrompt, type CopyResult } from './copy-generator';
 import { generateProductImage } from './image-generator';
 import { buildEmailHtml } from './email-builder';
 import { MailgenPayloadSchema, type MailgenPayload } from './schema';
@@ -33,8 +33,7 @@ export interface MailgenResult {
   [k: string]: unknown;
 }
 
-function emit(result: MailgenResult): void {
-  process.stdout.write(JSON.stringify(result) + '\n');
+function emit(result: MailgenResult): void {  process.stdout.write(JSON.stringify(result) + '\n');
 }
 
 function formatG(n: number): string {
@@ -67,12 +66,20 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
 
   // 3. 文案
   const forceRegen = Boolean(payload.force_regen_copy);
+  // 编辑态「生成图片」重跑：copy_passthrough 跳过文案 LLM，直接透传调用方传入的 subject/body
+  const copyPassthrough = Boolean(payload.copy_passthrough);
   let existing: { subject?: string; body?: string } | null = null;
   if (payload.subject || payload.body) {
     existing = { subject: String(payload.subject ?? ''), body: String(payload.body ?? '') };
   }
   let copy: CopyResult;
-  try {
+  if (copyPassthrough && existing && existing.subject && existing.body) {
+    copy = {
+      subject: existing.subject, body: existing.body,
+      provider: 'passthrough', regenerated: false,
+      user_id: user.user_id, email: user.email, discount: user.discount,
+    };
+  } else try {
     copy = await generateCopy(cfg, user, { forceRegenerate: forceRegen, existing });
   } catch (e) {
     warnings.push(`文案生成异常，兜底使用原 subject/body：${(e as Error).message}`);
@@ -93,6 +100,9 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
 
   // 4. 图片
   const skipImage = Boolean(payload.skip_image);
+  // 编辑态提示词覆盖（「生成图片」按钮）：为空则按受众标签画像构建
+  const imagePromptOverride = String(payload.image_prompt_override || '').trim() || null;
+  const effectiveImagePrompt = imagePromptOverride || generateImagePrompt(user, cfg);
   let imageMethod = 'skip';
   let imagePath = '';
   if (!skipImage) {
@@ -103,6 +113,7 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
         productImagePath: (payload.product_image_path as string) || null,
         skip: false,
         outputDir: OUTPUT_DIR,
+        promptOverride: imagePromptOverride,
       });
       if (imagePath) {
         const qvReady = Boolean(cfg.qianwen_vision.api_key && cfg.qianwen_vision.base_url);
@@ -130,6 +141,11 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
     : imagePath;
 
   const useCid = false;
+  // 页脚热区（Figma 446:4589）：Unsubscribe / View in browser 指向真实入口（公网可访问），
+  // 供邮件客户端直接点开；未配 publicBaseUrl 时留空 → email-builder 回退 cart_url
+  const draftId = draft && (draft as Record<string, unknown>).id ? String((draft as Record<string, unknown>).id) : '';
+  const unsubUrl = publicBase && draftId ? `${publicBase}/api/email/unsubscribe?d=${encodeURIComponent(draftId)}` : '';
+  const viewUrl = publicBase && draftId ? `${publicBase}/api/email/view/${encodeURIComponent(draftId)}` : '';
   let html: string;
   try {
     html = buildEmailHtml({
@@ -143,6 +159,8 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
       cta_text: cfg.marketing.cta_button || 'Shop Now',
       use_cid: useCid,
       lang: user.preferred_language || user.locale, // 落款/提示按习惯语言本地化
+      unsubscribe_url: unsubUrl,
+      view_url: viewUrl,
     });
   } catch (e) {
     return {
@@ -161,6 +179,7 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
     success: true,
     html,
     image_path: imagePath,
+    image_prompt: skipImage ? '' : effectiveImagePrompt,
     subject,
     body,
     copy_provider: copyProvider,

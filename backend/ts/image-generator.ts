@@ -140,6 +140,8 @@ export interface GenerateImageOpts {
   maxRetries?: number;
   retryDelay?: number;
   outputDir?: string;
+  /** 编辑态「生成图片」：覆盖默认画像 prompt（为空则按受众标签画像构建） */
+  promptOverride?: string | null;
 }
 
 export async function generateProductImage(opts: GenerateImageOpts): Promise<string> {
@@ -166,7 +168,7 @@ export async function generateProductImage(opts: GenerateImageOpts): Promise<str
     return path.resolve(productImagePath);
   }
 
-  const prompt = generateImagePrompt(user, config);
+  const prompt = (opts.promptOverride || '').trim() || generateImagePrompt(user, config);
   const wanxReady = Boolean(config.qianwen_vision.api_key && config.qianwen_vision.base_url);
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {

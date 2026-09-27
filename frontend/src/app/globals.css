@@ -344,6 +344,37 @@ input,textarea{font-family:inherit}
 .mc-step{display:flex;justify-content:space-between;font-size:9.5px;color:var(--soft);margin-top:4px;font-weight:600}
 .mc-foot{display:flex;align-items:center;gap:7px;margin-top:7px}
 .mc-foot .tag{margin-right:auto}
+/* 邮件预览/编辑弹窗（Figma 446:4589 / 446:6142）：两态统一 DOM + 面板位置变化动效 */
+/* 预览态：右轨道塌缩为 0（左面板居中）；编辑态：右轨道展开 → stage 变宽 → overlay 居中重排，
+   左面板平滑左移（grid 列宽/gap transition 驱动），右面板淡入滑入 */
+.em-stage{display:grid;grid-template-columns:minmax(0,837px) minmax(0,0px);gap:0;align-items:start;
+  transition:grid-template-columns .34s cubic-bezier(.22,.61,.36,1),gap .34s cubic-bezier(.22,.61,.36,1)}
+.em-stage.dual{grid-template-columns:minmax(0,837px) minmax(0,795px);gap:22px}
+.em-stage > .modal{width:100%;max-width:none}
+/* 塌缩/展开用 .em-stage 作用域（0-2-0）盖过 .modal（0-1-0）的 max-height:88vh 与默认样式 */
+.em-stage:not(.dual) .em-panel-editor{max-height:0;opacity:0;transform:translateX(36px);overflow:hidden;border-width:0;pointer-events:none}
+.em-stage.dual .em-panel-editor{max-height:88vh;opacity:1;transform:none;overflow:auto;pointer-events:auto}
+.em-panel-editor{transition:max-height .34s cubic-bezier(.22,.61,.36,1),opacity .24s ease,transform .34s cubic-bezier(.22,.61,.36,1),border-width .34s}
+.em-iframe{transition:height .34s cubic-bezier(.22,.61,.36,1)}
+.em-stage.dual .em-panel-editor .m-body{padding-top:20px}
+.em-actions{display:flex;align-items:center;gap:15px;margin-top:14px}
+.em-btn{height:39px;padding:0 16px;border:none;border-radius:9px;background:#E6E9ED;color:var(--text);font:500 12px/1 var(--font-ui);cursor:pointer;display:inline-flex;align-items:center;transition:background .14s}
+.em-btn:hover{background:#DDE2E8}
+.em-btn:disabled{opacity:.55;cursor:not-allowed}
+.em-editor{display:flex;flex-direction:column;gap:10px;min-width:0}
+.em-hero-wrap a{display:block}
+.em-hero{width:100%;max-height:400px;object-fit:cover;border-radius:10px;border:1px solid var(--line);display:block}
+.em-prompt-row{position:relative}
+.em-prompt{min-height:130px;padding-right:96px}
+.em-regen{position:absolute;right:5px;bottom:5px}
+.em-foot{display:flex;align-items:center;gap:9px;margin-top:4px}
+/* 卡片操作行（Figma 406:2955）：发送 / 预览和编辑 / 删除 */
+.mc-actions{display:flex;align-items:center;gap:15px;margin-top:12px}
+.mc-btn{height:32px;padding:0 15px;border:none;border-radius:9px;background:#E6E9ED;color:var(--text);font:500 12px/1 var(--font-ui);cursor:pointer;display:inline-flex;align-items:center;transition:background .14s}
+.mc-btn:hover{background:#DDE2E8}
+.mc-btn:disabled{opacity:.45;cursor:not-allowed}
+.mc-btn.danger{margin-left:auto;color:var(--danger)}
+.mc-btn.danger:hover{background:#F6E4E4}
 /* 生成中骨架卡（方案卡「可以，去发」后、草稿就绪前） */
 .generating-card{cursor:default;overflow:hidden;display:flex;flex-direction:column}
 .generating-card:hover{transform:none;box-shadow:none;border-color:var(--border)}

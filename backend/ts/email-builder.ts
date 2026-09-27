@@ -36,6 +36,12 @@ export interface BuildEmailHtmlOpts {
   image_link?: unknown;
   /** 收件人习惯语言（preferred_language），用于本地化「点击图片下单」提示与落款 */
   lang?: unknown;
+  /** 页脚 Unsubscribe 热区链接（为空回退 cart_url）；邮件合规要求的真实退订入口 */
+  unsubscribe_url?: unknown;
+  /** 页脚 View in browser 热区链接（为空回退 cart_url）：浏览器内查看整封邮件 */
+  view_url?: unknown;
+  /** preheader（收件箱预览行）：空则取正文首句截断 */
+  preheader?: unknown;
 }
 
 // 「点击图片下单」提示 + 落款，按 preferred_language 本地化（无匹配则中文兜底）
@@ -95,17 +101,20 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
     use_cid = false,
     image_link = '',
     lang = '',
+    unsubscribe_url = '',
+    view_url = '',
+    preheader = '',
   } = opts;
 
   const dStr = discountStr(discount);
 
   let imgTag: string;
   if (use_cid) {
-    imgTag = `<img src="cid:hero-image" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" />`;
+    imgTag = `<img src="cid:hero-image" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
   } else {
     const iu = safeStr(image_url);
     if (iu) {
-      imgTag = `<img src="${escapeHtml(iu)}" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" />`;
+      imgTag = `<img src="${escapeHtml(iu)}" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
     } else {
       imgTag = '';
     }
@@ -132,7 +141,19 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
   const subjectSafe = escapeHtml(subject);
   const brandSafe = escapeHtml(brand_name);
   const cartSafe = escapeHtml(cart_url);
+  // 页脚热区：Unsubscribe / View in browser 指向真实入口（为空回退 cart_url，保持旧行为）
+  const unsubSafe = escapeHtml(safeStr(unsubscribe_url)) || cartSafe;
+  const viewSafe = escapeHtml(safeStr(view_url)) || cartSafe;
   const copyYear = '2026';
+
+  // M8 preheader：收件箱预览行（正文首句截断）
+  const bodyPlain = String(body ?? '').replace(/\s+/g, ' ').trim();
+  const preheaderText = escapeHtml(safeStr(preheader) || bodyPlain.slice(0, 90));
+
+  // M7 邮件客户端兼容：table(role=presentation) + 全 inline style（Outlook Word 引擎不解析 <style>）。
+  // 视觉与旧 div 版 1:1 平移：600px 白卡、#f5f5f5 页面底、同字号/行高/配色。
+  const FONT =
+    "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif";
 
   return (
     '<!DOCTYPE html>\n' +
@@ -141,52 +162,34 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
     '  <meta charset="UTF-8">\n' +
     '  <meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
     `  <title>${subjectSafe}</title>\n` +
-    '  <style>\n' +
-    '    * { margin: 0; padding: 0; box-sizing: border-box; }\n' +
-    "    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; background-color: #f5f5f5; }\n" +
-    '    .email-container { max-width: 600px; margin: 0 auto; background-color: #ffffff; }\n' +
-    '    .email-header { background-color: #1a1a1a; padding: 20px; text-align: center; }\n' +
-    '    .email-header .brand { color: #ffffff; font-size: 24px; font-weight: 700; letter-spacing: 1px; }\n' +
-    '    .email-hero { width: 100%; display: block; background-color: #f0f0f0; }\n' +
-    '    .email-hero img { width: 100%; height: auto; max-width: 600px; object-fit: cover; display: block; border: 0; }\n' +
-    '    .email-body { padding: 30px 25px; }\n' +
-    '    .email-subject { font-size: 20px; font-weight: 600; color: #1a1a1a; margin-bottom: 16px; line-height: 1.4; }\n' +
-    '    .email-text { font-size: 15px; color: #444444; line-height: 1.7; margin-bottom: 24px; white-space: normal; }\n' +
-    '    .email-after { padding: 0 25px 20px; }\n' +
-    '    .email-prompt { font-size: 15px; color: #ff6b35; font-weight: 600; line-height: 1.7; margin-bottom: 10px; }\n' +
-    '    .email-signature { font-size: 14px; color: #888888; line-height: 1.6; }\n' +
-    '    .email-footer { background-color: #f9f9f9; padding: 20px 25px; text-align: center; border-top: 1px solid #eeeeee; }\n' +
-    '    .email-footer p { font-size: 12px; color: #999999; line-height: 1.6; }\n' +
-    '    .email-footer a { color: #999999; text-decoration: none; }\n' +
-    '    @media (max-width: 480px) {\n' +
-    '      .email-container { width: 100% !important; }\n' +
-    '      .email-body { padding: 20px 16px; }\n' +
-    '      .email-after { padding: 0 16px 16px; }\n' +
-    '    }\n' +
-    '  </style>\n' +
     '</head>\n' +
-    '<body>\n' +
-    '  <div class="email-container">\n' +
-    // 主体（开头+正文）在图片之前（黑色品牌 header 已按需移除）
-    '    <div class="email-body">\n' +
-    `      <h2 class="email-subject">${subjectSafe}</h2>\n` +
-    `      <div class="email-text">${bodyHtml}</div>\n` +
-    '    </div>\n' +
-    // 图片（可点击，作为 CTA）
-    '    <div class="email-hero">\n' +
-    `      ${imgTag}\n` +
-    '    </div>\n' +
+    '<body style="margin:0;padding:0;background-color:#f5f5f5;">\n' +
+    // preheader：隐藏预览行（mso-hide:all 兼容 Outlook）
+    `  <div style="display:none;max-height:0;overflow:hidden;mso-hide:all;">${preheaderText}</div>\n` +
+    '  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f5f5f5;">\n' +
+    '    <tr><td align="center" style="padding:24px 12px;">\n' +
+    '      <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:600px;max-width:600px;background-color:#ffffff;">\n' +
+    // 主体（标题 + 正文）在图片之前（正文样式并入 td，整封信只有 preheader 一个 div）
+    '        <tr><td style="padding:30px 25px 0;font-family:' + FONT + ';font-size:15px;color:#444444;line-height:1.7;">\n' +
+    `          <h2 style="margin:0 0 16px;font-size:20px;font-weight:600;color:#1a1a1a;line-height:1.4;">${subjectSafe}</h2>\n` +
+    `          ${bodyHtml}\n` +
+    '        </td></tr>\n' +    // 图片（可点击，作为 CTA）
+    '        <tr><td style="padding:24px 0 0;background-color:#f0f0f0;">\n' +
+    `          ${imgTag}\n` +
+    '        </td></tr>\n' +
     // 「点击图片下单」提示 + 落款 在图片之后
-    '    <div class="email-after">\n' +
-    `      <div class="email-prompt">${promptText}</div>\n` +
-    `      <div class="email-signature">${signatureText}</div>\n` +
-    '    </div>\n' +
-    '    <div class="email-footer">\n' +
-    `      <p>&copy; ${copyYear} ${brandSafe}. All rights reserved.<br>\n` +
-    '      This email was sent because you left items in your cart.<br>\n' +
-    `      <a href="${cartSafe}">Unsubscribe</a> &middot; <a href="${cartSafe}">View in browser</a></p>\n` +
-    '    </div>\n' +
-    '  </div>\n' +
+    '        <tr><td style="padding:0 25px 20px;font-family:' + FONT + ';">\n' +
+    `          <p style="margin:20px 0 10px;font-size:15px;font-weight:600;color:#ff6b35;line-height:1.7;">${promptText}</p>\n` +
+    `          <p style="margin:0;font-size:14px;color:#888888;line-height:1.6;">${signatureText}</p>\n` +
+    '        </td></tr>\n' +
+    '        <tr><td style="background-color:#f9f9f9;border-top:1px solid #eeeeee;padding:20px 25px;text-align:center;font-family:' + FONT + ';">\n' +
+    `          <p style="margin:0;font-size:12px;color:#999999;line-height:1.6;">&copy; ${copyYear} ${brandSafe}. All rights reserved.<br>\n` +
+    '          This email was sent because you left items in your cart.<br>\n' +
+    `          <a href="${unsubSafe}" style="color:#999999;text-decoration:none;">Unsubscribe</a> &middot; <a href="${viewSafe}" style="color:#999999;text-decoration:none;">View in browser</a></p>\n` +
+    '        </td></tr>\n' +
+    '      </table>\n' +
+    '    </td></tr>\n' +
+    '  </table>\n' +
     '</body>\n' +
     '</html>\n'
   );

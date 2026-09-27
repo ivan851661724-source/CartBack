@@ -13,6 +13,7 @@ export default function SettingsView() {
   const [espFrom, setEspFrom] = useState('');
   const [aiModel, setAiModel] = useState('deepseek-chat');
   const [aiBaseUrl, setAiBaseUrl] = useState('');
+  const [shopBrand, setShopBrand] = useState('');
   const [msg, setMsg] = useState('');
   // G0 白名单（品牌名/专有名词，含中文品牌名；白名单内不拦截）
   const [g0Terms, setG0Terms] = useState<string[]>([]);
@@ -24,11 +25,12 @@ export default function SettingsView() {
     setEspFrom(s.espFrom || '');
     setAiModel(s.aiModel || 'deepseek-chat');
     setAiBaseUrl(s.aiBaseUrl || '');
+    setShopBrand(s.shopBrand || '');
     setG0Terms(Array.isArray(s.g0Whitelist) ? s.g0Whitelist : []);
   }, [status]);
 
   const onSave = async () => {
-    await saveConfig({ aiKey, espKey, espFrom, aiModel, aiBaseUrl });
+    await saveConfig({ aiKey, espKey, espFrom, aiModel, aiBaseUrl, shopBrand });
     setMsg('已保存（密钥仅存于服务端，不回传前端）');
   };
 
@@ -105,6 +107,18 @@ export default function SettingsView() {
         <div className="setup-card glass-card">
           <div className="s-no">3</div>
           <div className="s-body">
+            <div className="s-head"><h3>品牌名称（白标）</h3><Tag kind={s.shopBrand && s.shopBrand !== 'CartBack' ? 'intent' : 'gray'}>{s.shopBrand && s.shopBrand !== 'CartBack' ? '已配置' : '待配置'}</Tag></div>
+            <div className="s-desc">邮件落款、页脚版权、发件人名称统一用你的品牌（M4 白标）。未配置时回退方案卡品牌。</div>
+            <div className="row">
+              <input type="text" placeholder="如 Qin Pet Custom（留空 = 跟随方案卡）" value={shopBrand} onChange={(e) => setShopBrand(e.target.value)} />
+              <button className="btn ghost sm" onClick={onSave}>保存</button>
+            </div>
+          </div>
+        </div>
+
+        <div className="setup-card glass-card">
+          <div className="s-no">4</div>
+          <div className="s-body">
             <div className="s-head"><h3>连接店铺（真实收件人源）</h3><Tag kind="default">即将支持</Tag></div>
             <div className="s-desc">Shopify / 店匠 / 通用 REST 统一连接器 · 接入后自动拉取真实顾客，语种跟随客户 locale。</div>
             <div className="row"><button className="btn ghost sm">暂用 CSV 导入代替</button></div>
@@ -112,7 +126,7 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">4</div>
+          <div className="s-no">5</div>
           <div className="s-body">
             <div className="s-head"><h3>运行模式</h3><Tag kind={s.mode === 'real' ? 'intent' : 'gray'}>{s.mode === 'real' ? '真实' : '演示'}</Tag></div>
             <div className="s-desc">演示模式用仿真数据先看效果；真实模式只显示真实归因结果。</div>

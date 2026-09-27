@@ -176,7 +176,12 @@ function getMailgen() {
   }
 }
 
-async function generateMailHtml(draft, card) {
+// opts（编辑态「生成图片」重跑时使用）：
+//   imagePromptOverride：提示词覆盖（空 = 按 draft.image_prompt / 标签画像构建）
+//   copyPassthrough：跳过文案 LLM，直接透传 card.subject/body
+async function generateMailHtml(draft, card, opts = {}) {
+  const imagePromptOverride = String(opts.imagePromptOverride || draft.image_prompt || '').trim();
+  const copyPassthrough = Boolean(opts.copyPassthrough);
   // 把 Node 端持有的 AI 密钥同步下发给 mailgen（同机可信边界，不跨网络，不落盘）
   // 这样商家只需在 UI 设置页录入一次即可，后端 LLM 与邮件图像复用同一套 Key。
   const ai_config = {
@@ -197,7 +202,7 @@ async function generateMailHtml(draft, card) {
     body: card.body || '',
     // 折扣数值口径唯一：优先方案卡 discountNum（producePlanCard 统一产生，% off），文本兜底解析；默认与 variants/render 一致（10）
     discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
-    brand: (card.brand || config.shopBrand || 'CartBack') + '',
+    brand: resolveBrand(card),
     audience: card.audience || '',
     cart_url: card.cart_url || config.shopCartUrl || 'https://cartback.demo',
     cta: card.cta || 'Shop Now',
@@ -210,6 +215,9 @@ async function generateMailHtml(draft, card) {
     force_regen_copy: Boolean(card.force_regen_copy),  // 兼容字段：generateCopy 有 AI key 时一律走 LLM，此开关现无实际作用（保留供「换一批文案」语义复用）
     skip_image:        Boolean(card.skip_image),        // 纯文案调试时跳过图片生成
     product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
+    // 编辑态「生成图片」重跑：提示词覆盖 + 文案透传（不动已润色的 subject/body）
+    image_prompt_override: imagePromptOverride,
+    copy_passthrough: copyPassthrough,
     // 受众标签分布快照（圈中人群的性别/年龄段/机型/分层/风格品类代表值）——
     // mailgen 据此填充 UserRecord 画像（文案 toneHint + 图片人群风格），此前恒为硬编码默认值
     tag_distribution: Array.isArray(draft.tag_distribution) ? draft.tag_distribution : [],
@@ -218,7 +226,7 @@ async function generateMailHtml(draft, card) {
     // 公网基址：邮件内联图片 src 用 ${publicBaseUrl}/api/image/<path>，留空则退回本地路径（仅预览可用）
     public_base_url: config.publicBaseUrl || '',
     // 品牌统一用商家名（覆盖方案卡里 per-profile 的测试品牌）
-    shop_brand: config.shopBrand || '',
+    shop_brand: resolveBrand(card),
     draft: {
       id: draft.id || null,
       brand: config.shopBrand || 'CartBack',
@@ -259,6 +267,8 @@ async function generateMailHtml(draft, card) {
   if (result.success) {
     draft.html = result.html || '';
     draft.image_path = result.image_path || '';
+    // 万相提示词快照：EditModal 编辑态展示「真实提示词」，重跑「生成图片」时复用
+    if (result.image_prompt) draft.image_prompt = result.image_prompt;
     // mailgen 端可能重写了 subject/body（fallback_template 或 force_regen）
     // 这里仅在 Agent 原本是空串时才回填，避免覆盖 Agent 已精心润色的文案
     if (result.subject && !(card && card.subject)) draft.subject = result.subject;
@@ -274,6 +284,70 @@ async function generateMailHtml(draft, card) {
   } else {
     throw new Error(result.error || 'mailgen unknown error');
   }
+}
+
+// —— M3 页脚热区真实链接 ——
+// publicBaseUrl 配好后产出真实端点 URL；email 已知时（逐收件人）退订链接带 e 参数，落地即完成退订标记
+function emailFooterUrls(draftId, email) {  if (!config.publicBaseUrl) return null;
+  const base = String(config.publicBaseUrl).trim().replace(/\/$/, '');
+  return {
+    unsubscribe: `${base}/api/email/unsubscribe?d=${encodeURIComponent(draftId)}` + (email ? `&e=${encodeURIComponent(email)}` : ''),
+    view: `${base}/api/email/view/${encodeURIComponent(draftId)}`,
+  };
+}
+// 存量草稿的 html 是生成时固化的（当时的页脚链接是 cart_url 兜底）；
+// 发送/预览/看板出口统一刷新为新端点，免重新生成草稿
+function applyFooterLinks(html, draftId, email) {
+  const urls = emailFooterUrls(draftId, email);
+  if (!urls || !html || String(html).startsWith('ERROR')) return html;
+  return html
+    .replace(/(href=")([^"]*)("[^>]*>\s*Unsubscribe\s*<\/a>)/i, (m, a, _b, c) => a + urls.unsubscribe + c)
+    .replace(/(href=")([^"]*)("[^>]*>\s*View in browser\s*<\/a>)/i, (m, a, _b, c) => a + urls.view + c);
+}
+
+// —— M4 白标品牌解析链：设置页 shopBrand（非默认值）> 方案卡 brand > CartBack 兜底 ——
+function resolveBrand(card) {
+  if (config.shopBrand && config.shopBrand !== 'CartBack') return config.shopBrand;
+  const b = String((card && card.brand) || '').trim();
+  return b || 'CartBack';
+}
+
+// —— M4 发件人名链：显式 espSenderName（非默认 CartBack）> 草稿固化品牌 > 兜底 ——
+// espSenderName 的配置默认值就是 'CartBack'（含已持久化的旧配置），须视为「未设置」走品牌链
+function senderNameFor(c, draft) {
+  if (c && c.espSenderName && c.espSenderName !== 'CartBack') return c.espSenderName;
+  return (draft && draft.brand) || config.shopBrand || 'CartBack';
+}
+
+// —— M5 主题口径护栏：加购未付/弃购人群（从未完成订单）禁 order/purchase 措辞，一律 cart（保留首字母大写） ——
+function cartTone(text) {
+  return String(text || '')
+    .replace(/\b[Yy]our order\b/g, (m) => (m[0] === 'Y' ? 'Your cart' : 'your cart'))
+    .replace(/\b[Oo]rder(s?)\b/g, (m, s) => (m[0] === 'O' ? 'Cart' : 'cart') + (s || ''))
+    .replace(/\b[Pp]urchase(s?)\b/g, (m, s) => (m[0] === 'P' ? 'Cart' : 'cart') + (s || ''));
+}
+function applySubjectTone(subject, audience) {
+  if (!subject || !/加购|未付|弃购/.test(String(audience || ''))) return subject;
+  return cartTone(subject);
+}
+
+// —— M6 商品位兜底：方案卡 product 为空时按圈中人群的风格品类标签补一个品类描述 ——
+const STYLE_PRODUCT_FALLBACK = { tech: 'tech picks', fashion: 'style picks', business: 'work essentials', outdoor: 'outdoor gear' };
+function productFallbackFor(draft) {
+  if (draft && draft.product) return draft.product;
+  const dist = Array.isArray(draft && draft.tag_distribution) ? draft.tag_distribution : [];
+  const style = String(((dist.find(t => t.tag_type === 'style_preference') || {}).tag_value) || '').toLowerCase();
+  return STYLE_PRODUCT_FALLBACK[style] || '';
+}
+
+// —— M10 standard 档称呼注入：共享 draft.html 的通用称呼 → 逐收件人称呼（变体档本就逐人渲染） ——
+function personalizeHtml(html, msg) {
+  if (!html || !msg) return html;
+  const name = render.safeName(msg.recipient || {}, msg.locale || 'en');
+  if (!name || name === 'there') return html;
+  return html
+    .replace(/Hi there,?\s*/i, 'Hi ' + name + ', ')
+    .replace(/Hi,\s*/, 'Hi ' + name + ', ');
 }
 
 // —— 速率限制（架构 §6 P0-3：/send 速率限制防域名声誉滥用）——
@@ -365,16 +439,21 @@ async function fetchResend(draft, messages, c) {
   const headers = { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + c.espKey };
   const message = r => {
     const msg = {
-      from: c.espFrom,
+      // M4 白标：发件人带品牌名（走品牌链）
+      from: `${senderNameFor(c, draft)} <${c.espFrom}>`,
       to: [r.email],
       subject: r.subject,
       text: r.body
     };
     // HTML 邮件仅对生成过 html 的变体附上（mailgen html 为标准档直出；其余档用纯文本，避免跨变体串内容）
-    if (r.html) msg.html = r.html;
+    // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
+    if (r.html) msg.html = applyFooterLinks(personalizeHtml(r.html, r), draft.id, r.email);
     else if (!r.tier || r.tier === 'standard') {
-      if (draft.html && !String(draft.html).startsWith('ERROR')) msg.html = draft.html;
+      if (draft.html && !String(draft.html).startsWith('ERROR')) msg.html = applyFooterLinks(personalizeHtml(draft.html, r), draft.id, r.email);
     }
+    // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
+    const unsub = emailFooterUrls(draft.id, r.email);
+    if (unsub) msg.headers = { 'List-Unsubscribe': `<${unsub.unsubscribe}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
     return msg;
   };
   const post = async (url, body) => {
@@ -403,7 +482,8 @@ function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 async function fetchBrevo(draft, messages, c) {
   const url = String(c.espApiUrl || 'https://api.brevo.com/v3/smtp/email');
   const headers = { 'Content-Type': 'application/json', 'accept': 'application/json', 'api-key': c.espKey };
-  const sender = { name: c.espSenderName || 'CartBack', email: c.espFrom };
+  // M4 白标：发件人名走品牌链（收件人看到的不是工具品牌）
+  const sender = { name: senderNameFor(c, draft), email: c.espFrom };
   const ids = [];
   let batches = 0;
   for (const r of messages) {
@@ -413,8 +493,13 @@ async function fetchBrevo(draft, messages, c) {
       subject: String(r.subject || '').slice(0, 200),
       textContent: String(r.body || '').slice(0, 20000),
     };
-    const html = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    // M10 + M3：standard 档共享 html 注入逐收件人称呼，再刷新页脚退订链接（带该收件人 e 参数）
+    const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
     if (html) body.htmlContent = html;
+    // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
+    const unsub = emailFooterUrls(draft.id, r.email);
+    if (unsub) body.headers = { 'List-Unsubscribe': `<${unsub.unsubscribe}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
     const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
     if (!resp.ok) throw new Error('Brevo HTTP ' + resp.status + ': ' + JSON.stringify(await resp.json().catch(() => ({}))).slice(0, 160));
     const j = await resp.json().catch(() => ({}));
@@ -430,11 +515,18 @@ async function fetchBrevo(draft, messages, c) {
 async function fetchSmtp(draft, messages, c) {
   const ids = [];
   for (const r of messages) {
-    const html = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
+    const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
+    // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
+    const unsub = emailFooterUrls(draft.id, r.email);
+    const extraHeaders = unsub
+      ? ['List-Unsubscribe: <' + unsub.unsubscribe + '>', 'List-Unsubscribe-Post: List-Unsubscribe=One-Click']
+      : null;
     const out = await sendSmtp({
       host: c.smtpHost, port: c.smtpPort, user: c.smtpUser, pass: c.smtpPass,
-      from: c.espFrom, senderName: c.espSenderName,
-      to: r.email, subject: r.subject, text: r.body, html,
+      from: c.espFrom, senderName: senderNameFor(c, draft),
+      to: r.email, subject: r.subject, text: r.body, html, extraHeaders,
     });
     ids.push((out && out.messageId) || 'smtp-' + Date.now().toString(36));
     if (messages.length > 1) await sleep(500);
@@ -542,7 +634,7 @@ function precheckSend(draft, { dryRun = false } = {}) {
     }
   }
   const all = resolveRecipients(draft);
-  const valid = all.filter(r => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid');
+  const valid = all.filter(r => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
   if (!valid.length) problems.push({ type: 'no_recipients', human: '没有可发送的收件人（邮箱无效或都被退信剔除了）。' });
   const freq = frequencyFilter(valid, draft);
   if (!freq.allow.length) problems.push({ type: 'frequency_capped', human: '这批人 72 小时内已经发过同一场活动，先别打扰了。' });
@@ -564,12 +656,14 @@ async function renderForDraft(draft, recipients) {
   const draftFacts = {
     id: draft.id, coupon: draft.coupon, discount: draft.discount,
     // 注意：product 绝不回退到 audience（商家侧中文描述）——进消费者邮件的事实必须无中文，否则 G0 全拦
-    product: draft.product || '', offer: draft.offer || '',
-    brand: config.shopBrand || 'CartBack'
+    // M6：优先草稿固化快照，其次风格品类标签兜底（renderForDraft 供旧草稿兜底，新草稿创建时已固化）
+    product: productFallbackFor(draft) || '', offer: draft.offer || '',
+    // M4：品牌优先草稿固化快照（设置页 > 方案卡，创建时已解析），兜底配置链
+    brand: draft.brand || resolveBrand({})
   };
   const variants = (Array.isArray(draft.variants) && draft.variants.length)
     ? draft.variants
-    : variantsMod.standardVariants({ brand: config.shopBrand, discount: draft.discount, coupon: draft.coupon, product: draftFacts.product });
+    : variantsMod.standardVariants({ brand: draftFacts.brand, discount: draft.discount, coupon: draft.coupon, product: draftFacts.product });
   return render.renderCampaign({
     draft: draftFacts,
     variants,
@@ -632,7 +726,7 @@ function upsertDraftPreservingAsync(draft) {
 }
 
 async function sendDraft(draft) {
-  const all = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid');
+  const all = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
   // 预检不通过（无人可发）直接失败并分类提示
   const check = precheckSend(draft);
   if (!check.ok) {
@@ -835,7 +929,7 @@ const server = http.createServer(async (req, res) => {
 
   // 鉴权：bootstrap 与 /api/auth/* 豁免；业务端点解析会话 cookie，回退 x-local-token（老前端零破坏，整改 1a）
   // /api/attribution 为真实 ESP webhook 回执，豁免全局鉴权、端点内用 webhook secret 校验（整改 2）
-  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution' && !pathname.startsWith('/api/image/') && pathname !== '/api/health') {
+  if (pathname !== '/api/bootstrap' && !pathname.startsWith('/api/auth/') && pathname !== '/api/attribution' && !pathname.startsWith('/api/image/') && pathname !== '/api/health' && !pathname.startsWith('/api/email/')) {
     const who = authMod.resolveUser(req, store, config);
     if (!who) return sendJson(res, 403, { error: 'unauthorized' });
     req.userId = who.userId;
@@ -1092,11 +1186,13 @@ const server = http.createServer(async (req, res) => {
       const needs = (act && act.needs) || {};
       const tagDist = tagsMod.tagDistribution(store, matched);
       const draftFacts = {
-        brand: config.shopBrand || 'CartBack',
+        // M4 品牌链：设置页 shopBrand（非默认）> 方案卡 brand > CartBack 兜底；固化到 draft.brand
+        brand: resolveBrand(card),
         // 折扣数值唯一出处 = 方案卡 discountNum（% off）；文本「8 折」等已在 producePlanCard 换算
         discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
         coupon: card.coupon,
-        product: card.product || '', offer: card.offer || ''
+        // M6 商品位：方案卡 product > 风格品类标签兜底（避免变体里商品位永远为空）
+        product: card.product || productFallbackFor({ tag_distribution: tagDist }), offer: card.offer || ''
       };
       const llmJSON = config.aiKey ? async (messages) => {
         const r = await breakers.get('llm').exec(() => makeLlmClient().chatStructured({ messages, maxTokens: 2048 }));
@@ -1106,14 +1202,18 @@ const server = http.createServer(async (req, res) => {
       const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
       if (v.warning) logEvent('variants_fallback', { warning: v.warning });
       metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
+      // M5 口径护栏：加购未付人群的主题禁 order/purchase 措辞（生成侧规则 + 出口兜底双保险）
+      for (const variant of v.variants) variant.subject = applySubjectTone(variant.subject, card.audience);
       const draft = {
         id: uid('dr_'), act_id: body.actId || null,
-        subject: card.subject, body: card.body, audience: card.audience,
+        subject: applySubjectTone(card.subject, card.audience), body: card.body, audience: card.audience,
         // 数值口径（% off）：变体/逐收件人渲染统一读数值；「给什么钩子」的展示文案在 planCard.discount
         discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
         coupon: card.coupon, posters: card.posters,
         estGmv, matchedCount: matched.length, sendTiming: card.sendTiming || null,
         tag_distribution: tagDist,   // 圈中受众的标签分布快照（邮件卡展示产品分类/年龄段/机型代表值）
+        brand: draftFacts.brand,     // M4 白标快照（落款/页脚/发件人名/图片 alt 统一品牌位）
+        product: draftFacts.product, // M6 商品位快照（变体渲染复用）
         status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
         user_id: req.userId || null,
         locale: card.locale || null,
@@ -1163,8 +1263,55 @@ const server = http.createServer(async (req, res) => {
         gmv: +drafts.reduce((s, d) => s + (+d.estGmv || 0), 0).toFixed(2),   // 已捞回·预估
         cost: +drafts.reduce((s, d) => s + (+d.cost || 0), 0).toFixed(2)
       };
-      const items = drafts.map(d => ({ ...d, progressSeg: segMap[d.status] || [1,0,0], locale: d.locale || config.shopDefaultLocale || 'en' }));
+      const items = drafts.map(d => ({ ...d, html: applyFooterLinks(d.html, d.id), progressSeg: segMap[d.status] || [1,0,0], locale: d.locale || config.shopDefaultLocale || 'en' }));
       return sendJson(res, 200, { drafts: items, stats });
+    }
+
+    // —— 删除草稿（邮件卡片操作行「删除」，Figma 406:2955）——
+    const dm = pathname.match(/^\/api\/draft\/([\w-]+)$/);
+    if (dm && method === 'DELETE') {
+      const draft = store.getDraft(dm[1]);
+      if (!draft) return sendJson(res, 404, { error: 'draft not found' });
+      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (['sending', 'queued'].includes(draft.status)) {
+        return sendJson(res, 409, { error: '该邮件正在发送，不能删除' });
+      }
+      store.deleteDraft(draft.id);
+      logEvent('draft_deleted', { draft_id: draft.id, status: draft.status });
+      return sendJson(res, 200, { deleted: true });
+    }
+
+    // —— 编辑态「生成图片」（Figma 446:6142）：按（可编辑）提示词重跑图片，文案/主题不动 ——
+    const im = pathname.match(/^\/api\/draft\/([\w-]+)\/image$/);
+    if (im && method === 'POST') {
+      const draft = store.getDraft(im[1]);
+      if (!draft) return sendJson(res, 404, { error: 'draft not found' });
+      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (['sent', 'sending', 'queued'].includes(draft.status)) {
+        return sendJson(res, 409, { error: '该邮件已发送或正在发送，不能再修改' });
+      }
+      let prompt = draft.image_prompt || '';
+      try {
+        const body = await readBody(req);
+        if (typeof body.prompt === 'string' && body.prompt.trim()) prompt = body.prompt.trim();
+        else if (typeof body.prompt === 'string') return sendJson(res, 400, { error: '提示词不能为空' });
+      } catch (e) { /* 无 body：沿用 draft.image_prompt */ }
+      try {
+        // 伪 card：复用 generateMailHtml 管线（透传现有 subject/body，仅重跑图片）；brand/product 走草稿固化快照
+        const pseudoCard = {
+          subject: draft.subject, body: draft.body, discountNum: draft.discount,
+          coupon: draft.coupon, audience: draft.audience, locale: draft.locale,
+          brand: draft.brand, product: draft.product,
+        };
+        await generateMailHtml(draft, pseudoCard, { imagePromptOverride: prompt, copyPassthrough: true });
+        logEvent('draft_image_regen', { draft_id: draft.id, prompt_len: prompt.length, image_method: (draft.mailgen_meta || {}).image_method });
+        return sendJson(res, 200, {
+          image_path: draft.image_path, image_prompt: draft.image_prompt || prompt, html: draft.html,
+        });
+      } catch (e) {
+        logEvent('draft_image_regen_fail', { draft_id: draft.id, error: String(e && e.message || e) });
+        return sendJson(res, 500, { error: '生成图片失败：' + (e && e.message || e) });
+      }
     }
 
     // —— 发送（PRD §0.6：改 202 入队；预检 + 频控 + 幂等键 send:{userId}:{draftId}）——
@@ -1180,10 +1327,13 @@ const server = http.createServer(async (req, res) => {
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
       try {
         const body = await readBody(req);
-        if (body && typeof body.subject === 'string' && body.subject.trim()) draft.subject = body.subject.trim();
+        if (body && typeof body.subject === 'string' && body.subject.trim()) draft.subject = applySubjectTone(body.subject.trim(), draft.audience);
         if (body && typeof body.body === 'string' && body.body.trim()) draft.body = body.body.trim();
         store.upsertDraft(draft);
       } catch (e) { /* 无 body 或非 JSON：维持存储原稿 */ }
+      // M3：发送前刷新固化页脚链接（存量草稿生成时是 cart_url 兜底；publicBaseUrl 未配则原样）
+      const refreshedHtml = applyFooterLinks(draft.html, draft.id);
+      if (refreshedHtml !== draft.html) { draft.html = refreshedHtml; store.upsertDraft(draft); }
       // ③ 发送前预检：ESP 配置 / 发件域名 / 收件人有效性 / 72h 频控，失败分类人话提示
       const check = precheckSend(draft);
       if (!check.ok) {
@@ -1678,7 +1828,7 @@ const server = http.createServer(async (req, res) => {
       const draft = store.getDraft(pm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
       if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
-      const recipients = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid');
+      const recipients = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
       const rendered = await renderForDraft(draft, recipients);
       const tiers = render.TIERS.map(tier => {
         const same = rendered.messages.filter(m => m.tier === tier);
@@ -1695,6 +1845,41 @@ const server = http.createServer(async (req, res) => {
         g0_blocked: draft.g0_blocked || [],      // 被拦截邮件（标红 + 原因）
         stats: rendered.stats
       });
+    }
+
+    // —— 邮件公开端点（页脚热区目标，Figma 446:4589）——
+    // View in browser：浏览器内查看整封邮件（邮件客户端点开，无会话，故豁免鉴权）
+    const evm = pathname.match(/^\/api\/email\/view\/([\w-]+)$/);
+    if (evm && method === 'GET') {
+      const d = store.getDraft(evm[1]);
+      if (!d || !d.html || String(d.html).startsWith('ERROR')) {
+        return sendJson(res, 404, { error: 'draft not found' });
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(applyFooterLinks(d.html, evm[1]));
+      return;
+    }
+
+    // Unsubscribe：退订落地页；带 e 参数时把该收件人标记为已退订（后续发送剔除）
+    if (pathname === '/api/email/unsubscribe' && method === 'GET') {
+      const draftId = parsed.query.d || '';
+      const email = String(parsed.query.e || '').trim().toLowerCase();
+      let marked = false;
+      if (email && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+        const aud = store.getAudience().find(a => (a.email || '').toLowerCase() === email);
+        if (aud && aud.email_status !== 'unsubscribed') {
+          store.unsubscribeAudienceEmail(aud.id);
+          marked = true;
+        }
+        logEvent('email_unsubscribed', { draft_id: draftId, email, marked });
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(
+        '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">' +
+        '<title>Unsubscribed — CartBack</title><style>body{font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;color:#1e293b;background:#fcfdff;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}.card{background:#fff;border:1px solid #dde2e8;border-radius:16px;box-shadow:0 2px 12px rgba(0,0,0,.06);padding:40px 48px;text-align:center;max-width:420px}h1{font-size:20px;margin:0 0 10px}p{color:#8a95a0;font-size:13.5px;margin:0}</style></head>' +
+        `<body><div class="card"><h1>You're unsubscribed &#10003;</h1><p>${marked ? 'This address will no longer receive recovery emails from CartBack.' : 'You will no longer receive recovery emails from CartBack.'}</p></div></body></html>`
+      );
+      return;
     }
 
     // —— 图片服务（邮件预览/海报用） ——

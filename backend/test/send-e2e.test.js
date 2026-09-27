@@ -139,15 +139,15 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
   const msgs = batch.body;
   assert.equal(msgs.length, 9);
   for (const m of msgs) {
-    assert.equal(m.from, 'send@test.example');
+    assert.equal(m.from, 'E2E <send@test.example>', 'M4 白标：发件人名走草稿品牌（E2E）');
     assert.equal(m.to.length, 1, '隐私：每封独立 to（互不可见）');
     assert.ok(m.subject && m.subject.length > 0);
     assert.ok(m.text && m.text.length > 0);
   }
   // 变体分档：价格敏感（林晚/顾言/夏一 price=高）→ 折扣主打；intent=hot（陈默/周野 ≤7d）→ 紧迫；其余 → 标准
-  const discountSubjects = msgs.filter((m) => /% OFF waiting for you/.test(m.subject));
+  const discountSubjects = msgs.filter((m) => /% OFF — .*don't pay full price/.test(m.subject));
   const urgencySubjects = msgs.filter((m) => /cart is about to expire/.test(m.subject));
-  const standardSubjects = msgs.filter((m) => /You left something behind at CartBack/.test(m.subject));
+  const standardSubjects = msgs.filter((m) => /You left something behind at E2E/.test(m.subject));
   assert.equal(discountSubjects.length, 3);
   assert.equal(urgencySubjects.length, 2);
   assert.equal(standardSubjects.length, 4);
@@ -161,7 +161,7 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
   const dup = await api(`/api/draft/${draft.id}/send`, { method: 'POST', body: { subject: 'TAMPERED', body: 'TAMPERED' } });
   assert.equal(dup.status, 409);
   const sentDraft = (await api('/api/drafts')).json.drafts.find((x) => x.id === draft.id);
-  assert.equal(sentDraft.subject, "Your 12% OFF Is Waiting — Don't Miss Out, CartBack");
+  assert.equal(sentDraft.subject, "Your 12% OFF Is Waiting — Don't Miss Out, E2E");
 
   // —— 72h 频控：同受众第二场活动被拦截（400 + 人话提示） ——
   const dr2 = await api('/api/draft', {

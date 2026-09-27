@@ -24,6 +24,9 @@ const SCHEMA = {
     estGmv: 'REAL', matchedCount: 'INTEGER', sendTiming: 'TEXT',
     created_at: 'INTEGER', sent_at: 'INTEGER', esp_message_id: 'TEXT', cost: 'REAL',
     user_id: 'TEXT', locale: 'TEXT', html: 'TEXT', image_path: 'TEXT',
+    image_prompt: 'TEXT',      // 万相出图提示词快照（EditModal 编辑态展示 / 生成图片复用）
+    brand: 'TEXT',             // M4 白标：邮件品牌快照（设置页品牌 > 方案卡品牌，创建时固化）
+    product: 'TEXT',           // M6 个性化：商品位快照（方案卡 product > 标签画像品类兜底）
     tag_distribution: 'JSON'   // 创建时圈中受众的标签分布快照（卡片展示产品分类/年龄段/机型等代表值）
   },
   audience: {
@@ -251,6 +254,12 @@ class Store {
     const rows = this._read('drafts').filter(x => x.id !== d.id);
     rows.push(d); this._write('drafts', rows); return d;
   }
+  deleteDraft(id) {
+    const rows = this._read('drafts');
+    const next = rows.filter(x => x.id !== id);
+    if (next.length === rows.length) return false;
+    this._write('drafts', next); return true;
+  }
 
   // —— audience ——
   getAudience() {
@@ -389,6 +398,15 @@ class Store {
     const a = rows.find(x => x.id === audienceId);
     if (!a) return null;
     a.email_status = 'email_invalid';
+    this._write('audience', rows); return a;
+  }
+
+  // —— 页脚退订热区落地：标记后剔除后续发送（与 bounced 剔除同口径）——
+  unsubscribeAudienceEmail(audienceId) {
+    const rows = this._read('audience');
+    const a = rows.find(x => x.id === audienceId);
+    if (!a) return null;
+    a.email_status = 'unsubscribed';
     this._write('audience', rows); return a;
   }
 

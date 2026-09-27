@@ -19,7 +19,7 @@ function encSubject(subject) {
 /** 纯文本正文 base64 分行（76 字符/行，RFC 限制） */
 function b64Wrap(s) { return b64(s).replace(/(.{76})/g, '$1\r\n'); }
 
-function buildMime({ from, senderName, to, subject, text, html }) {
+function buildMime({ from, senderName, to, subject, text, html, extraHeaders }) {
   const headers = [
     'From: ' + (senderName ? senderName + ' ' : '') + '<' + from + '>',
     'To: <' + to + '>',
@@ -27,6 +27,12 @@ function buildMime({ from, senderName, to, subject, text, html }) {
     'MIME-Version: 1.0',
     'Date: ' + new Date().toUTCString(),
   ];
+  // 合规投递头（List-Unsubscribe 等）：只接受 "Name: value" 形态的整行，防头部注入
+  if (Array.isArray(extraHeaders)) {
+    for (const h of extraHeaders) {
+      if (typeof h === 'string' && /^[!-9;-~]+: [^\r\n]*$/.test(h) && !/[<>]/.test(h.split(':')[0])) headers.push(h);
+    }
+  }
   if (html) {
     const boundary = 'cb_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
     headers.push('Content-Type: multipart/alternative; boundary="' + boundary + '"');
@@ -54,7 +60,7 @@ function buildMime({ from, senderName, to, subject, text, html }) {
  * 发一封 SMTP 邮件（TLS 直连，465 implicit TLS；25/587 明文+STARTTLS 不支持——163/QQ 均走 465）
  * @returns Promise<{ messageId: string }>
  */
-function sendSmtp({ host, port, user, pass, from, senderName, to, subject, text, html }, timeoutMs = 45000) {
+function sendSmtp({ host, port, user, pass, from, senderName, to, subject, text, html, extraHeaders }, timeoutMs = 45000) {
   return new Promise((resolve, reject) => {
     if (!host || !user || !pass || !from || !to) return reject(Object.assign(new Error('SMTP 配置不完整'), { code: 'SMTP_CONFIG' }));
     const sock = tls.connect({ host, port: Number(port) || 465, servername: host });
@@ -105,7 +111,7 @@ function sendSmtp({ host, port, user, pass, from, senderName, to, subject, text,
           case 7:                                     // 354
             if (code !== 354) return fail('DATA 未就绪: ' + line);
             step = 8;
-            sendLine(buildMime({ from, senderName, to, subject, text, html }).replace(/\r\n\./g, '\r\n..'));  // 点填充
+            sendLine(buildMime({ from, senderName, to, subject, text, html, extraHeaders }).replace(/\r\n\./g, '\r\n..'));  // 点填充
             sendLine('.');
             break;
           case 8:                                     // 250 已入队

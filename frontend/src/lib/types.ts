@@ -23,6 +23,7 @@ export interface Status {
   emailTimeoutDays: number;
   sendRateLimitPerMin: number;
   shopDefaultLocale: string;
+  shopBrand: string;    // M4：商家品牌名（邮件落款/页脚/发件人名；空 = 未配置）
   storeConfigured: boolean;
   storeTypes: string[];
 }
@@ -89,6 +90,7 @@ export interface Draft {
   estGmv: number;
   cost: number;
   tag_distribution?: Array<{ tag_type: string; tag_value: string; count: number; avg_weight: number }>;
+  image_prompt?: string;   // 万相出图提示词快照（EditModal 编辑态展示 / 生成图片复用）
   act_id?: string;    // 所属会话（刷新后由数据反推方案卡状态用，走查 P1-9）
 }
 

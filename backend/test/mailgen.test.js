@@ -84,8 +84,9 @@ test('mailgen: 空 subject/body + skip_image → fallback_template + skip', asyn
     const draft = body.draft;
     assert.ok(draft, '应返回 draft');
     assert.ok(draft.html && draft.html.startsWith('<!DOCTYPE html>'), 'html 应以 DOCTYPE 开头');
-    // 品牌统一：shopBrand（默认 CartBack）覆盖方案卡里的 per-profile 测试品牌
-    assert.ok(draft.html.includes('CartBack'), 'html 应包含统一后的商家品牌名');
+    // M4 品牌链：shopBrand 未配置（默认 CartBack）时方案卡品牌透传（白标：商家品牌优先于工具默认名）
+    assert.ok(draft.html.includes('SmokeBrand'), 'html 应包含方案卡品牌（M4 白标链）');
+    assert.ok(!draft.html.includes('© 2026 CartBack.'), '页脚版权不得再出现工具默认品牌');
     assert.equal(draft.mailgen_meta.copy_provider, 'fallback_template');
     assert.equal(draft.mailgen_meta.image_method, 'skip');
     // skip_image / 万相未配 → image_path 留空（436a06e 起：EditModal 据此不渲染碎图，不再写 FALLBACK 哨兵）

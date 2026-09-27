@@ -73,7 +73,7 @@ interface AppContextValue extends AppState {
   newConversation: () => Promise<void>;   // 多会话 #2：新建会话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
-  saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string }) => Promise<void>;
+  saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string; shopBrand?: string }) => Promise<void>;
   resetData: () => Promise<void>;
   doImport: (csv: string) => Promise<boolean>;
   authSubmit: (email: string, password: string, name: string) => Promise<string | true>;
@@ -82,6 +82,8 @@ interface AppContextValue extends AppState {
   confirmSendPlan: (card: PlanCard) => Promise<void>;
   createCardDraft: (actId: string, card: PlanCard) => Promise<Draft>;   // 确认卡预建草稿（确认发送时复用，防重复建草稿）
   sendEditedDraft: (subject: string, body: string) => Promise<boolean>;
+  sendDraft: (d: Draft) => Promise<boolean>;        // 卡片操作行「发送」：按存储原稿直接发送（Figma 406:2955）
+  deleteDraft: (d: Draft) => Promise<boolean>;      // 卡片操作行「删除」
   // setters
   setChatInput: (v: string) => void;
   setChatPlaceholder: (v: string) => void;
@@ -347,13 +349,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [loadState, toast_]);
 
   // —— 保存配置 ——
-  const saveConfig = useCallback(async (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string }) => {
+  const saveConfig = useCallback(async (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string; shopBrand?: string }) => {
     const payload: Record<string, string> = {
       aiKey: body.aiKey.startsWith('•') ? '' : body.aiKey,
       espKey: body.espKey.startsWith('•') ? '' : body.espKey,
       espFrom: body.espFrom, aiModel: body.aiModel,
     };
     if (typeof body.aiBaseUrl === 'string') payload.aiBaseUrl = body.aiBaseUrl;
+    if (typeof body.shopBrand === 'string') payload.shopBrand = body.shopBrand;
     const r = await api<{ status: Status }>('/api/config', { method: 'POST', body: JSON.stringify(payload) });
     patch({ status: r.status });
     toast_('配置已保存（密钥仅存于服务端，不回传前端）');
@@ -529,10 +532,47 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.editingDraft, patch, loadState, pollJob, toast_]);
 
+  // —— 卡片操作行「发送」（Figma 406:2955）：不经编辑弹窗，按存储原稿直接发送 ——
+  const sendDraft = useCallback(async (d: Draft) => {
+    if (['sent', 'sending', 'queued'].includes(d.status)) { toast_('该邮件已发送或正在发送'); return false; }
+    try {
+      const r = await api<{ job_id?: string; queued?: boolean; error?: string }>(`/api/draft/${d.id}/send`, {
+        method: 'POST', body: '{}',
+      });
+      if (r.error) { toast_(r.error); return false; }
+      if (r.queued && r.job_id) {
+        const j = await pollJob(r.job_id);
+        if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return false; }
+      }
+      toast_('邮件已发送');
+      await loadState();
+      return true;
+    } catch (e: any) {
+      toast_('发送失败：' + (e?.message || e));
+      return false;
+    }
+  }, [loadState, pollJob, toast_]);
+
+  // —— 卡片操作行「删除」：二步确认，删除后同步刷新列表 ——
+  const deleteDraft = useCallback(async (d: Draft) => {
+    if (!window.confirm(`删除这封「${d.subject || '未命名邮件'}」？`)) return false;
+    try {
+      const r = await api<{ deleted?: boolean; error?: string }>(`/api/draft/${d.id}`, { method: 'DELETE' });
+      if (r.error) { toast_(r.error); return false; }
+      if (state.editingDraft?.id === d.id) patch({ editOpen: false, editingDraft: null });
+      toast_('已删除');
+      await loadState();
+      return true;
+    } catch (e: any) {
+      toast_('删除失败：' + (e?.message || e));
+      return false;
+    }
+  }, [state.editingDraft, patch, loadState, toast_]);
+
   const value: AppContextValue = {
     ...state,
     switchTab, switchAct, loadState, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
-    authSubmit, authLogout, jumpToConfig, confirmSendPlan, createCardDraft, sendEditedDraft,
+    authSubmit, authLogout, jumpToConfig, confirmSendPlan, createCardDraft, sendEditedDraft, sendDraft, deleteDraft,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
     setPlanShown: (p) => patch({ planShown: p }),

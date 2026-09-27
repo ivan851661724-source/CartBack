@@ -168,6 +168,7 @@ function status(cfg) {
     emailTimeoutDays: cfg.emailTimeoutDays,
     sendRateLimitPerMin: cfg.sendRateLimitPerMin,
     shopDefaultLocale: cfg.shopDefaultLocale || 'en',
+    shopBrand: cfg.shopBrand || '',      // M4：设置页品牌名回显（非敏感；空串 = 未配置，邮件品牌走兜底链）
     g0Whitelist: Array.isArray(cfg.g0Whitelist) ? cfg.g0Whitelist : [],   // 设置页回显白名单（非敏感）
     storeConfigured,          // 是否已接入任意店后台（不暴露任何密钥/域名）
     storeTypes: storeConfigured

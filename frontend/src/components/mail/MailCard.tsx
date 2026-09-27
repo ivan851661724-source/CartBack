@@ -9,11 +9,15 @@ const STYLE_CN: Record<string, string> = {
   tech: '数码', fashion: '时尚', business: '商务', outdoor: '户外',
 };
 
-/** 邮件卡片（生命周期进度段）—— 对应 app.js renderDrafts 内卡片 */
-export default function MailCard({ d, onOpen }: { d: Draft; onOpen: () => void }) {
+/** 邮件卡片（生命周期进度段 + 操作行）—— 对应 app.js renderDrafts 内卡片；操作行为 Figma 406:2955 */
+export default function MailCard({
+  d, onOpen, onSend, onDelete,
+}: { d: Draft; onOpen: () => void; onSend: () => void; onDelete: () => void }) {
   const seg = (SEG_MAP[d.status] || [1, 0, 0]).map((s, i) => (
     <div key={i} className={`seg${s ? ' fill' : ''}${s && d.status === 'recovering' ? ' ok' : ''}`} />
   ));
+  // 已发送/发送中的卡片不允许再点「发送」（后端同样有 409 兜底）
+  const sendDisabled = ['sent', 'sending', 'queued'].includes(d.status);
   // 受众标签分布（创建时快照）取各维度 count 最高代表值，与语种标签并排展示
   const dist = d.tag_distribution;
   const topOf = (type: string) => dist?.find(t => t.tag_type === type)?.tag_value;
@@ -47,6 +51,11 @@ export default function MailCard({ d, onOpen }: { d: Draft; onOpen: () => void }
         {age && <Tag kind="price">{age}</Tag>}
         {phone && <Tag kind="intent">{phone}</Tag>}
         <span className="mc-meta brand" style={{ margin: 0 }}><b>¥{(+(d.estGmv) || 0).toFixed(0)}</b></span>
+      </div>
+      <div className="mc-actions" onClick={(e) => e.stopPropagation()}>
+        <button className="mc-btn" disabled={sendDisabled} onClick={onSend}>发送</button>
+        <button className="mc-btn" onClick={onOpen}>预览和编辑</button>
+        <button className="mc-btn danger" onClick={onDelete}>删除</button>
       </div>
     </div>
   );

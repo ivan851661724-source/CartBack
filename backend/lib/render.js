@@ -67,7 +67,8 @@ function pickVariant(recipient, variants, tags) {
 }
 
 // —— 模板本地展开（零 LLM）：{{var}} + 单层 {{#if var}}...{{/if}} ——
-const TEMPLATE_VARS = ['name', 'product', 'offer', 'coupon', 'discount', 'brand'];
+// value/cart：逐收件人购物车金额位（M6 个性化——正文出现 "your $349 cart"）
+const TEMPLATE_VARS = ['name', 'product', 'offer', 'coupon', 'discount', 'brand', 'value', 'cart'];
 
 /**
  * 收件人称呼的语种安全化（G0 配套规则）：
@@ -87,13 +88,17 @@ function safeName(recipient, locale = 'en') {
 
 /** 组装展开上下文：收件人属性 × 草稿事实（PRD §4.3） */
 function buildContext(recipient, draft = {}) {
+  const amount = +(recipient && (recipient.abandoned_value || recipient.value) || 0) || 0;
+  const value = amount > 0 ? '$' + Math.round(amount) : '';
   return {
-    name: (recipient && recipient.name) || (recipient && recipient.email ? recipient.email.split('@')[0] : '') || 'there',
+    name: (recipient && recipient.name) || (recipient && recipient.email ? String(recipient.email).split('@')[0] : '') || 'there',
     product: draft.product || draft.audience || 'your cart items',
     offer: draft.offer || (draft.discount ? `${draft.discount}% OFF` : ''),
     coupon: draft.coupon || '',
     discount: draft.discount || '',
-    brand: draft.brand || 'CartBack'
+    brand: draft.brand || 'CartBack',
+    value,                                          // "$349"（无金额为空串）
+    cart: value ? `your ${value} cart` : 'your cart' // {{cart}} 金额位：无金额退通用说法
   };
 }
 
@@ -174,7 +179,7 @@ async function renderLanguage(variant, locale, { translateFn = null, cache = nul
 // —— 收件人切片：无效地址 / bounced 剔除 / 按语种分组 ——
 function sliceRecipients(recipients = []) {
   const valid = (recipients || []).filter(r =>
-    r && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid');
+    r && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
   const byLocale = {};
   for (const r of valid) {
     const loc = resolveLocale(r);

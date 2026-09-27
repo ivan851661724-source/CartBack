@@ -383,5 +383,7 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
 
   const extraFlavors = [flavor, priceFlavor, segFlavor].filter(Boolean).join('，');
-  return `${demographic}手持${device}${product}的电商广告图，${style}${extraFlavors ? `，${extraFlavors}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+  // 机型与产品间补空格：产品是英文兜底描述（work essentials 等）时避免与机型粘连
+  const item = /^[a-zA-Z]/.test(product) ? `${device} ${product}` : `${device}${product}`;
+  return `${demographic}手持${item}的电商广告图，${style}${extraFlavors ? `，${extraFlavors}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
 }
