@@ -70,7 +70,13 @@ const SCENARIOS = [
   { id: 's03', input: '我的店铺叫 Blooming Home，主打手工香薰蜡烛和家居香氛',
     check: (a, r, X) => { const e = []; if (!/blooming/i.test(Object.values(X).join('|'))) e.push('品牌未进 extras'); return e; } },
   { id: 's04', input: '主要客户是 30 到 45 岁的美国女性',
-    check: (a, r) => { const e = []; const v = slotText(a.needs, 'audience'); if (!/30/.test(v) || !/45/.test(v) || !/美国女性/.test(v)) e.push('audience 画像未采集：' + v); return e; } },
+    check: (a, r) => {
+      const e = []; const v = slotText(a.needs, 'audience');
+      // PRD B2 规则 3：与已有受众冲突且无修正语气 → 追问不覆盖；追问或采集二者居一即合规
+      const asked = /按|为准|维持|还是|算吗/.test(r.reply);
+      if (!asked && !(/30|45/.test(v) && /美国女性/.test(v))) e.push('既未追问也未采集：' + v);
+      return e;
+    } },
   { id: 's05', input: '她们是加了购物车但一直没付款的',
     check: (a, r) => { const e = []; if (!/加购|购物车|冲突|以哪个|为准/.test(r.reply) && !/加购/.test(slotText(a.needs, 'audience'))) e.push('行为客群未接住'); return e; } },
   { id: 's06', input: '挽回原因就是忘了付款',

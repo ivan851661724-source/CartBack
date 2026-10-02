@@ -52,7 +52,9 @@ const MAX_CORRECTIONS = 40;
 const MAX_CONFLICTS = 4;
 
 // 修正语气词（B2 冲突检测）：出现 → 新值视为明确纠正；不出现且与现值不同 → 冲突候选
-const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|改主意|应该是|说错|rather|instead|actually|correction)/i;
+const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|之前说错|改主意|应该是|说错|还是|rather|instead|actually|correction)/i;
+// 注意：「其实」不进修正语气表——PRD 剧本 #4 明确「其实主要是年轻人」类表述是冲突澄清（追问一次），
+// 不是静默覆盖；「其实」入表会让 demographic 冲突永远绕过 C6（真模型矩阵 m10 实测）。
 
 // —— Wave 4 F2 算账意图（对话内问「这批人值多少钱 / 值不值」→ 确定性算账，与账本同口径）——
 const LEDGER_RE = /(值多少|值不值|划不划算|能赚多少|赚多少|能回多少|值几个钱|算.{0,4}账)/i;
@@ -231,7 +233,7 @@ function extractOps(text) {
   if (/暂停/.test(t)) return { kind: 'op', op: 'pause', target: extractOpsTarget(t) };
   if (/恢复/.test(t)) return { kind: 'op', op: 'resume', target: extractOpsTarget(t) };
   // 建批（I1）：≥2 批的明确说法
-  if (/两个批次|两批|分别建批|分别做(成)?(两|2)?批|拆(成)?(两|2)批|建两个|三个批次|三批|几批|多个批次/.test(t)) {
+  if (/两个批次|两批|分别建批|分别做(成)?(两|2|一|1|三|3)?批|拆(成)?(两|2)批|建两个|三个批次|三批|几批|多个批次/.test(t)) {
     return { kind: 'batch_plan' };
   }
   return null;
@@ -258,7 +260,8 @@ function batchesFromText(text, act) {
     [/加购/, '加购未付'],
     [/下单未付|弃购/, '下单未付'],
     [/浏览/, '浏览未买'],
-    [/老客|沉睡|流失/, '老客']
+    [/老客|沉睡|流失/, '老客'],
+    [/新客|新用户|新人/, '新客']
   ];
   const hits = [];
   for (const [re, label] of scan) {
@@ -688,11 +691,23 @@ class IGDE {
         if (kw[f]) bySlot[f] = { slot: f, value: kw[f], inferred: false, kw: true };
       }
     }
+    // 词表兜底补缺（与 B1 kw 补缺同一哲学，真模型矩阵 m12/m15 实测）——必须在 turn 构造前：
+    // ① 品牌名「品牌叫/是 X」→ extras.brand（模型在长句多素材时偶发漏交）
+    const turnExtras = (Array.isArray(env.extras) ? env.extras : []).filter(e => e && String(e.value == null ? '' : e.value).trim());
+    if (!turnExtras.some(e => e && e.key === 'brand')) {
+      const bm = String(userText || '').match(/品牌(?:叫|是|名为|name\s*is)\s*([A-Za-z0-9\u4e00-\u9fa5]{1,24})/i);
+      if (bm) turnExtras.unshift({ key: 'brand', value: bm[1] });
+    }
+    // ② C6 澄清轮后的数字分段短答（「25 到 34 吧」）→ audience 回答（chips 选项的输入框等价物）
+    if (!bySlot.audience) {
+      const segM = String(userText || '').trim().match(/^(\d{1,3})\s*(?:到|[-~～])\s*(\d{1,3})\s*(?:岁)?\s*(?:的|吧|这个|人群|客户)?$/);
+      if (segM) bySlot.audience = { slot: 'audience', value: `${segM[1]}-${segM[2]}岁`, inferred: false, kw: true };
+    }
     const turn = {
       userText,
       updates: Object.values(bySlot),
       corrections: env.corrections || [],
-      extras: env.extras || [],
+      extras: turnExtras,
       conflictCandidates: []
     };
 
@@ -837,6 +852,10 @@ class IGDE {
       }
     }
     const chips = askedSlot ? (question.chips || []) : [];
+    // B5 硬约束落实：本轮选了追问但模型回复没带任何问句 → 引擎补一句该槽探问
+    if (askedSlot && question.kind !== 'conflict' && !/[?？]/.test(reply)) {
+      reply += ' ' + this.probeFor(askedSlot);
+    }
 
     // —— 单一 FSM 权威：阶段推进只在此处（桩/AI 两条路径一致），_stubReply/_aiCoach 不碰 stage（P2-1）——
     this._advanceStage(act, userText);
@@ -1234,10 +1253,17 @@ class IGDE {
     // ② prefs 预填（inferred；回复必须带「不对请纠正」语义；缺失项 = 差异项，显式追问不静默沿用）
     const now = Date.now();
     const filledText = [];
+    const keptText = [];
     const slots = [];
     const put = (slot, raw) => {
       const v = clampNeedValue(raw);
       if (!v) return;
+      // 用户本轮已说出的差异值优先（B2 刚入账），prefs 只填用户没说的槽——差异不得被静默覆盖（A3）
+      const cur = act.needs[slot];
+      if (cur && String(cur.value || '').trim()) {
+        keptText.push(`${FIELD_LABEL[slot]}按你刚说的「${cur.value}」`);
+        return;
+      }
       act.needs[slot] = { value: v, source: 'inferred', at: now };
       filledText.push(`${FIELD_LABEL[slot]}「${v}」`);
       slots.push(slot);
@@ -1251,6 +1277,7 @@ class IGDE {
     if (last.act_id) act.memory.prefs.reused_from = String(last.act_id);
     const miss = this.missingFields(act);
     let reply = `我理解为${filledText.join('、')}——照上次的来，不对请纠正。`;
+    if (keptText.length) reply += `${keptText.join('、')}，这跟上次不一样，就按你这次的说。`;
     if (miss.length) {
       reply += `有 ${miss.length} 样跟上次没对齐的，我逐个问：${this.probeFor(miss[0])}`;
     } else {
@@ -1479,6 +1506,17 @@ class IGDE {
       const prev = needs[slot];
       if (prev && prev.value === value) continue; // 同值忽略
       const kwTouched = u.kw === true;
+      // 挂着的已追问冲突的两向决议（矩阵 m10/m11 实测）：
+      //  「维持/保持/原来的」→ 保留旧值（候选丢弃）；新值 === 候选值 → 用户确认候选，explicit 入槽
+      const askedCf = (mem.conflicts || []).find(c => c.slot === slot && c.asked === true);
+      if (askedCf) {
+        if (/维持|保持|原来的|之前的|按旧|不换/.test(turn.userText || '')) continue;
+        if (value === askedCf.new) {
+          needs[slot] = { value, source: 'explicit', at: now };
+          corrected.add(slot);
+          continue;
+        }
+      }
       if (prev && !hasTone) {
         // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清。
         // kw 原话命中同规则：触发词是用户原话，但写入值是词表归一化短语——
@@ -1504,6 +1542,8 @@ class IGDE {
       const slot = cf.slot;
       if (corrected.has(slot)) continue;
       if ((turn.updates || []).some(x => x.slot === slot)) continue; // 本轮已回应
+      // 「维持/保持/原来的」→ 用户选择保留旧值，候选丢弃（矩阵 m10 实测：chips 选项「维持当前年龄定位」）
+      if (/维持|保持|原来的|之前的|按旧|不换/.test(turn.userText || '')) continue;
       const cur = needs[slot];
       const curVal = cur ? cur.value : '';
       const candVal = clampNeedValue(cf.new);
