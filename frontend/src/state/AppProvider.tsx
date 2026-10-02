@@ -9,8 +9,8 @@
 import React, { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import { api, setToken, streamMessage, createAct, confirmAct, ApiAuthError } from '@/lib/api';
 import type {
-  Act, Audience, Checklist, Chips, Draft, Engine, Holdout, Kpis, Me, Metrics, Mode, Opportunities,
-  PlanCard, SendResult, Status, TrendPoint,
+  Act, Audience, Blackout, BatchPreview, Campaign, Checklist, Chips, Draft, Engine, Holdout,
+  Kpis, Me, Metrics, Mode, Opportunities, PlanCard, SendResult, Status, TrendPoint,
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
 import { filledCount } from '@/lib/needs';
@@ -30,6 +30,30 @@ export interface ConfirmState {
 export interface ConfirmFailed {
   reason: string;
   options: string[];
+}
+
+/** 停发域缺省安全值（后端未升级/字段缺失时按「未停发」处理，徽标不误报） */
+export const EMPTY_BLACKOUT: Blackout = { active: false, ranges: [] };
+
+/** done 帧 batches 安全解析：仅保留结构完整的批次方案（name 必须为字符串） */
+function parseBatches(raw: unknown): BatchPreview[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).filter(
+    (b): b is BatchPreview =>
+      !!b && typeof b === 'object' && typeof (b as BatchPreview).name === 'string',
+  );
+}
+
+/** /api/state 顶层批次域安全解析：campaigns 数组 / blackout 对象 / global_paused 布尔 */
+function parseBatchDomain(s: any): { campaigns: Campaign[]; blackout: Blackout; global_paused: boolean } {
+  const b = s?.blackout;
+  return {
+    campaigns: Array.isArray(s?.campaigns) ? (s.campaigns as Campaign[]) : [],
+    blackout: b && typeof b === 'object'
+      ? { active: Boolean(b.active), ranges: Array.isArray(b.ranges) ? b.ranges : [] }
+      : EMPTY_BLACKOUT,
+    global_paused: Boolean(s?.global_paused),
+  };
 }
 
 // 确认卡预建草稿暂存（单用户本地应用，模块级即可）：旧后端回退路径 / demo 引导跳步可能预建，
@@ -71,6 +95,12 @@ interface AppState {
   confirmState: ConfirmState | null;
   confirmFailed: ConfirmFailed | null;
   confirmBusy: boolean;
+  // Wave3 批次域：/api/state 顶层的正式批次 / 停发日历 / 全局停发（列表只读展示，管理动作在对话里）
+  campaigns: Campaign[];
+  blackout: Blackout;
+  global_paused: boolean;
+  // done 帧 batches：agent 提出待确认的建批方案（与 chips 同生命周期：新消息/切会话清空）
+  pendingBatches: BatchPreview[];
   // UI 状态
   booted: boolean;
   activeTab: Tab;
@@ -152,6 +182,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     planPushed: false, planShown: null, lastSent: null, me: null,
     engine: 'online', chips: [],
     confirmState: null, confirmFailed: null, confirmBusy: false,
+    campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
     importOpen: false, historyOpen: false, editOpen: false, draftGenerating: false, authOpen: false, authMode: 'register',
@@ -192,6 +223,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
       acts,
+      // Wave3 批次域：campaigns/blackout/global_paused（缺省安全值；pendingBatches 是 done 帧专属，不在此触碰）
+      ...parseBatchDomain(s),
       // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
       ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
       act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
@@ -290,6 +323,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       planPushed: false, planShown: null,
       confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
       chips: [],   // chips 属于上一会话的最新回复，切会话即失效
+      pendingBatches: [],   // done 帧待确认批次同属上一会话的最新回复，一并失效
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     });
   }, [state.streaming, state.act, patch, toast_]);
@@ -304,6 +338,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         planPushed: false, planShown: null,
         confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
         chips: [],   // 新会话无历史回复，chips 清空
+        pendingBatches: [],   // 新会话无待确认批次
         chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
       });
     } catch (e: any) {
@@ -326,10 +361,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
     const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
-    // 发送新消息即清空上一回复的 chips（新 chips 由本轮 done 帧重新下发）
-    patch({ act: actWithUser, streaming: true, streamingText: '', chips: [] });
+    // 发送新消息即清空上一回复的 chips 与待确认批次（新值由本轮 done 帧重新下发；
+    // 用户点「确认建批」chip 后后端真正建批，本轮 done 帧无 batches → pendingBatches 随之清空）
+    patch({ act: actWithUser, streaming: true, streamingText: '', chips: [], pendingBatches: [] });
 
-    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; engine?: unknown }) => {
+    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; engine?: unknown; batches?: unknown }) => {
       setState(prev => {
         if (!prev.act) return prev;
         const assistantMsg = { role: 'assistant' as const, content: r.reply };
@@ -350,11 +386,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const chips: Chips = Array.isArray(r.chips)
           ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string')
           : [];
+        // Wave3：done 帧 batches（待确认建批方案）——只收结构完整项；缺省/空 → 清空（与 chips 同生命周期）
+        const pendingBatches = parseBatches(r.batches);
         // engine：仅接受合法值，否则保持现值
         const engine = r.engine === 'online' || r.engine === 'degraded' ? r.engine : prev.engine;
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
-          engine, chips,
+          engine, chips, pendingBatches,
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
           acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
@@ -365,13 +403,18 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
     let got = false;       // 是否已收到 token 帧（= 服务端已开始交付，本轮 LLM 已计费）
     let last = '';         // 最近一帧累计文本（流中断时保留已到内容）
+    // 回合结束拉一次 /api/state：批次管理（建批/暂停/恢复/改折扣…）由后端在本轮消息里处理，
+    // campaigns/blackout/global_paused 只有这里能刷新（对话是驾驶舱，卡片不自调管理 API）
+    const refreshBatchDomain = () => { loadState().catch(() => {}); };
     try {
       const result = await streamMessage(act.id, t, (full) => { got = true; last = full; patch({ streamingText: full }); });
       finalize(result);
+      refreshBatchDomain();
     } catch {
       if (got) {
         // 已收到部分内容：服务端已完成并落库，不再降级重发（避免二次计费 + 重复回复），保留已到文本
         finalize({ reply: last });
+        refreshBatchDomain();
         toast_('网络中断，以上为已接收到的部分回复');
         return;
       }
@@ -382,12 +425,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         });
         if (r.error) { toast_(r.error); patch({ streaming: false, streamingText: '' }); return; }
         finalize(r);
+        refreshBatchDomain();
       } catch (e: any) {
         toast_('发送失败：' + (e?.message || e));
         patch({ streaming: false, streamingText: '' });
       }
     }
-  }, [state.act, state.streaming, patch, ensureAct, toast_]);
+  }, [state.act, state.streaming, patch, ensureAct, toast_, loadState]);
 
   // —— 模式切换 ——
   const setMode = useCallback(async (m: Mode) => {
@@ -413,7 +457,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 重置 ——
   const resetData = useCallback(async () => {
     await api('/api/reset', { method: 'POST' });
-    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [], confirmState: null, confirmFailed: null });
+    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [], confirmState: null, confirmFailed: null, pendingBatches: [] });
     await loadState();
     await ensureAct();
     toast_('数据已重置');
@@ -464,6 +508,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       me: null, act: null, acts: [], drafts: [], audience: [], opportunities: null,
       planPushed: false, planShown: null, lastSent: null, chips: [],
       confirmState: null, confirmFailed: null,
+      campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],   // 批次域属账号数据，登出一并清空
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER, drawerAud: null, historyOpen: false,
     });
     refreshMe();
@@ -493,6 +538,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     patch({
       act, acts: [act, ...state.acts], planPushed: false, planShown: null, activeTab: 'chat',
       confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
+      pendingBatches: [],   // 新会话无待确认批次
       chatInput: aud ? `帮我挽回 ${aud.intent || ''} 的人，弃购额约 ¥${+aud.abandoned_value || 0}` : '',
       chatPlaceholder: CHAT_PLACEHOLDER,
     });

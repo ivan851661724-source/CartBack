@@ -6,9 +6,9 @@ import { TAB_LABELS } from '@/lib/constants';
 import { filledCount, progressText, progressTail } from '@/lib/needs';
 import { initial } from '@/lib/format';
 
-/** 顶栏：logo / 面包屑 / needs 进度提示 / 引擎徽标 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
+/** 顶栏：logo / 面包屑 / needs 进度提示 / 停发徽标 / 引擎徽标 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
-  const { status, act, me, drafts, engine, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle } = useApp();
+  const { status, act, me, drafts, engine, global_paused, blackout, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle } = useApp();
   const real = status?.mode === 'real';
   // needs 进度：数字 n/4 全屏仅此处（HintPill）出现；槽位状态一律走 needs.ts 助手
   const filled = filledCount(act?.needs);
@@ -16,6 +16,14 @@ export default function Topbar() {
 
   // 引擎健康态（done 帧与 GET /api/state 更新；缺省 online）：degraded 时提示去设置页检查模型 Key
   const degraded = engine === 'degraded';
+
+  // Wave3 停发徽标（PRD I2「看得见才不会忘」）：全局停发（红）/ 停发日历命中（橙）常驻顶栏，
+  // 两者并存时都显示；解除方式只有对话里明说（title 提示），顶栏不给解除按钮（防误触恢复发送）。
+  const paused = Boolean(global_paused);
+  const bo = blackout && blackout.active ? blackout : null;
+  // 徽标文案取第一个命中区间：停发日历 · {label} {from}~{to}
+  const boRange = bo?.ranges?.[0];
+  const boLabel = [boRange?.label, boRange?.from && boRange?.to ? `${boRange.from}~${boRange.to}` : ''].filter(Boolean).join(' ');
 
   // 引导风格：demo 由 GuideOverlay 接管，顶栏 HintPill 仅在非引导态显示 needs 进度；
   //            safe 由顶栏 HintPill 串联引导（状态感知文案，手动下一步）。
@@ -85,6 +93,19 @@ export default function Topbar() {
       )}
 
       <span className="spacer" />
+      {/* 停发徽标（常驻）：全局停发红 / 停发日历橙，位于引擎徽标旁；点击提示解除方式（对话里明说） */}
+      {paused && (
+        <span className="pause-pill" title="全局停发生效中：所有批次暂停发送。对话里说『恢复吧』/『撤掉停发』可解除">
+          <span className="dot" />
+          全局停发中
+        </span>
+      )}
+      {bo && (
+        <span className="blackout-pill" title={`停发日历生效中${boLabel ? `（${boLabel}）` : ''}：命中区间内批次顺延。对话里说『恢复吧』/『撤掉停发』可解除`}>
+          <span className="dot" />
+          停发日历{boLabel ? ` · ${boLabel}` : ''}
+        </span>
+      )}
       {/* 引擎徽标：在线（绿）/ 降级模式（橙，title 引导去设置页检查模型 Key） */}
       <span
         className={`engine-pill${degraded ? ' degraded' : ''}`}

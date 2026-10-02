@@ -101,6 +101,13 @@ input,textarea{font-family:inherit}
 .engine-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg)}
 .engine-pill.degraded{background:var(--warn-bg);color:var(--warn2);border-color:var(--warn-line)}
 .engine-pill.degraded .dot{background:var(--warn);box-shadow:0 0 0 3px rgba(217,119,6,.15)}
+/* 停发徽标（Wave3 I2「看得见才不会忘」）：全局停发红 / 停发日历橙，常驻顶栏引擎徽标旁，两者可并存 */
+.pause-pill{display:flex;align-items:center;gap:6px;background:var(--danger-bg);color:var(--danger);
+  font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;border:.5px solid #F5B8B8;flex-shrink:0;white-space:nowrap}
+.pause-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--danger);box-shadow:0 0 0 3px rgba(220,38,38,.15)}
+.blackout-pill{display:flex;align-items:center;gap:6px;background:var(--warn-bg);color:var(--warn2);
+  font-size:11px;font-weight:700;padding:4px 10px;border-radius:999px;border:.5px solid var(--warn-line);flex-shrink:0;white-space:nowrap}
+.blackout-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--warn);box-shadow:0 0 0 3px rgba(217,119,6,.15)}
 /* 顶部进度提示条 */
 .hint-pill{display:flex;align-items:center;gap:9px;background:var(--card);border-radius:10px;
   outline:2.5px solid rgba(255,127,77,.45);outline-offset:-2.5px;padding:4px 6px 4px 11px;max-width:640px;flex:1;min-width:0}

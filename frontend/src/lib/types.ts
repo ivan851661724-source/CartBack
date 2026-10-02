@@ -140,6 +140,51 @@ export interface PlanCard {
   locale?: string;
 }
 
+/**
+ * 批次域（Wave3，PRD：批次的管理动作全部在对话里完成，列表页只读展示）。
+ * 数据源：GET /api/state 顶层 campaigns / blackout / global_paused；管理动作经对话消息驱动，
+ * 后端处理完成后由下一轮 loadState 刷新（前端除暂停/恢复快捷按钮发消息外，不调批次管理 API）。
+ */
+
+/** 批次六态：草稿灰 / 排队蓝 / 发送中绿 / 已暂停橙 / 已完成黑 / 已冻结红 */
+export type CampaignStatus = 'draft' | 'scheduled' | 'running' | 'paused' | 'done' | 'frozen';
+
+/** 一个发送批次（与 act 关联：campaign.act_id === act.id 时在对话流并列展示） */
+export interface Campaign {
+  id: string;
+  act_id: string;
+  name: string;            // 如 "A 加购未付"（快捷按钮取首词拼「A 批次暂停」消息）
+  audience_desc: string;   // 人群一句话
+  status: CampaignStatus;
+  discount: { text: string; code: string | null; code_status: CodeStatus };
+  reach_count: number;     // 预计触达
+  sent_count: number;      // 已发
+  pending_count: number;   // 未发
+  holdout_count: number;   // 对照组冻结
+  excluded: Array<{ reason: string; count: number }>;   // 自动排除摘要（已下单/退信等）
+  stats: { opened: number; clicked: number; recovered: number; net: number };
+  scheduled_at?: string | number;
+  resume_note?: string;    // 顺延/恢复说明（如「黑五已过，已恢复排程」）
+  created_at?: string | number;
+}
+
+/** 停发日历（blackout）：active=有区间命中当前；ranges 为全部区间（label 如「黑五」） */
+export interface BlackoutRange { from: string; to: string; label: string }
+
+export interface Blackout {
+  active: boolean;
+  ranges: BlackoutRange[];
+}
+
+/** done 帧 batches：agent 提出的建批方案（待用户确认，尚未真正创建）。
+ * 与 chips 同生命周期：随下一条用户消息 / 切会话清空；确认后由 /api/state 的 campaigns 承接。 */
+export interface BatchPreview {
+  name: string;
+  audience_desc: string;
+  offer_text: string;
+  reach_count: number;
+}
+
 /** 单条对话消息 */
 export interface Message {
   role: 'user' | 'assistant';

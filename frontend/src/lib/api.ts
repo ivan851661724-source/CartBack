@@ -7,7 +7,7 @@
  *
  * React 文本默认转义，来自后端/LLM/CSV 的字符串直接 {value}，无需 esc()。
  */
-import type { Act, Chips, Checklist, Engine, PlanCard, Stage, Needs } from './types';
+import type { Act, BatchPreview, Chips, Checklist, Engine, PlanCard, Stage, Needs } from './types';
 
 /** 本地令牌（bootstrap 下发；与 cb_session cookie 并存，cookie 优先鉴权） */
 let authToken: string | null = null;
@@ -47,6 +47,7 @@ export interface StreamDone {
   planCard?: PlanCard | null;
   engine?: Engine;   // 引擎健康态（旧 done 帧无此字段 → undefined，由调用方保持现值）
   chips?: Chips;     // 回复快捷 chips，针对最新一条 agent 回复；[] 或缺省 = 无 chips
+  batches?: BatchPreview[];  // Wave3：agent 提出的建批方案（待确认，尚未创建）；缺省 = 本轮无待确认批次
 }
 
 /**

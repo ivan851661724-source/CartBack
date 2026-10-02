@@ -2,11 +2,12 @@
 
 import { useApp } from '@/state/AppProvider';
 import { Mail, ReachCheck, Arrow } from '@/components/ui/icons';
+import { BatchStrip } from '@/components/chat/BatchCard';
 import MailCard from './MailCard';
 
-/** 邮件配置视图：统计条 + 卡片网格 —— 对应 flow.html #view-mail + app.js renderDrafts */
+/** 邮件配置视图：统计条 + 只读批次条 + 卡片网格 —— 对应 flow.html #view-mail + app.js renderDrafts */
 export default function MailView() {
-  const { drafts, setEditingDraft, setEditOpen, draftGenerating, sendDraft, deleteDraft } = useApp();
+  const { drafts, campaigns, setEditingDraft, setEditOpen, draftGenerating, sendDraft, deleteDraft } = useApp();
   const count = drafts.length;
   const reach = drafts.reduce((s, d) => s + (d.matchedCount || 0), 0);
   const gmv = drafts.reduce((s, d) => s + (+d.estGmv || 0), 0).toFixed(0);
@@ -33,6 +34,8 @@ export default function MailView() {
           <div><div className="s-n num brand">¥{gmv}</div><div className="s-l">已捞回 · 预估</div></div>
         </div>
       </div>
+      {/* 只读批次条（Wave3 Z3）：批次列表页只读展示（名称/状态/已发未发），管理动作在对话里完成 */}
+      <BatchStrip campaigns={campaigns} />
       <div className="mail-grid">
         {draftGenerating && (
           <div className="mail-card generating-card" aria-busy="true">

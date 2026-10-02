@@ -11,6 +11,8 @@ import MessageBubble from './MessageBubble';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
 import PlanCardView from './PlanCard';
+import BatchCard from './BatchCard';
+import type { BatchPreview } from '@/lib/types';
 
 const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时机…';
 
@@ -23,6 +25,7 @@ export default function ChatView() {
     setDraftGenerating, toast_,
     confirmState, confirmFailed, confirmBusy, confirmPlan,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
+    campaigns, pendingBatches,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -44,6 +47,8 @@ export default function ChatView() {
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
   );
+  // Wave3 批次域：本会话关联的正式批次（campaign.act_id === act.id）→ 对话流内并列批次状态卡
+  const actCampaigns = campaigns.filter((c) => c.act_id === act?.id);
 
   // ② 受众圈选条件预览（确认卡核对用；与发送端 /api/draft 同口径）
   const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
@@ -57,11 +62,11 @@ export default function ChatView() {
     return () => { alive = false; };
   }, [planShown, planAudience]);
 
-  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现）
+  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现 / 待确认批次与批次卡出现）
   useEffect(() => {
     const el = areaRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed]);
+  }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed, pendingBatches.length, actCampaigns.length]);
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
@@ -205,6 +210,16 @@ export default function ChatView() {
               </div>
             )}
 
+            {/* 待确认批次卡组（Wave3 Z1 逐批确认）：done 帧 batches 存在时在最新 agent 回复下纵向渲染，
+                每批一张虚线边框小卡 +「待确认」角标（区别于已创建批次的实线 BatchCard）。
+                agent 提出建批方案但尚未创建——用户点 chips「确认建批」或回复确认语后后端才真正建批，
+                本组卡随新消息清空，正式批次由 /api/state 的 campaigns 承接（下方批次状态卡）。 */}
+            {!streaming && pendingBatches.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8, margin: '10px 0 4px' }}>
+                {pendingBatches.map((b, i) => <PendingBatchCard key={`${i}-${b.name}`} b={b} />)}
+              </div>
+            )}
+
             {/* 确认卡：渲染只由数据驱动（planShown='confirm' + 后端 planCard）。
                 曾经 demo 模式要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
                 计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
@@ -283,6 +298,10 @@ export default function ChatView() {
             {planShown === 'sent' && lastSent && (
               <SentBanner res={lastSent.res} draft={lastSent.draft} onSeeFlow={() => switchTab('data')} />
             )}
+
+            {/* 批次状态卡（Wave3 Z3）：本会话关联批次（campaign.act_id === act.id）在对话流内并列展示，
+                暂停/恢复等管理动作走卡上快捷按钮（发对应对话消息），后端处理完由回合末 loadState 刷新六态。 */}
+            {actCampaigns.map((c) => <BatchCard key={c.id} c={c} />)}
           </div>
 
           <div data-guide-target="guide-compose" style={{display:'flex',flexDirection:'column',flexShrink:0}}>
@@ -392,6 +411,34 @@ export default function ChatView() {
             )}
           </aside>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 待确认批次小卡（Wave3 Z1）：agent 提出的建批方案（done 帧 batches，尚未创建）。
+ * 虚线边框 +「待确认」角标与已创建批次的实线 BatchCard 区分；确认动作走 chips
+ * （后端下发「确认建批」/「改一下」），卡片本身无按钮、不可点。
+ */
+function PendingBatchCard({ b }: { b: BatchPreview }) {
+  return (
+    <div style={{
+      position: 'relative', background: 'var(--bg-input)', border: '1.5px dashed var(--line)',
+      borderRadius: 12, padding: '12px 14px', margin: '0 16px',
+    }}>
+      <span style={{
+        position: 'absolute', top: -9, right: 12,
+        background: '#fff', border: '.5px solid var(--warn-line)', color: 'var(--warn2)',
+        borderRadius: 999, padding: '1px 8px', fontSize: 10.5, fontWeight: 700,
+      }}>待确认</span>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>📦 {b.name}</span>
+        <span style={{ fontSize: 12, color: 'var(--muted)' }}>预计触达 <b style={{ color: 'var(--text)' }}>{b.reach_count || 0}</b> 人</span>
+      </div>
+      <div style={{ marginTop: 5, fontSize: 12.5, color: 'var(--muted)', lineHeight: 1.6, display: 'flex', flexDirection: 'column', gap: 2 }}>
+        {b.audience_desc && <span>人群：{b.audience_desc}</span>}
+        {b.offer_text && <span>优惠：{b.offer_text}</span>}
       </div>
     </div>
   );
