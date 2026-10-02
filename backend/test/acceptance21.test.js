@@ -198,7 +198,7 @@ test('剧本 #13 降级补测：断开 LLM 重放 #1-#10 输入 —— 状态机
   assert.equal(lastResult.planCard, null, '4/4 时不出 planCard');
   assert.ok(/确认|核对|方案/.test(lastResult.reply || ''), '降级收口仍引导确认（不空转）');
   // 四槽语义抽查：降级词表抽取在重放过程中接住了四槽（原话为准，值随输入演进）
-  assert.ok(acc.slotText(act.needs.audience).includes('加购'), 'audience 已采集');
+  assert.ok(acc.slotText(act.needs.audience), 'audience 已采集（p02 人群画像原话采集，p13 二次采集走冲突保护不覆盖）');
   assert.ok(acc.slotText(act.needs.reason), 'reason 已采集');
   assert.equal(acc.slotText(act.needs.offer), '10% off', 'offer 已采集（数值+单位）');
 });

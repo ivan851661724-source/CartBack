@@ -129,16 +129,27 @@ function extractNeeds(text) {
   else if (/新客|新人|新用户/.test(tAud)) out.audience = '新客';
   // 收紧：裸「都/大家/所有」误伤率高（如"客人基本都是欧美的"），要求明确的人群指称才兜底
   else if (/全部(客户|老客|客人|人群)|所有(客户|客人|老客|人)|所有流失/.test(t)) out.audience = '全部流失人群';
+  // 人群画像兜底（PRD C1 同义触发词：人群词+年龄段）：「25-40 岁的美国女性」类原话截取入槽——
+  // 在线模型漏交 slot_update 时的词表护栏（真模型 GUI 联调实测模型偶发漏交）
+  else if (/\d{1,3}\s*[-~到至]\s*\d{1,3}\s*岁/.test(tAud) && /女|男|人|客|妈/.test(tAud)) {
+    const dm = tAud.match(/[\d一二两三]{1,3}\s*[-~到至]\s*[\d一二两三]{1,3}\s*岁[^，。；！？、]*/);
+    if (dm) out.audience = dm[0].trim();
+  }
   // reason（中英文双匹配；旧 pain 槽）
   if (!out.reason) {
-    if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.reason = '太久没动静、快被遗忘';
+    // 「忘记结账」是 reason 选项的用户原话（chips 文案/口语）：整体采集并从文本消费，
+    // 防止残词「结账」再误触发 goal 罐头（真模型 GUI 联调 Bug-1 实测：一句 chip 填出两个编造槽）
+    if (/忘(了|记)?结账/.test(t)) { out.reason = '忘记结账'; t = t.replace(/忘(了|记)?结账/g, ' '); }
+    else if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.reason = '太久没动静、快被遗忘';
     else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.reason = '可能被竞品勾走';
     else if (/运费太贵|运费贵|运费高|运费偏贵|shipping.*(expensive|cost|price)|too expensive|high? cost/i.test(t)) out.reason = '嫌运费贵、临门犹豫';
     else if (/贵|价格|预算|划算|expensive|price|cost|budget/i.test(t)) out.reason = '觉得贵、犹豫价格';
     else if (/犹豫|纠结|再想想|考虑|hesitat|unsure|thinking/i.test(t)) out.reason = '还在犹豫';
   }
-  // goal（中英文双匹配）
-  if (/付款|付了款|付钱|结账|结算|结清|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
+  // goal（中英文双匹配）。PRD C4：禁止罐头默认值、宁缺不编——裸动词「付款/结账/结算」
+  // 撤出匹配（GUI 联调 Bug-1：chip 文案「忘记结账」的「结账」曾把用户没说的 goal 填成罐头），
+  // 只认完成式意图语境；降级路径抓不到就留空等 B4 追问
+  if (/完成付款|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
   else if (/复购|再买|再下一单|回购|reorder|buy\s+again|repeat\s+purchase|repeat\s+order/i.test(t)) out.goal = '促成复购 / 再下一单';
   else if (/回流|回来|唤?醒|召回|拉回/.test(t)) out.goal = '唤醒回流';
   else if (/转化|成交|下单|购买/.test(t)) out.goal = '提升到转化 / 成交';

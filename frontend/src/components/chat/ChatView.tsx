@@ -276,7 +276,7 @@ export default function ChatView() {
                     <div style={{ color: 'var(--muted)' }}>你说的素材都收好了：</div>
                     {(act!.memory!.extras || []).map((ex, i) => (
                       <div key={`${ex.key}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
-                        <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{ex.key === 'brand' ? '品牌名' : ex.key}</span>
+                        <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{ex.key === 'brand' ? '品牌名' : ex.key === 'category' ? '品类' : ex.key === 'aov' ? '客单价' : ex.key}</span>
                         <span style={{ textAlign: 'right', color: 'var(--text)' }}>{needsValue((ex as { value: unknown }).value) || '—'}</span>
                       </div>
                     ))}

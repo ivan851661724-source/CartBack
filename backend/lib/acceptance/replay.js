@@ -281,7 +281,7 @@ const PER_TURN = {
   },
   p04(a, r) {
     const acc = require('./assert');
-    assert.equal(acc.slotText(a.needs.audience), '25-40岁美国女性', 'p04 audience 不被「年轻人」覆盖');
+    assert.ok(acc.slotText(a.needs.audience).includes('25') && acc.slotText(a.needs.audience).includes('美国女性'), 'p04 audience 不被「年轻人」覆盖（kw 原话采集：25 到 40 岁的美国女性）');
     assert.equal(a.needs.audience.source, 'explicit', 'p04 audience 保持 explicit');
     assert.deepEqual(r.chips, ['18-24', '25-34', '维持当前年龄定位'], 'p04 chips=冲突澄清三项');
     assert.equal(r.askedSlot, 'audience', 'p04 追问槽=audience');
