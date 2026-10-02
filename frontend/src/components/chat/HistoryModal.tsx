@@ -3,10 +3,11 @@
 import { useApp } from '@/state/AppProvider';
 import Modal from '@/components/ui/Modal';
 import { Arrow } from '@/components/ui/icons';
+import { slotStatusText } from '@/lib/needs';
 import type { Act } from '@/lib/types';
 
 const STAGE_LABEL: Record<string, string> = {
-  S0: '刚开聊', S1: '收集中', S2: '收集中', S3: '方案就绪',
+  S0: '刚开聊', S1: '收集中', S2: '收集中', S3: '方案就绪', closed: '已结束',
 };
 
 /** 会话摘要：首条用户消息截断；没有用户消息时用开场白兜底 */
@@ -47,7 +48,7 @@ export default function HistoryModal() {
               <span className="hist-title">{actTitle(a)}</span>
               <span className="hist-meta">
                 <em>{STAGE_LABEL[a.stage] || a.stage}</em>
-                <span>{Object.values(a.needs || {}).filter(Boolean).length}/4</span>
+                <span>{slotStatusText(a.needs)}</span>
                 <span>{timeAgo(a.updated_at || a.created_at)}</span>
               </span>
             </button>

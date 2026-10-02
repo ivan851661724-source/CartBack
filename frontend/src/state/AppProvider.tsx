@@ -9,10 +9,11 @@
 import React, { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import { api, setToken, streamMessage, createAct, ApiAuthError } from '@/lib/api';
 import type {
-  Act, Audience, Draft, Kpis, Me, Metrics, Mode, Opportunities,
+  Act, Audience, Chips, Draft, Engine, Kpis, Me, Metrics, Mode, Opportunities,
   PlanCard, SendResult, Status, TrendPoint,
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
+import { filledCount } from '@/lib/needs';
 
 export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'comp' | 'set';
 export type PlanShown = 'confirm' | 'plan' | 'sent' | null;
@@ -40,6 +41,8 @@ interface AppState {
   planShown: PlanShown;
   lastSent: { res: SendResult; draft: Draft } | null;
   me: Me | null;
+  engine: Engine;   // 引擎健康态：done 帧与 GET /api/state 都可能更新；初始缺省 online
+  chips: Chips;     // 最新一条 agent 回复的快捷 chips（发送新消息即清空；旧 done 帧无此字段则保持空）
   // UI 状态
   booted: boolean;
   activeTab: Tab;
@@ -118,6 +121,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     token: null, status: null, act: null, acts: [], kpis: null, trend: null, metrics: {},
     drafts: [], audience: [], opportunities: null,
     planPushed: false, planShown: null, lastSent: null, me: null,
+    engine: 'online', chips: [],
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
     importOpen: false, historyOpen: false, editOpen: false, draftGenerating: false, authOpen: false, authMode: 'register',
@@ -158,6 +162,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
       drafts: s.drafts, audience: s.audience,
       acts,
+      // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
+      ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
       act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
         ? { ...nextAct, planCard: state.act.planCard }
         : nextAct,
@@ -252,6 +258,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     patch({
       act: next, historyOpen: false, activeTab: 'chat',
       planPushed: false, planShown: null,
+      chips: [],   // chips 属于上一会话的最新回复，切会话即失效
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     });
   }, [state.streaming, state.act, patch, toast_]);
@@ -264,6 +271,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         act, acts: [act, ...state.acts],
         historyOpen: false, activeTab: 'chat',
         planPushed: false, planShown: null,
+        chips: [],   // 新会话无历史回复，chips 清空
         chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
       });
     } catch (e: any) {
@@ -286,9 +294,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
     const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
-    patch({ act: actWithUser, streaming: true, streamingText: '' });
+    // 发送新消息即清空上一回复的 chips（新 chips 由本轮 done 帧重新下发）
+    patch({ act: actWithUser, streaming: true, streamingText: '', chips: [] });
 
-    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null }) => {
+    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; engine?: unknown }) => {
       setState(prev => {
         if (!prev.act) return prev;
         const assistantMsg = { role: 'assistant' as const, content: r.reply };
@@ -305,8 +314,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // 光杆「好」「行」也算确认（好(的|吧|嘞)? ），但「不好/不行」不算（[^不没] 前置守卫）。
         const CONFIRM_INTENT_RE = /(^|[^不没])(可以|行(的|吧)?|好(的|吧|嘞)?|去发|发送|确认|就这样|生成|ok|yes|send)/i;
         const pushConfirm = !!r.planCard && (!prev.planPushed || CONFIRM_INTENT_RE.test(t));
+        // chips：只接受字符串数组（旧 done 帧无此字段/空数组 → 清空不渲染）
+        const chips: Chips = Array.isArray(r.chips)
+          ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string')
+          : [];
+        // engine：仅接受合法值，否则保持现值
+        const engine = r.engine === 'online' || r.engine === 'degraded' ? r.engine : prev.engine;
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
+          engine, chips,
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
           acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
@@ -365,7 +381,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 重置 ——
   const resetData = useCallback(async () => {
     await api('/api/reset', { method: 'POST' });
-    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null });
+    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [] });
     await loadState();
     await ensureAct();
     toast_('数据已重置');
@@ -414,7 +430,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     planRestoredRef.current.clear();
     patch({
       me: null, act: null, acts: [], drafts: [], audience: [], opportunities: null,
-      planPushed: false, planShown: null, lastSent: null,
+      planPushed: false, planShown: null, lastSent: null, chips: [],
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER, drawerAud: null, historyOpen: false,
     });
     refreshMe();
@@ -429,7 +445,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setState(s => {
       if (s.guideStyle !== 'safe') return s;
       if (s.onboardingSkipped || s.onboardingStep >= 4) return s;
-      const needCount = s.act?.needs ? Object.values(s.act.needs).filter(Boolean).length : 0;
+      const needCount = filledCount(s.act?.needs);
       const planReady = needCount >= 4 || Boolean(s.act?.planCard);
       const hasDraft = s.drafts.length > 0;
       const hasSent = s.drafts.some(d => ['queued', 'sending', 'sent', 'recovering'].includes(d.status));

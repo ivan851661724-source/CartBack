@@ -6,8 +6,24 @@
 /** 运行模式 */
 export type Mode = 'demo' | 'real';
 
-/** 引导式对话 FSM 阶段（IGDE：S0→S3，逻辑不可改） */
-export type Stage = 'S0' | 'S1' | 'S2' | 'S3';
+/** 引导式对话 FSM 阶段（IGDE：S0→S3，逻辑不可改；closed = 会话已闭环结束） */
+export type Stage = 'S0' | 'S1' | 'S2' | 'S3' | 'closed';
+
+/** 引擎健康状态（GET /api/state 顶层 + SSE done 帧）：degraded = AI 未连接，走模板降级 */
+export type Engine = 'online' | 'degraded';
+
+/** 回复快捷 chips（SSE done 帧下发，针对最新一条 agent 回复；空数组 = 无 chips） */
+export type Chips = string[];
+
+/** 单个 needs 槽的值：显式/推断来源 + 采集时间（新契约三态对象） */
+export interface NeedValue {
+  value: string;
+  source: 'explicit' | 'inferred';
+  at: number;
+}
+
+/** 槽位兼容形态：新契约对象 | 旧版纯字符串（过渡期后端/历史数据） | 空 */
+export type NeedSlot = NeedValue | string | null;
 
 /** 配置状态（/api/bootstrap、/api/state 的 status；绝不含密钥明文） */
 export interface Status {
@@ -28,15 +44,23 @@ export interface Status {
   storeTypes: string[];
 }
 
-/** 静默采集的 4 项需求（IGDE 核心 IP：audience/pain/goal/offer） */
+/** 静默采集的 4 项需求（IGDE 核心 IP：audience/reason/goal/offer），每槽 null | 对象（兼容旧字符串） */
 export interface Needs {
-  audience?: string;
-  pain?: string;
-  goal?: string;
-  offer?: string;
+  audience?: NeedSlot;
+  reason?: NeedSlot;
+  goal?: NeedSlot;
+  offer?: NeedSlot;
 }
 
-/** 方案卡：信息齐了由引擎生成（pushConfirm / pushPlan 渲染） */
+/** act.memory：槽位纠正 / 主动补充 / 偏好 / 追问计数（新契约序列化，本波仅透传） */
+export interface ActMemory {
+  corrections: { slot: string; old: string; new: string; at: number }[];
+  extras: { key: string; value: string; at: number }[];
+  prefs: Record<string, unknown>;
+  ask_count: Record<string, number>;
+}
+
+/** 方案卡：信息齐了由引擎生成（pushConfirm / pushPlan 渲染）。注意：planCard 字段名后端未随 needs 改名，pain 保留 */
 export interface PlanCard {
   audience?: string;
   pain?: string;
@@ -64,6 +88,9 @@ export interface Act {
   needs: Needs;
   messages: Message[];
   planCard?: PlanCard | null;
+  memory?: ActMemory;      // 新契约：槽位纠正/补充等记忆（本波前端仅透传）
+  filled_count?: number;   // 新契约：已填槽数（0-4；前端以 filledCount(needs) 实时计算为准）
+  code_status?: string;    // 新契约：折扣码状态（本波恒 "none"，忽略）
   created_at?: number;
   updated_at?: number;
 }

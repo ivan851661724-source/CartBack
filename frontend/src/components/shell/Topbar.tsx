@@ -2,14 +2,20 @@
 
 import { useState } from 'react';
 import { useApp } from '@/state/AppProvider';
-import { FIELDS, TAB_LABELS } from '@/lib/constants';
+import { TAB_LABELS } from '@/lib/constants';
+import { filledCount, progressText, progressTail } from '@/lib/needs';
 import { initial } from '@/lib/format';
 
-/** 顶栏：logo / 面包屑 / needs 进度提示 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
+/** 顶栏：logo / 面包屑 / needs 进度提示 / 引擎徽标 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
-  const { status, act, me, drafts, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle } = useApp();
+  const { status, act, me, drafts, engine, switchTab, setAuthOpen, setAuthMode, authLogout, resetData, onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle } = useApp();
   const real = status?.mode === 'real';
-  const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
+  // needs 进度：数字 n/4 全屏仅此处（HintPill）出现；槽位状态一律走 needs.ts 助手
+  const filled = filledCount(act?.needs);
+  const progressFull = progressText(act?.needs);
+
+  // 引擎健康态（done 帧与 GET /api/state 更新；缺省 online）：degraded 时提示去设置页检查模型 Key
+  const degraded = engine === 'degraded';
 
   // 引导风格：demo 由 GuideOverlay 接管，顶栏 HintPill 仅在非引导态显示 needs 进度；
   //            safe 由顶栏 HintPill 串联引导（状态感知文案，手动下一步）。
@@ -31,16 +37,13 @@ export default function Topbar() {
       : '下一步：去「邮件配置」核对草稿后点「发送」。',
   };
 
-  const needsText = n === 4
-    ? '信息齐了！看一下对话里的确认卡，点「可以，去发」就能生成邮件方案。'
-    : n === 0
-      ? '跟助手聊聊想挽回谁、为啥、要什么结果，信息齐了自动出方案。'
-      : `已收集 ${n} 项，继续聊（还差：${FIELDS.filter(([k]) => !(act?.needs?.[k])).map(([, l]) => l).join('、')}）`;
+  // 非引导态：任务式进度文案（progressText 去数字前缀版作正文，完整全文放 title；数字由 hp-n 承担，避免重复）
+  const needsTail = progressTail(act?.needs);
 
   // demo：非引导态显示 needs 进度；safe：引导态显示状态感知文案、否则 needs 进度
   const hpText = (!isDemoGuide && showOnboarding)
     ? (SAFE_ONBOARDING_TEXTS[onboardingStep] || SAFE_ONBOARDING_TEXTS[0])
-    : needsText;
+    : needsTail;
 
   const onUser = () => {
     if (me?.user) {
@@ -66,8 +69,9 @@ export default function Topbar() {
 
       {showHint && (
         <HintPill
-          n={(!isDemoGuide && showOnboarding) ? onboardingStep + 1 : n}
+          n={filled}
           text={hpText}
+          fullText={progressFull}
           onboarding={!isDemoGuide && showOnboarding}
           nextLabel={isLastStep ? '完成' : '下一步 →'}
           onNext={() => {
@@ -81,6 +85,14 @@ export default function Topbar() {
       )}
 
       <span className="spacer" />
+      {/* 引擎徽标：在线（绿）/ 降级模式（橙，title 引导去设置页检查模型 Key） */}
+      <span
+        className={`engine-pill${degraded ? ' degraded' : ''}`}
+        title={degraded ? 'AI 未连接：到设置 → AI 助手 检查模型 Key' : '引擎在线'}
+      >
+        <span className="dot" />
+        {degraded ? '降级模式 · AI 未连接' : '在线'}
+      </span>
       <span className={`mode-pill${real ? ' real' : ''}`}>{real ? '真实' : '演示'}</span>
       <button className="tbtn" onClick={onUser} title={me?.user ? (me.user.name || me.user.email) : ''}>
         {me?.user ? '登出' : '登录'}
@@ -99,8 +111,12 @@ export default function Topbar() {
   );
 }
 
-/** needs 进度提示条（可收起 / 引导模式） */
-function HintPill({ n, text, onboarding, nextLabel, onNext, onSkip }: { n: number; text: string; onboarding?: boolean; nextLabel?: string; onNext?: () => void; onSkip?: () => void }) {
+/**
+ * needs 进度提示条（可收起 / 引导模式）。
+ * 数字 n/4 全屏唯一出现处：hp-n 一个元素（收起态与展开态互斥，各自只出现一次）；
+ * 展开态正文为任务式槽位状态（progressTail），完整全文放 title/aria。
+ */
+function HintPill({ n, text, fullText, onboarding, nextLabel, onNext, onSkip }: { n: number; text: string; fullText: string; onboarding?: boolean; nextLabel?: string; onNext?: () => void; onSkip?: () => void }) {
   const [collapsed, setCollapsed] = useState(false);
   if (collapsed) {
     return (
@@ -108,7 +124,7 @@ function HintPill({ n, text, onboarding, nextLabel, onNext, onSkip }: { n: numbe
         type="button"
         className="hint-pill is-collapsed"
         aria-expanded="false"
-        aria-label={`助手进度 ${n}/4，展开提示`}
+        aria-label={`助手进度：${fullText}`}
         onClick={() => setCollapsed(false)}
       >
         <span className="hp-n"><b>{n}</b><small>/4</small></span>
@@ -118,7 +134,7 @@ function HintPill({ n, text, onboarding, nextLabel, onNext, onSkip }: { n: numbe
     );
   }
   return (
-    <div className="hint-pill" aria-label={`助手进度 ${n}/4`}>
+    <div className="hint-pill" aria-label={`助手进度：${fullText}`} title={fullText}>
       <span className="hp-n"><b>{n}</b><small>/4</small></span>
       <span className="hp-t">{text}</span>
       <span className="hp-actions">

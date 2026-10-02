@@ -12,7 +12,8 @@ export default function EmailConfigPanel() {
   if (!card || planShown !== 'plan') return null;
 
   const rows = FIELDS.map(([k, label]) => {
-    const v = (k === 'offer' ? (card.discount || card.offer) : (card as any)[k]) || '';
+    // needs 槽位已随后端契约 pain→reason；planCard 字段名未改名，reason 槽读 planCard.pain
+    const v = (k === 'offer' ? (card.discount || card.offer) : k === 'reason' ? (card as any).pain : (card as any)[k]) || '';
     return (
       <div className="ec-row" key={k}>
         <span className="ec-k">{label}</span>

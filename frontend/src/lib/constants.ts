@@ -2,10 +2,10 @@
  * CartBack v3 前端常量与纯函数 —— 1:1 移植自 app.js 顶部（与引擎 extractNeeds / server matchAudienceByDesc 口径对齐）。
  */
 
-/** 4 项需求字段：[key, 中文标签]（IGDE 静默采集） */
+/** 4 项需求字段：[key, 中文标签]（IGDE 静默采集；槽位名随后端契约 pain→reason） */
 export const FIELDS: [keyof import('./types').Needs, string][] = [
   ['audience', '针对谁'],
-  ['pain', '为什么挽回'],
+  ['reason', '为什么挽回'],
   ['goal', '要什么结果'],
   ['offer', '给什么钩子'],
 ];
@@ -21,7 +21,7 @@ export const BRAND_POINTS: { key: string; label: string; msg: string; val: strin
   { key: 'aov', label: '客单价', msg: '客单价大概 30-50 美元，手机壳为主', val: '$30-50' },
   { key: 'sendTime', label: '发送时段', msg: '我想在晚上 8 点发送挽回邮件', val: '20:00' },
   { key: 'audience', label: '目标受众', msg: '我要挽回加购未付的客户，主要是 25-35 岁年轻人', val: '加购未付 · 25-35岁' },
-  { key: 'pain', label: '挽回原因', msg: '他们加购了但没付款，可能是价格或运费问题', val: '价格/运费阻碍' },
+  { key: 'reason', label: '挽回原因', msg: '他们加购了但没付款，可能是价格或运费问题', val: '价格/运费阻碍' },
   { key: 'discount', label: '折扣力度', msg: '我想给 8 折优惠，再加免邮费', val: '8折 + 免邮' },
   { key: 'product', label: '产品特色', msg: '我们手机壳主打防摔设计，有 50 多种图案可选', val: '防摔 · 50+图案' },
   { key: 'goal', label: '营销目标', msg: '希望他们回来完成购买，顺便看看新品', val: '回访复购' },
@@ -52,6 +52,7 @@ export const STAGE_TXT: Record<string, string> = {
   S1: 'S1 澄清',
   S2: 'S2 对齐',
   S3: 'S3 执行',
+  closed: '已结束',
 };
 
 export const CHAT_PLACEHOLDER = '说清楚你想挽回谁、为啥、要什么结果…';

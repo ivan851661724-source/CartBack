@@ -95,6 +95,12 @@ input,textarea{font-family:inherit}
 .mode-pill{display:flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand-deep);
   font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;border:.5px solid rgba(255,127,77,.25);flex-shrink:0}
 .mode-pill.real{background:var(--ok-bg);color:var(--ok2);border-color:var(--ok-line)}
+/* 引擎健康徽标（Topbar，mode-pill 旁）：online 绿 / degraded 橙 */
+.engine-pill{display:flex;align-items:center;gap:6px;background:var(--ok-bg2);color:var(--ok2);
+  font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;border:.5px solid var(--ok-line);flex-shrink:0;white-space:nowrap}
+.engine-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg)}
+.engine-pill.degraded{background:var(--warn-bg);color:var(--warn2);border-color:var(--warn-line)}
+.engine-pill.degraded .dot{background:var(--warn);box-shadow:0 0 0 3px rgba(217,119,6,.15)}
 /* 顶部进度提示条 */
 .hint-pill{display:flex;align-items:center;gap:9px;background:var(--card);border-radius:10px;
   outline:2.5px solid rgba(255,127,77,.45);outline-offset:-2.5px;padding:4px 6px 4px 11px;max-width:640px;flex:1;min-width:0}

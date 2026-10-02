@@ -4,11 +4,10 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
 import { BRAND_POINTS, INTENT_POINTS } from '@/lib/constants';
+import { filledCount, needsValue, needsSource } from '@/lib/needs';
 import { api } from '@/lib/api';
 import type { Draft } from '@/lib/types';
 import MessageBubble from './MessageBubble';
-import ConfirmCard from './ConfirmCard';
-import PlanCardView from './PlanCardView';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
 
@@ -18,8 +17,8 @@ const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时�
 export default function ChatView() {
   const {
     act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
-    chatInput, chatPlaceholder, sendMsg, setChatInput, setChatPlaceholder,
-    setPlanShown, setPlanPushed, confirmSendPlan, createCardDraft, switchTab, setHistoryOpen, loadState,
+    chatInput, chatPlaceholder, chips, sendMsg, setChatInput, setChatPlaceholder,
+    setPlanShown, setPlanPushed, createCardDraft, switchTab, setHistoryOpen, loadState,
     setEditingDraft, setEditOpen, setDraftGenerating, toast_,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
   } = useApp();
@@ -28,14 +27,14 @@ export default function ChatView() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [clickedChips, setClickedChips] = useState<Set<number>>(new Set());
 
-  const n = act?.needs ? (Object.values(act.needs) as string[]).filter(Boolean).length : 0;
+  const n = filledCount(act?.needs);
   const messages = act?.messages || [];
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
   // 初始态（引导期）：右侧显示需求收集 checklist；引导走完/跳过后切回机会列表
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
   // 引导风格开关：demo=硬编码品牌词+浮层引导+checklist；safe=纯意图词+顶栏串联引导
   const isDemoGuide = guideStyle === 'demo';
-  const chips = isDemoGuide ? BRAND_POINTS : INTENT_POINTS;
+  const guideChips = isDemoGuide ? BRAND_POINTS : INTENT_POINTS;
   // 本会话是否已发过邮件（确认卡据此隐藏「可以，去发」）
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
@@ -53,11 +52,11 @@ export default function ChatView() {
     return () => { alive = false; };
   }, [planShown, planAudience]);
 
-  // 自动滚到底（消息变化 / 流式 token / 卡片出现）
+  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips 出现）
   useEffect(() => {
     const el = areaRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingText, planShown, streaming]);
+  }, [messages.length, streamingText, planShown, streaming, chips]);
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
@@ -84,9 +83,20 @@ export default function ChatView() {
     if (i) { i.focus(); i.placeholder = EDIT_HINT; }
   };
   const onReconsider = () => { setPlanShown(null); setPlanPushed(false); focusInput(); setChatPlaceholder(EDIT_HINT); };
-  const onEdit = () => { focusInput(); setChatPlaceholder(EDIT_HINT); };
 
   const onSend = () => sendMsg(chatInput);
+
+  // 确认卡（新契约）：四槽优先读 act.needs（三态对象走 needsValue），planCard 字段兜底；
+  // source==='inferred' 的槽在该行显示「（我推断的，可改）」小标。
+  const confirmCard = planShown === 'confirm' && act?.planCard ? act.planCard : null;
+  const needsNow = act?.needs ?? null;
+  const confirmRaw: [string, string | undefined, boolean][] = confirmCard ? [
+    ['针对谁', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
+    ['为什么挽回', needsValue(needsNow?.reason) || confirmCard.pain, needsSource(needsNow?.reason) === 'inferred'],
+    ['要什么结果', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
+    ['给什么钩子', needsValue(needsNow?.offer) || confirmCard.discount || confirmCard.offer, needsSource(needsNow?.offer) === 'inferred'],
+  ] : [];
+  const confirmRows: [string, string, boolean][] = confirmRaw.map(([label, v, inferred]) => [label, v || '—', inferred]);
 
   return (
     <div className="view-body chat-view-body">
@@ -99,7 +109,7 @@ export default function ChatView() {
                             <span className="ch-kicker">当前会话</span>
                             <span className="ch-t">{!onboardingSkipped && onboardingStep < 4 ? '运营助手' : '挽回策略助手'}</span>
                           </div>
-                          <span className="ch-s"><span className="dot"></span><span>在线 · 已记录 {n}/4 项</span></span>
+                          <span className="ch-s"><span className="dot"></span><span>在线</span></span>
             <button
               className="btn ghost sm ch-hist"
               onClick={() => setHistoryOpen(true)}
@@ -142,17 +152,55 @@ export default function ChatView() {
               </div>
             )}
 
+            {/* 常驻回复 chips：最新一条 agent 回复的后续快捷操作。
+                来源：SSE done 帧 chips（AppProvider 存 state，发送新消息即清空）；
+                旧 done 帧无此字段 / 空数组 → 不渲染。点击 chip = 以该文案作为用户消息发送（走 sendMsg）。 */}
+            {!streaming && chips.length > 0 && (
+              <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
+                {chips.slice(0, 3).map((c, i) => (
+                  <button
+                    key={`${i}-${c}`}
+                    type="button"
+                    disabled={streaming}
+                    onClick={() => sendMsg(c)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '6px',
+                      padding: '7px 13px', borderRadius: '9px',
+                      border: '0.5px solid #DDE2E8', background: '#fff', color: 'var(--text)',
+                      fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
+                      whiteSpace: 'nowrap', transition: 'all .15s',
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = '#FF7F4D';
+                      e.currentTarget.style.background = 'var(--brand-soft)';
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = '#DDE2E8';
+                      e.currentTarget.style.background = '#fff';
+                    }}
+                  >
+                    {c}
+                  </button>
+                ))}
+              </div>
+            )}
+
             {/* 确认卡：渲染只由数据驱动（planShown='confirm' + 后端 planCard）。
                 曾经 demo 模式要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
                 计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
-            {planShown === 'confirm' && act?.planCard && (
+            {confirmCard && (
               <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>针对谁</span><span>{act.planCard.audience || '—'}</span></div>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>为什么挽回</span><span>{act.planCard.pain || '—'}</span></div>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',borderBottom:'.5px dashed #DDE2E8',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>要什么结果</span><span>{act.planCard.goal || '—'}</span></div>
-                  <div style={{display:'flex',justifyContent:'space-between',padding:'7px 0',fontSize:'13px'}}><span style={{color:'#8A95A0'}}>给什么钩子</span><span>{act.planCard.discount || act.planCard.offer || '—'}</span></div>
+                  {confirmRows.map(([label, value, inferred]) => (
+                    <div key={label} style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'12px',padding:'7px 0',borderBottom: label === '给什么钩子' ? 'none' : '.5px dashed #DDE2E8',fontSize:'13px'}}>
+                      <span style={{color:'#8A95A0',flexShrink:0}}>{label}</span>
+                      <span style={{textAlign:'right'}}>
+                        {value}
+                        {inferred && <span style={{fontSize:'11px',color:'var(--muted)',marginLeft:'6px'}}>（我推断的，可改）</span>}
+                      </span>
+                    </div>
+                  ))}
                 </div>
                 {audConditions && (
                   <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'.5px dashed #DDE2E8',fontSize:'12.5px'}}>
@@ -171,8 +219,8 @@ export default function ChatView() {
                   ) : (
                     <>
                       <button className="btn primary" onClick={async () => {
-                        const card = act.planCard;
-                        if (!card) return;
+                        const card = confirmCard;
+                        if (!card || !act) return;
                         // 不切 planShown（保留确认卡在对话流中）；跳邮件 tab + 预建草稿 + 打开预览
                         switchTab('mail');
                         setDraftGenerating(true);
@@ -193,9 +241,6 @@ export default function ChatView() {
                 </div>
               </div>
             )}
-            {planShown === 'plan' && act?.planCard && (
-              <PlanCardView card={act.planCard} onEdit={onEdit} onSend={() => confirmSendPlan(act.planCard!)} />
-            )}
             {planShown === 'sent' && lastSent && (
               <SentBanner res={lastSent.res} draft={lastSent.draft} onSeeFlow={() => switchTab('data')} />
             )}
@@ -205,7 +250,7 @@ export default function ChatView() {
           {/* 初始引导快捷描述词（与右侧 checklist 共用 BRAND_POINTS） */}
           {showOnboarding && (
             <div style={{display:'flex',gap:'8px',padding:'8px 16px',flexWrap:'wrap',flexShrink:0}}>
-              {chips.map((chip, i) => {
+              {guideChips.map((chip, i) => {
                 const clicked = clickedChips.has(i);
                 return (
                   <button
