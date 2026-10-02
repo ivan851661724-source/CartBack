@@ -9,6 +9,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const cfg = require('./config');
+const { migrateAct, mergeMonotonicAct } = require('./needs');
 
 const SCHEMA = {
   acts: {
@@ -210,16 +211,26 @@ class Store {
   _write(t, rows) { this.b.writeTable(t, rows); }
 
   // —— acts ——
-  getActs() { return this._read('acts').sort((a, b) => b.updated_at - a.updated_at); }
+  // 读取即惰性迁移（PRD v2 契约）：旧 act（needs 纯字符串 / pain 槽名 / memory 缺 extras）
+  // 在读出时统一为 {value, source, at} 三态 + pain→reason + 新 memory 字段 + code_status/filled_count 兜底。
+  getActs() { return this._read('acts').map(a => migrateAct(a)).sort((a, b) => b.updated_at - a.updated_at); }
   getActsByUser(userId) {   // 整改 1c：按归属过滤；兼容历史 null（本地模式旧数据所有账号可见，认领语义）
     return this._read('acts')
       .filter(a => !a.user_id || a.user_id === userId)
+      .map(a => migrateAct(a))
       .sort((a, b) => b.updated_at - a.updated_at);
   }
-  getAct(id) { return this._read('acts').find(a => a.id === id) || null; }
+  getAct(id) {
+    const act = this._read('acts').find(a => a.id === id) || null;
+    return act ? migrateAct(act) : null;
+  }
   upsertAct(act) {
-    const rows = this._read('acts').filter(a => a.id !== act.id);
-    rows.push(act); this._write('acts', rows); return act;
+    const rows = this._read('acts');
+    const old = rows.find(a => a.id === act.id) || null;
+    // PRD v2：写入前迁移新契约 + filled_count 单调不减（旧值已填而新值缺失的槽回填旧值）
+    mergeMonotonicAct(act, old);
+    const next = rows.filter(a => a.id !== act.id);
+    next.push(act); this._write('acts', next); return act;
   }
   deleteAct(id) {
     this._write('acts', this._read('acts').filter(a => a.id !== id));

@@ -1,12 +1,19 @@
 'use strict';
 /**
- * IGDE 引导式对话引擎（PRD §4 / 架构 §10）
+ * IGDE 引导式对话引擎（PRD §4 / 架构 §10 / PRD v2 对话骨架）
  *
  * 核心 IP：引导用户把意图「自己说出来」并结构化，不是 AI 替用户决策，也不是翻译层。
- * - 四阶段 FSM：S0 接入 → S1 澄清 → S2 对齐 → S3 执行
- * - 意图抽取 act.needs 与话术解耦：新字段直接落库，已确认字段仅在明确纠错时更新
+ * - 四阶段 FSM：S0 接入 → S1 澄清 → S2 对齐 → S3 执行（任意态可转 closed；closed 不可再写）
+ * - 意图抽取与话术解耦：LLM 一次返回 JSON envelope {reply, restatement, slot_updates, extras, corrections}
+ * - 每轮流水线 B1-B5：
+ *     B1 提取（envelope → critic 依据校验）→ B2 合并（correction > 新值 > 同值忽略；冲突检测）
+ *   → B3 记账（先落库后回复：upsertAct 成功才允许向 SSE 写第一个 token 帧）
+ *   → B4 选问（audience > reason > offer > goal 取第一个空槽；ask_count ≥1 不得连问；
+ *     冲突澄清优先；全部问过仍缺失 → 接受 inferred 不再追问）
+ *   → B5 回复组装（inferred 必带「不对请纠正」；0 提取轮直接问缺失项；S2 引导确认）
+ * - chips 后端下发：按当前被问槽位给快捷选项（SLOT_CHIPS / CONFLICT_CHIPS）
  * - 5 层护栏 L0–L4：违规 → 重生成 1 次 + 兜底安全模板
- * - 离线降级：AI 不可用时仍能跑（桩模型 / 「发挽回吗？」一句话确认）
+ * - 离线降级：AI 不可用时仍能跑（词表桩模型 / 一句话确认），与在线路径共用同一 B2-B5
  */
 
 // 真实模型对话组装（人格系统提示词 + 多轮上下文），由 lib/llm 提供，避免引擎内重复旧提示词
@@ -18,11 +25,29 @@ const {
   normalizeAgentProfile,
   normalizeMemory
 } = require('./context');
+// PRD v2 槽位契约（唯一权威）：四槽 / 三态对象 / 迁移 / chips
+const {
+  SLOTS,
+  SLOT_CHIPS,
+  conflictChips,
+  migrateNeeds,
+  plainNeeds,
+  countFilled,
+  missingSlots,
+  inferredSlots,
+  ensureMemory
+} = require('./needs');
 // 店后台连接器：收件人 locale 归一化（邮件语种唯一权威来源）
 const { normalizeLocale } = require('./storeConnector');
 
-const NEEDED_FIELDS = ['audience', 'pain', 'goal', 'offer'];
-const FIELD_LABEL = { audience: '针对谁', pain: '为什么挽回', goal: '要什么结果', offer: '给什么钩子' };
+// 槽位优先级即数组顺序：B4 选问 audience > reason > offer > goal
+const NEEDED_FIELDS = SLOTS;
+const FIELD_LABEL = { audience: '针对谁', reason: '为什么挽回', goal: '要什么结果', offer: '给什么钩子' };
+const MAX_CORRECTIONS = 40;
+const MAX_CONFLICTS = 4;
+
+// 修正语气词（B2 冲突检测）：出现 → 新值视为明确纠正；不出现且与现值不同 → 冲突候选
+const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|改主意|应该是|说错|rather|instead|actually|correction)/i;
 
 // —— D 类（私人生活/无关话题）重定向池：引擎级双保险的话术口径（与 lib/llm.js COACH_SYSTEM_PROMPT D 类一致）——
 // 首句先「接住」用户刚说的（哪怕只是"哈哈这个我帮不上~"），再拉回邮件营销主业；不追问字段、不复读同一句。
@@ -60,12 +85,23 @@ const IDENTITY_RE = /你能干啥|你能做啥|你是谁|你是什么|你是干�
 const META_RE = /人机|机器人|是(个)?真人|自动回复|智能吗|ai\s*(吗|bot)?|是\s*ai\s*吗/i;
 
 // —— 意图抽取（桩 / 离线，关键词启发式） ——
+// 返回 {slot: 纯字符串}（旧式），由 B2 合并层统一转三态对象；pain 旧名已改为 reason。
 function extractNeeds(text) {
-  const t = (text || '').toLowerCase();
+  let t = (text || '').toLowerCase();
+  const out = {};
+  // 回归样本先行（PRD 验收 #5）：「挽回原因就盯加购未付款的」——识别挽回原因语境并剥离该短语，
+  // 防止「加购未付款」里的 加购/未付/付款 被误抽成 audience/goal（此前 pain 槽漏接的复合修复）
+  const reasonCtx = /原因|为啥|为什么|就盯|盯着/.test(t)
+    && !/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略|竞品|别家|对手|别人家|贵|价格|预算|划算|犹豫|纠结|再想想|考虑|运费/.test(t);
+  if (reasonCtx) {
+    if (/加购/.test(t)) { out.reason = '加购未付款'; t = t.replace(/加购[^\s，。、；！？]*|加购/g, ' '); }
+    else if (/弃购|未付/.test(t)) { out.reason = '下单未付'; t = t.replace(/弃购|未付/g, ' '); }
+    else if (/浏览/.test(t)) { out.reason = '浏览未买'; t = t.replace(/浏览/g, ' '); }
+    else if (/沉睡|很久没|好久没|流失/.test(t)) { out.reason = '太久没动静'; t = t.replace(/沉睡|很久没|好久没|流失/g, ' '); }
+  }
   // 目标从句（"想让他们看看新款"）里的动词会误触发 audience 抽取（实测 A03「看看」→ 浏览未买），
   // audience 判定前先剥离「想(让)他们…」类意图从句
   const tAud = t.replace(/(想|希望)(让|请)?(他们|她们|客人|客户|顾客)[^，。？!?]*/g, '');
-  const out = {};
   // audience（加购优先于「没付」，避免「加购没付」误判为弃购）
   if (/加购|购物车/.test(tAud)) out.audience = '加购未付客户';
   else if (/弃购|没付|未付|下单没|未下单/.test(tAud)) out.audience = '弃购 / 下单未付客户';
@@ -74,12 +110,14 @@ function extractNeeds(text) {
   else if (/新客|新人|新用户/.test(tAud)) out.audience = '新客';
   // 收紧：裸「都/大家/所有」误伤率高（如"客人基本都是欧美的"），要求明确的人群指称才兜底
   else if (/全部(客户|老客|客人|人群)|所有(客户|客人|老客|人)|所有流失/.test(t)) out.audience = '全部流失人群';
-  // pain（中英文双匹配）
-  if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.pain = '太久没动静、快被遗忘';
-  else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.pain = '可能被竞品勾走';
-  else if (/运费太贵|运费贵|运费高|运费偏贵|shipping.*(expensive|cost|price)|too expensive|high? cost/i.test(t)) out.pain = '嫌运费贵、临门犹豫';
-  else if (/贵|价格|预算|划算|expensive|price|cost|budget/i.test(t)) out.pain = '觉得贵、犹豫价格';
-  else if (/犹豫|纠结|再想想|考虑|hesitat|unsure|thinking/i.test(t)) out.pain = '还在犹豫';
+  // reason（中英文双匹配；旧 pain 槽）
+  if (!out.reason) {
+    if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.reason = '太久没动静、快被遗忘';
+    else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.reason = '可能被竞品勾走';
+    else if (/运费太贵|运费贵|运费高|运费偏贵|shipping.*(expensive|cost|price)|too expensive|high? cost/i.test(t)) out.reason = '嫌运费贵、临门犹豫';
+    else if (/贵|价格|预算|划算|expensive|price|cost|budget/i.test(t)) out.reason = '觉得贵、犹豫价格';
+    else if (/犹豫|纠结|再想想|考虑|hesitat|unsure|thinking/i.test(t)) out.reason = '还在犹豫';
+  }
   // goal（中英文双匹配）
   if (/付款|付了款|付钱|结账|结算|结清|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
   else if (/复购|再买|再下一单|回购|reorder|buy\s+again|repeat\s+purchase|repeat\s+order/i.test(t)) out.goal = '促成复购 / 再下一单';
@@ -102,8 +140,8 @@ function extractNeeds(text) {
   else if (/包邮|免邮/.test(t)) out.offer = '包邮'; // 明确要包邮时优先于通用「折扣」词，避免"折扣改成包邮"被误抽成折扣
   else if (/(\d+)\s*%|打折|折扣/.test(t)) {
     const m = t.match(/(\d+)\s*%/);
-    // "100% 回来下单"是数量表述不是折扣，勿误抽成 offer
-    out.offer = (m && +m[1] !== 100) ? m[1] + '%优惠' : (m ? '' : '折扣优惠');
+    // "100% 回来下单"是数量表述不是折扣，勿误抽成 offer；单位保留用户原话口径（% off）
+    out.offer = (m && +m[1] !== 100) ? m[1] + '% off' : (m ? '' : '折扣优惠');
     if (!out.offer) delete out.offer;
   }
   // 具体、低频的钩子先判（买二送一/积分），通用的「限时」兜底放最后——分支顺序即优先级
@@ -111,12 +149,31 @@ function extractNeeds(text) {
   else if (/积分/.test(t)) out.offer = /双倍/.test(t) ? '双倍积分' : '积分回馈';
   else if (/首月\s*(免费|0元|零元)/.test(t)) out.offer = '首月免费';
   else if (/限时|秒杀|紧迫|倒计时|赶紧/.test(t)) out.offer = '限时紧迫钩子';
-  else if (/送|赠|礼/.test(t)) {
+  // 「发送频率」「免送货」里的「送」不是钩子（错切回归样本）：送 前邻 发/寄/配/推 时不触发
+  else if (/(?<![发寄配推])送|赠|礼/.test(t)) {
     // 保留赠送物细节（实测 M13「送升降支架」粗抽成「赠送礼品」丢失用户指定）
-    const m = t.match(/[送赠]([一-鿿A-Za-z0-9]{1,10})/);
+    const m = t.match(/(?<![发寄配推])[送赠]([一-鿿A-Za-z0-9]{1,10})/);
     out.offer = m ? '送' + m[1].replace(/[吧呢啦哦呀了]+$/, '') : '赠送礼品';
   }
   return out;
+}
+
+// —— B1 critic 护栏：slot_update 的 value 必须在本轮用户消息原文中有语义依据 ——
+// 实现：去标点/空白归一后，value 主干字符 ≥60% 出现在原文（或 value 本身是原文子串）→ 有依据；
+// 降级词表命中的直接通过（extractNeeds(userText)[slot] 非空）。无依据 → 调用方丢弃（丢弃优先于降级 inferred）。
+function normalizeForGround(s) {
+  return String(s || '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+}
+function valueGroundedInText(value, text) {
+  const v = normalizeForGround(value);
+  const t = normalizeForGround(text);
+  if (!v || !t) return false;
+  if (t.includes(v)) return true;
+  if (v.length > t.length * 2) return false; // 值远长于原文，必无逐字依据
+  const chars = [...new Set(v)].filter(c => /[\u4e00-\u9fff a-z0-9]/i.test(c));
+  if (!chars.length) return false;
+  const hit = chars.filter(c => t.includes(c)).length / chars.length;
+  return hit >= 0.6;
 }
 
 // 判断用户这句是不是「提问 / 吐槽 / 迷茫」（非信息，先回应本身）
@@ -222,7 +279,7 @@ function looksLikeInjection(value) {
  * IGDE 引擎
  * @param {object} opts
  *   aiEnabled: boolean 是否接了真实模型
- *   callAI: async (systemPrompt, userPrompt) => {reply, needs}  真实模型适配器（可选）
+ *   callAI: async (systemPrompt, userPrompt) => envelope  真实模型适配器（可选）
  *   callCritic: async (text) => boolean  精判是否违规（可选，缺省用本地正则）
  */
 class IGDE {
@@ -237,39 +294,49 @@ class IGDE {
       : 'suspicious';
   }
 
-  /** 已确认字段默认不覆盖；只有用户明确纠错、或本轮用户原话直接命中该字段（kwTouched）时才更新。
+  /** 已确认字段默认不覆盖；只有用户明确纠错（修正语气词 + 纠错尾部指向该槽）、
+   *  或本轮用户原话直接命中该字段（kwTouched）时才更新。
    *  kwTouched：本轮关键词抽取命中的字段集合（逐字有据）——短时记忆语义 = 用户最新明确表述优先，
-   *  防止模型编造/早期值被首字段优先锁死（实测 M5 浏览未买被锁成加购未付、M8 新客被锁成老客）。 */
+   *  防止模型编造/早期值被首字段优先锁死（实测 M5 浏览未买被锁成加购未付、M8 新客被锁成老客）。
+   *  兼容入口（server preset 路径 / 外部脚本）：接受字符串或三态对象值，统一落三态契约。 */
   applyNeeds(act, extracted, userText = '', kwTouched = null) {
-    act.needs = act.needs || {};
-    const correction = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|还是|改主意|rather|instead|actually|correction)/i.test(userText);
+    const { normalizeSlot } = require('./needs');
+    act.needs = migrateNeeds(act.needs);
+    const now = Date.now();
+    const correction = CORRECTION_TONE_RE.test(userText);
     const correctionTail = correction
       ? String(userText).split(/不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|rather|instead|actually|correction/i).pop()
       : '';
     const explicitCorrection = correction ? extractNeeds(correctionTail) : {};
     if (correction && /(受众|客户|顾客|人群|这拨人)/.test(correctionTail)) explicitCorrection.audience = explicitCorrection.audience || true;
-    if (correction && /(痛点|原因|因为|为啥|为什么)/.test(correctionTail)) explicitCorrection.pain = explicitCorrection.pain || true;
+    if (correction && /(痛点|原因|因为|为啥|为什么)/.test(correctionTail)) explicitCorrection.reason = explicitCorrection.reason || true;
     if (correction && /(目标|希望|回来干啥|想让)/.test(correctionTail)) explicitCorrection.goal = explicitCorrection.goal || true;
     if (correction && /(优惠|折|券|包邮|免邮|钩子|满减|赠品|码|code)/i.test(correctionTail)) explicitCorrection.offer = explicitCorrection.offer || true;
     for (const f of NEEDED_FIELDS) {
-      if (extracted && extracted[f] != null && String(extracted[f]).trim()) {
-        // 注入防御：needs 值收口后再入库，防超长/带控制符文本把指令带进后续 prompt 与邮件插值
-        const next = clampNeedValue(extracted[f]);
-        if (next && (!act.needs[f] || act.needs[f] === next || (correction && explicitCorrection[f]) || (kwTouched && kwTouched.has(f)))) act.needs[f] = next;
+      let raw = extracted && extracted[f] != null ? extracted[f] : '';
+      if (f === 'reason' && !raw && extracted && extracted.pain != null) raw = extracted.pain; // 旧 pain 键兼容
+      const slot = normalizeSlot(raw, { source: 'explicit', at: now });
+      if (!slot) continue;
+      const value = clampNeedValue(slot.value);
+      if (!value) continue;
+      const prev = act.needs[f];
+      const same = prev && prev.value === value;
+      if (!prev || same || (correction && explicitCorrection[f]) || (kwTouched && kwTouched.has(f))) {
+        act.needs[f] = { value, source: slot.source, at: now };
       }
     }
     return act.needs;
   }
 
   missingFields(act) {
-    return NEEDED_FIELDS.filter(f => !act.needs || !act.needs[f]);
+    return missingSlots(act.needs);
   }
 
   /** 缺失字段的引导问句（教练式：问多于说、极简） */
   probeFor(field) {
     const map = {
       audience: '先说最想挽回哪拨人？弃购的、加购没付的，还是好久没来的老客？',
-      pain: '他们为啥快丢了？太久没动静、被竞品勾走，还是单纯忘了？',
+      reason: '他们为啥快丢了？太久没动静、被竞品勾走，还是单纯忘了？',
       goal: '你希望他们回来干啥？再下一单、回来逛逛，还是唤醒沉睡的？',
       offer: '想给点什么钩子？折扣、专属优惠码，还是包邮 / 限时？'
     };
@@ -305,7 +372,7 @@ class IGDE {
   _probeExample(field) {
     const map = {
       audience: '加购没付款的、浏览没买的、还是很久没来的老客',
-      pain: '忘了结账、被别家勾走、还是单纯没需求',
+      reason: '忘了结账、被别家勾走、还是单纯没需求',
       goal: '回来下单、领券复购、还是先回店铺逛逛',
       offer: '9 折、满减、还是免邮'
     };
@@ -321,15 +388,43 @@ class IGDE {
     return (x.length >= 12 && y.includes(x)) || (y.length >= 12 && x.includes(y));
   }
 
-  /** 主入口：处理一条用户消息；opts.onReplyToken：真模型首轮 coach 的 reply 增量回调
-   *  （仅乐观预览，未经护栏；权威 reply 一律以返回值为准，由交付层做 replace 校正）。 */
+  /** B4 选问（合并后状态）：audience > reason > offer > goal 取第一个空槽；
+   *  ask_count ≥1 的槽不优先（顺延下一缺失槽）；全部问过仍缺失 → 仍问第一个缺失槽（轮换说法，不编造）。 */
+  _nextProbeSlot(act) {
+    const miss = this.missingFields(act);
+    if (!miss.length) return null;
+    const ac = (act.memory && act.memory.ask_count) || {};
+    const fresh = miss.find(s => !(Number(ac[s]) > 0));
+    return fresh || miss[0];
+  }
+
+  /** B4 决策（B2 合并后调用）：冲突澄清优先于常规追问；无缺失 → 不问（转 S2 由 _advanceStage 处理） */
+  _decideQuestion(act, turnResult) {
+    const miss = this.missingFields(act);
+    if (!miss.length) return { slot: null, chips: [], kind: 'none' };
+    const newConflict = (turnResult.conflictsNew || [])[0];
+    if (newConflict) {
+      return { slot: newConflict.slot, chips: conflictChips(newConflict.slot), kind: 'conflict' };
+    }
+    const probe = this._nextProbeSlot(act);
+    return probe
+      ? { slot: probe, chips: SLOT_CHIPS[probe] || [], kind: 'probe' }
+      : { slot: null, chips: [], kind: 'none' };
+  }
+
+  /** 主入口：处理一条用户消息。
+   *  opts.onReplyToken：reply 增量回调（B3 落库成功后才冲刷 —— 严格先落库后回复，token 为乐观预览，
+   *  权威 reply 一律以返回值为准，由交付层做 replace 校正）。
+   *  opts.persist：async (act) => void —— B3 落库钩子（upsertAct），失败抛错 → 本轮不发回复。 */
   async handle(act, userText, opts = {}) {
     const guardrailHits = [];
-    act.needs = act.needs || {};
+    act.needs = migrateNeeds(act.needs);
     act.messages = act.messages || [];
     act.memory = normalizeMemory(act.memory || createEmptyMemory());
     act.summary_cursor = Number(act.summary_cursor) || 0;
     act.context_version = Number(act.context_version) || 1;
+    if (act.code_status == null) act.code_status = 'none';
+    const nowMs = Date.now();
     const runtime = {
       llmCalls: 0,
       providerRequests: 0,
@@ -340,10 +435,36 @@ class IGDE {
       memoryRejected: 0,
       profileAccepted: 0,
       profileRejected: 0,
+      slotUpdatesAccepted: 0,
+      slotUpdatesRejected: 0,
+      correctionsAdded: 0,
+      conflictsRaised: 0,
       agentProfile: normalizeAgentProfile(opts.agentProfile),
       profileChanged: false
     };
-    const beforeKeys = Object.keys(act.needs);
+    // B3 落库钩子：upsertAct 成功才允许发回复；失败 → 统一 error 帧「刚才那句我没存上，再说一次」
+    const persistFn = typeof opts.persist === 'function' ? opts.persist : null;
+    const doPersist = async () => {
+      if (!persistFn) return;
+      try { await persistFn(act); }
+      catch (e) {
+        const err = new Error('刚才那句我没存上，再说一次');
+        err.code = 'PERSIST_FAIL';
+        throw err;
+      }
+    };
+    // B3 顺序保证：LLM 流式增量先入缓冲，落库成功后才冲刷给交付层（SSE 第一个 token 帧在落库之后）
+    const tokenBuffer = [];
+    const bufferedOnReplyToken = opts.onReplyToken ? (p) => tokenBuffer.push(p) : undefined;
+
+    // —— closed 会话：不可再写（FSM 允许从任意态转 closed；收口后拒绝新输入） ——
+    if (act.stage === 'closed') {
+      return {
+        reply: '这个会话已经收尾归档啦，想再跑一轮挽回配置，开个新会话我随时在。',
+        stage: 'closed', needs: act.needs, planCard: null, guardrailHits: ['CLOSED'],
+        engine: 'degraded', chips: [], askedSlot: null
+      };
+    }
 
     // —— 边界（负空间）：仅当用户真触发越界需求才处理 ——
     //   强信号命中 → scopeBoundary 返回拒绝话术。
@@ -358,70 +479,98 @@ class IGDE {
         const reply = isSoftD
           ? this._rotateReply(act, strongDecline, D_REDIRECT_POOL)
           : strongDecline;
-        act.messages.push({ role: 'user', content: userText, ts: Date.now() });
-        act.messages.push({ role: 'assistant', content: reply, ts: Date.now() });
-        act.updated_at = Date.now();
-        return { reply, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: ['SCOPE'] };
+        act.messages.push({ role: 'user', content: userText, ts: nowMs });
+        act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
+        act.updated_at = nowMs;
+        await doPersist();
+        return { reply, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: ['SCOPE'], engine: this._engineOf(false), chips: [], askedSlot: null };
       }
       // 否则（软边界 + 有真模型）：不在此拦截，继续下沉到 _aiCoach 让模型自然处理
     }
 
-    // —— 离题 / 元问题 / 身份询问（needs 仍为空、无业务指向）：给温和、不重复的接住拉回 ——
+    // —— 离题 / 元问题 / 身份询问（四槽全空、无业务指向）：给温和、不重复的接住拉回 ——
     //    不甩死模板、不追问字段、guardrailHits 记空（非边界拒绝）；一旦有业务上下文则交给正常收集。
     const routed = this._routeOffTopic(act, userText);
     if (routed) {
       const reply = this._rotateReply(act, routed.primary, routed.pool);
-      act.messages.push({ role: 'user', content: userText, ts: Date.now() });
-      act.messages.push({ role: 'assistant', content: reply, ts: Date.now() });
-      act.updated_at = Date.now();
-      return { reply, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: [] };
+      act.messages.push({ role: 'user', content: userText, ts: nowMs });
+      act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
+      act.updated_at = nowMs;
+      await doPersist();
+      return { reply, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: [], engine: this._engineOf(false), chips: [], askedSlot: null };
     }
 
-    // —— applyNeeds 无条件第一优先级（话术解耦） ——
-    let extracted;
-    let reply = '';
-    let aiDead = false;
-    let kwTouched = null;   // 本轮用户原话逐字命中的字段（applyNeeds 覆盖许可）
+    const filledBefore = countFilled(act.needs);
+
+    // —— B1 提取：LLM envelope（在线）或词表（离线降级），统一进 B2 合并 ——
+    let env = { reply: '', slotUpdates: [], extras: [], corrections: [], restatement: [] };
     let memoryPatch = null;
     let profilePatch = null;
+    let aiDead = false;
+    let usedAI = false;
+    const preProbe = this._nextProbeSlot(act); // 提示词注入的单点追问指令（B4 预决策，合并后可能变化）
     if (this.aiEnabled && this.callAI) {
       try {
-        const r = await this._aiCoach(act, userText, runtime, opts.onReplyToken); // 一次对话同时抽取 needs + 生成话术
-        // 抽取合并：本轮用户原话关键词命中的字段以原话为准（覆盖模型编造/过期值）；模型漏抽的用关键词补缺
-        extracted = { ...(r.needs || {}) };
-        const kw = extractNeeds(userText);
-        // 问句守卫：recall 类提问（「…是多少？别记混」问号可在句中）是在查询记忆而非陈述新事实，
-        // 不得触发覆盖（实测 M8 探针问句把 offer 从「9折码」冲成「折扣优惠」、audience 冲回老客）。
-        // 含 ?/？ 或疑问词即视为问句——用户自己拿不准的问句也不构成 IGDE 拍板
-        const probeQuestion = /[?？]/.test(userText)
-          || /(多少|哪个|哪些|是不是|有没有|还记得|别记混|是多少)/.test(userText);
-        if (!probeQuestion) {
-          for (const f of NEEDED_FIELDS) {
-            if (kw[f]) { extracted[f] = kw[f]; (kwTouched || (kwTouched = new Set())).add(f); }
-          }
-        }
-        reply = r.reply;
-        memoryPatch = r.memoryPatch;
-        profilePatch = r.profilePatch;
+        env = await this._aiCoach(act, userText, runtime, bufferedOnReplyToken, preProbe);
+        memoryPatch = env.memoryPatch || null;
+        profilePatch = env.profilePatch || null;
+        usedAI = true;
       } catch (e) {
-        extracted = extractNeeds(userText); // AI 调用失败 → 离线降级（抽取走关键词启发式）
-        kwTouched = new Set(NEEDED_FIELDS.filter(f => extracted[f]));
-        aiDead = true;
+        aiDead = true; // AI 调用失败 → 离线降级（抽取走关键词启发式）
       }
-    } else {
-      extracted = extractNeeds(userText);
-      kwTouched = new Set(NEEDED_FIELDS.filter(f => extracted[f]));
     }
-    this.applyNeeds(act, extracted, userText, kwTouched);
-    // 用户明确指定的本次 offer 优先；没指定时才沿用其已确认的长期默认值。
+
+    // 词表抽取（恒算）：离线路径是唯一抽取源；在线路径作为 B1 critic 的「词表命中直通」依据 + 模型漏抽补缺
+    const kw = extractNeeds(userText);
+    // 问句守卫（仅在线路径）：recall 类提问是在查询记忆而非陈述新事实，不得触发覆盖（实测 M8）
+    const probeQuestion = /[?？]/.test(userText)
+      || /(多少|哪个|哪些|是不是|有没有|还记得|别记混|是多少)/.test(userText);
+    const kwActive = !usedAI || !probeQuestion;
+
+    // B1 critic：envelope slot_updates 逐条校验原文依据（confidence<0.6 → inferred；无依据 → 丢弃）
+    const grounded = usedAI ? this._groundSlotUpdates(env.slotUpdates, userText) : [];
+    runtime.slotUpdatesAccepted += grounded.length;
+    runtime.slotUpdatesRejected += Math.max(0, (env.slotUpdates || []).length - grounded.length);
+    // B2 更新列表：envelope 优先，词表覆盖同槽（kwTouched = 用户原话逐字命中，短时记忆语义=原话为准）
+    const bySlot = {};
+    for (const u of grounded) bySlot[u.slot] = bySlot[u.slot] || u;
+    if (kwActive) {
+      for (const f of NEEDED_FIELDS) {
+        if (kw[f]) bySlot[f] = { slot: f, value: kw[f], inferred: false, kw: true };
+      }
+    }
+    const turn = {
+      userText,
+      updates: Object.values(bySlot),
+      corrections: env.corrections || [],
+      extras: env.extras || [],
+      conflictCandidates: []
+    };
+
+    // —— B2 合并：correction > 新值 > 同值忽略；冲突检测；extras 纠错；C6 兜底 ——
+    const mergeResult = this._mergeTurn(act, turn, runtime);
+
+    // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
+    // 有真模型时，_aiCoach 已自然接住离题，此处若兜底会覆盖模型的正常回复 → 必须跳过。
+    if (!usedAI && this._offTopicWeak(act, userText, filledBefore)) {
+      const reply2 = this._rotateReply(act, D_REDIRECT_POOL[0], D_REDIRECT_POOL);
+      act.messages.push({ role: 'user', content: userText, ts: nowMs });
+      act.messages.push({ role: 'assistant', content: reply2, ts: nowMs });
+      act.updated_at = nowMs;
+      await doPersist();
+      return { reply: reply2, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: ['SCOPE'], engine: this._engineOf(false), chips: [], askedSlot: null };
+    }
+
+    // 用户未指定本次 offer 时沿用其已确认的长期默认值（agent profile；来源 inferred，回复须可纠正）
     if (!act.needs.offer && runtime.agentProfile.default_offer) {
-      act.needs.offer = runtime.agentProfile.default_offer;
+      act.needs.offer = { value: clampNeedValue(runtime.agentProfile.default_offer), source: 'inferred', at: nowMs };
+      mergeResult.acceptedInferred.push('offer');
     }
     if (memoryPatch) {
       const memoryStats = applyMemoryPatch(act, memoryPatch, {
         userText,
         sourceMessageIndex: act.messages.length,
-        now: Date.now()
+        now: nowMs
       });
       runtime.memoryAccepted += memoryStats.accepted;
       runtime.memoryRejected += memoryStats.rejected;
@@ -434,22 +583,32 @@ class IGDE {
       runtime.profileChanged = profileResult.stats.accepted > 0;
     }
 
-    // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
-    // 有真模型时，_aiCoach 已自然接住离题，此处若兜底会覆盖模型的正常回复 → 必须跳过。
-    if (!this.aiEnabled && this._offTopicWeak(act, userText, beforeKeys)) {
-      const reply2 = this._rotateReply(act, D_REDIRECT_POOL[0], D_REDIRECT_POOL);
-      act.messages.push({ role: 'user', content: userText, ts: Date.now() });
-      act.messages.push({ role: 'assistant', content: reply2, ts: Date.now() });
-      act.updated_at = Date.now();
-      return { reply: reply2, stage: act.stage, needs: act.needs, planCard: null, guardrailHits: ['SCOPE'] };
-    }
+    // —— B4 选问决策（合并后）：问槽 / 冲突澄清 / 不问；记 ask_count + 冲突 asked 标记 ——
+    const question = this._decideQuestion(act, mergeResult);
 
-    // 离线降级 / 桩模型 / 模型空回复：无缝回落桩教练（§5 可靠：离线也能跑）
+    // —— B5 回复组装：AI envelope reply 或桩教练；0 提取轮直接问缺失项 ——
+    let reply = env.reply || '';
+    let askedSlot = null;
     if (!reply) {
-      try { reply = this._stubReply(act, userText); }
-      catch (e) { reply = this._pickFallback(act); }
-      if (aiDead && !guardrailHits.includes('AI_OFFLINE')) guardrailHits.push('AI_OFFLINE');
+      const stub = this._stubReply(act, userText, question);
+      reply = stub.reply;
+      if (stub.asked) askedSlot = question.slot;
+    } else {
+      askedSlot = question.slot; // 在线路径：提示词已按 B4 指令约束「一轮只问一个」
     }
+    if (aiDead && !guardrailHits.includes('AI_OFFLINE')) guardrailHits.push('AI_OFFLINE');
+    // inferred 槽回复必须可纠正（B5 硬约束）：回复缺「我理解为/不对请纠正」表述时引擎补一句
+    reply = this._appendInferredNote(reply, act, mergeResult.acceptedInferred, usedAI);
+
+    // B4 记账：本轮实际追问的槽 ask_count +1；冲突候选标记 asked（下一轮未回应则 C6 兜底）
+    if (askedSlot) {
+      act.memory = ensureMemory(act.memory, nowMs);
+      act.memory.ask_count[askedSlot] = (Number(act.memory.ask_count[askedSlot]) || 0) + 1;
+      for (const c of act.memory.conflicts || []) {
+        if (c.slot === askedSlot) c.asked = true;
+      }
+    }
+    const chips = askedSlot ? (question.chips || []) : [];
 
     // —— 单一 FSM 权威：阶段推进只在此处（桩/AI 两条路径一致），_stubReply/_aiCoach 不碰 stage（P2-1）——
     this._advanceStage(act, userText);
@@ -493,19 +652,181 @@ class IGDE {
       else { reply = this._pickFallback(act); guardrailHits.push('REPEAT'); }
     }
 
-    act.messages.push({ role: 'user', content: userText, ts: Date.now() });
-    act.messages.push({ role: 'assistant', content: reply, ts: Date.now() });
-    act.updated_at = Date.now();
+    act.messages.push({ role: 'user', content: userText, ts: nowMs });
+    act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
+    act.updated_at = nowMs;
 
     // 静默采集：四要素齐即产出方案卡（前端弹确认标签）；不以 ready 回写 stage（避免把 deny→S1 顶回 S3）
     const planCard = this.missingFields(act).length === 0 ? this.producePlanCard(act, { locale: opts.locale }) : null;
+
+    // —— B3 记账（严格先落库后回复）：upsertAct 成功后才冲刷 token / 返回 ——
+    await doPersist();
+    if (opts.onReplyToken && tokenBuffer.length) {
+      for (const p of tokenBuffer) opts.onReplyToken(p);
+    }
+
     return {
       reply, stage: act.stage, needs: act.needs, planCard, guardrailHits,
+      engine: this._engineOf(usedAI && !aiDead),
+      chips, askedSlot,
       agentMeta: this._agentMeta(runtime)
     };
   }
 
-  /** 离题/元问题/身份询问路由：needs 仍为空且无业务指向时，返回温和接住池（轮换防复读）；否则 null。
+  /** 本轮引擎档位：online = 走了真实模型 envelope；degraded = 桩 / AI 失败（G2 降级路径） */
+  _engineOf(online) { return online ? 'online' : 'degraded'; }
+
+  /** B1 critic：envelope slot_updates 逐条校验原文语义依据。confidence<0.6 → inferred；
+   *  词表命中直通；无依据 → 丢弃（丢弃优先于降级 inferred）。 */
+  _groundSlotUpdates(rawUpdates, userText) {
+    const out = [];
+    for (const u of (Array.isArray(rawUpdates) ? rawUpdates : []).slice(0, 8)) {
+      if (!u || typeof u !== 'object') continue;
+      const slot = String(u.slot || '').trim();
+      if (!NEEDED_FIELDS.includes(slot)) continue;
+      const value = clampNeedValue(u.value);
+      if (!value) continue;
+      let inferred = u.inferred === true;
+      const confidence = Number(u.confidence);
+      if (Number.isFinite(confidence) && confidence < 0.6) inferred = true;
+      const wordlistHit = !!extractNeeds(userText)[slot];
+      if (!valueGroundedInText(value, userText) && !wordlistHit) continue; // 无依据 → 丢弃
+      out.push({ slot, value, inferred });
+    }
+    return out;
+  }
+
+  /**
+   * B2 合并（就 act 就地修改）：
+   *  ① envelope corrections：明确纠错（四槽或 extras key）；old 以库内现值重算，不信模型申报；
+   *     目标槽为空 → 等同新值写入但仍记 corrections；extras 纠错 → 更新对应条目并记 corrections。
+   *  ② slot_updates：correction > 新值 > 同值忽略；新值与现值不同且消息无修正语气 → 冲突候选（不覆盖），
+   *     带 kW 语气/词表覆盖 → 视为纠正并记账。
+   *  ③ C6 兜底：上一轮冲突追问未被回应（本轮无该槽新值/纠错）→ 接受候选新值 source=inferred。
+   *  ④ 本轮新冲突入 memory.conflicts（B4 追问后标记 asked）。
+   *  ⑤ extras 合并（latest-wins）。
+   */
+  _mergeTurn(act, turn, runtime) {
+    const now = Date.now();
+    const needs = act.needs;
+    act.memory = ensureMemory(act.memory, now);
+    const mem = act.memory;
+    const corrected = new Set();      // 本轮已走 correction 的槽
+    const acceptedInferred = [];      // 本轮接受的 inferred 槽（B5「不对请纠正」依据）
+    let correctionsAdded = 0;
+    const hasTone = CORRECTION_TONE_RE.test(turn.userText || '');
+
+    // ① corrections
+    for (const c of (turn.corrections || []).slice(0, 8)) {
+      if (!c || typeof c !== 'object') continue;
+      const slot = String(c.slot || '').trim();
+      const newVal = clampNeedValue(c.new != null ? c.new : c.value);
+      if (!slot || !newVal) continue;
+      if (NEEDED_FIELDS.includes(slot)) {
+        const prev = needs[slot];
+        const oldVal = prev ? prev.value : '';
+        if (oldVal === newVal) continue; // 同值忽略
+        needs[slot] = { value: newVal, source: 'explicit', at: now };
+        mem.corrections.push({ slot, old: oldVal, new: newVal, at: now });
+        mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
+        corrected.add(slot);
+        correctionsAdded++;
+      } else {
+        // extras correction（如「客单价改成 35」且客单价在 extras）→ 更新条目并记 corrections
+        const entry = mem.extras.find(x => x.key === slot);
+        if (!entry) continue; // extras key 不存在 → 忽略（防模型编造记忆条目；新事实应走 extras 更新）
+        const oldVal = entry.value;
+        if (oldVal === newVal) continue;
+        entry.value = newVal;
+        entry.at = now;
+        mem.corrections.push({ slot, old: oldVal, new: newVal, at: now, scope: 'extras' });
+        mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
+        correctionsAdded++;
+      }
+    }
+
+    // ② slot_updates
+    for (const u of (turn.updates || []).slice(0, 8)) {
+      const slot = u && u.slot;
+      if (!NEEDED_FIELDS.includes(slot)) continue;
+      if (corrected.has(slot)) continue; // correction > 新值
+      const value = clampNeedValue(u.value);
+      if (!value) continue;
+      const prev = needs[slot];
+      if (prev && prev.value === value) continue; // 同值忽略
+      const kwTouched = u.kw === true;
+      if (prev && !hasTone && !kwTouched) {
+        // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清
+        turn.conflictCandidates.push({ slot, old: prev.value, new: value });
+        continue;
+      }
+      const inferred = u.inferred === true;
+      needs[slot] = { value, source: inferred ? 'inferred' : 'explicit', at: now };
+      if (inferred) acceptedInferred.push(slot);
+      if (prev && (hasTone || kwTouched)) {
+        // 用户带修正语气 / 原话逐字覆盖已填值 → 记 corrections（追加制）
+        mem.corrections.push({ slot, old: prev.value, new: value, at: now });
+        mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
+        corrected.add(slot);
+        correctionsAdded++;
+      }
+    }
+
+    // ③ C6 兜底：上一轮冲突追问未被回应 → 接受候选新值 inferred（inferred 槽回复带「不对请纠正」）
+    for (const cf of (mem.conflicts || []).slice(0, MAX_CONFLICTS)) {
+      if (cf.asked !== true) continue;
+      const slot = cf.slot;
+      if (corrected.has(slot)) continue;
+      if ((turn.updates || []).some(x => x.slot === slot)) continue; // 本轮已回应
+      const cur = needs[slot];
+      const curVal = cur ? cur.value : '';
+      const candVal = clampNeedValue(cf.new);
+      if (candVal && curVal !== candVal) {
+        needs[slot] = { value: candVal, source: 'inferred', at: now };
+        acceptedInferred.push(slot);
+      }
+    }
+    mem.conflicts = [];
+
+    // ④ 本轮新冲突候选入记忆（asked 标记由 B4 追问后打上）
+    for (const c of (turn.conflictCandidates || []).slice(0, MAX_CONFLICTS)) {
+      mem.conflicts.push({ slot: c.slot, old: c.old, new: c.new, at: now, asked: false });
+    }
+
+    // ⑤ extras 合并（latest-wins，同 key 更新不追加）
+    for (const e of (turn.extras || []).slice(0, 8)) {
+      if (!e || typeof e !== 'object') continue;
+      const key = String(e.key || '').trim().slice(0, 48);
+      const value = clampNeedValue(e.value, 120);
+      if (!key || !value) continue;
+      const entry = mem.extras.find(x => x.key === key);
+      if (entry) { entry.value = value; entry.at = now; }
+      else mem.extras.push({ key, value, at: now });
+      mem.extras = mem.extras.slice(-24);
+    }
+
+    if (runtime) {
+      runtime.correctionsAdded += correctionsAdded;
+      runtime.conflictsRaised += (turn.conflictCandidates || []).length;
+    }
+    return { corrected, conflictsNew: turn.conflictCandidates || [], acceptedInferred, correctionsAdded };
+  }
+
+  /** B5 硬约束：本轮接受了 inferred 槽 → 回复必须含「我理解为…不对请纠正」类表述（缺则引擎补一句） */
+  _appendInferredNote(reply, act, acceptedInferred, usedAI) {
+    if (!acceptedInferred || !acceptedInferred.length) return reply;
+    if (/我理解为|不对请纠正|不对再纠正|如果不对|理解得不对/.test(reply)) return reply;
+    const names = acceptedInferred
+      .filter(s => act.needs[s] && act.needs[s].value)
+      .map(s => `「${act.needs[s].value}」`)
+      .join('和');
+    if (!names) return reply;
+    const note = `我先按${names}理解，不对请纠正。`;
+    if (!reply) return note;
+    return reply + (usedAI ? ' ' + note : note);
+  }
+
+  /** 离题/元问题/身份询问路由：四槽全空且无业务指向时，返回温和接住池（轮换防复读）；否则 null。
    *  注意：仅当「尚无业务上下文」时拦截，避免误伤已进入收集的正常对话；业务关键词命中直接放行。 */
   _routeOffTopic(act, userText) {
     // 接了真模型时，离题 / 闲聊 / 身份 / 元问题交给 _aiCoach 自然处理（系统提示词含对应口径），
@@ -513,22 +834,22 @@ class IGDE {
     if (this.aiEnabled) return null;
     const t = (userText || '').trim();
     if (!t) return null;
-    if (Object.keys(act.needs || {}).length > 0) return null; // 已有业务上下文 → 正常收集
-    if (BIZ_RE.test(t)) return null;                          // 业务相关 → 不拦
+    if (countFilled(act.needs) > 0) return null; // 已有业务上下文 → 正常收集
+    if (BIZ_RE.test(t)) return null;             // 业务相关 → 不拦
     if (IDENTITY_RE.test(t)) return { primary: IDENTITY_POOL[0], pool: IDENTITY_POOL };
     if (META_RE.test(t)) return { primary: META_POOL[0], pool: META_POOL };
     return { primary: OFFTOPIC_POOL[0], pool: OFFTOPIC_POOL };
   }
 
   /** 弱信号离题兜底：多轮无任何新字段 + 无业务关键词 + 非确认/调整意图 → 视为 stalled/离题，接住拉回 */
-  _offTopicWeak(act, userText, beforeKeys) {
+  _offTopicWeak(act, userText, filledBefore) {
     const t = (userText || '').trim();
     if (!t) return false;
     // 业务关键词命中 → 绝非离题
     if (BIZ_RE.test(t)) return false;
-    const afterKeys = Object.keys(act.needs || {});
-    if (afterKeys.length <= beforeKeys.length) {
-      if (afterKeys.length === 0) return false; // 还没聊出任何字段，用户在想，不判离题
+    const filledAfter = countFilled(act.needs);
+    if (filledAfter <= filledBefore) {
+      if (filledAfter === 0) return false; // 还没聊出任何字段，用户在想，不判离题
       const userTurns = act.messages.filter(m => m.role === 'user').length;
       if (userTurns < 3) return false; // 至少 3 轮用户发言仍无进展才兜底
       if (/(对|是的|可以|确认|改|调|换|发|生成|方案|配置|不对|好|行)/.test(t.toLowerCase())) return false; // 在推进的不算
@@ -568,6 +889,7 @@ class IGDE {
     const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t);
     const wantAdjust = /改|调(整|整下)?|再聊|不对|换|重(新|做)?|另一|别的|加一拨|换拨|再想想/.test(t);
 
+    if (act.stage === 'closed') return;
     if (act.stage === 'S3') { if (wantAdjust) act.stage = 'S1'; return; }
     if (act.stage === 'S2') {
       if (deny) { act.stage = 'S1'; return; }                       // 否认 → 回澄清
@@ -582,33 +904,37 @@ class IGDE {
     }
   }
 
-  /** 桩模型回复（离线可用，功能完整的教练） */
-  _stubReply(act, userText) {
+  /** 桩模型回复（离线可用，功能完整的教练）。question = B4 决策（合并后）；
+   *  返回 { reply, asked }，asked=true 表示本轮实际追问了 question.slot（驱动 ask_count 记账）。 */
+  _stubReply(act, userText, question) {
     const nonInfo = isNonInfo(userText);
+    const probeSlot = question && question.slot;
     if (act.stage === 'S0') {
       // 阶段推进统一由 _advanceStage 负责；此处只产出首轮澄清话术
-      if (this.missingFields(act).length) return this._probe(act, this.missingFields(act)[0]);
-      return this._replyFresh(act, this._readyLine(), FALLBACK_POOL);
+      if (probeSlot) return { reply: this._probe(act, probeSlot), asked: true };
+      return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
     }
     if (act.stage === 'S1') {
       if (nonInfo) {
-        return this._replyFresh(act, '没事，这块本来就乱。你就想着「谁快丢了、想让他们回来干啥」就行，别的我来帮你理。', FALLBACK_POOL);
+        return { reply: this._replyFresh(act, '没事，这块本来就乱。你就想着「谁快丢了、想让他们回来干啥」就行，别的我来帮你理。', FALLBACK_POOL), asked: false };
       }
-      const miss = this.missingFields(act);
-      if (miss.length === 0) return this._replyFresh(act, this._readyLine(), FALLBACK_POOL);
-      return this._probe(act, miss[0]);
+      if (!probeSlot) return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
+      return { reply: this._probe(act, probeSlot), asked: true };
     }
     if (act.stage === 'S2') {
       // 对齐 / 确认 / 否认；对话里不暴露字段（字段只在确认标签出现）
       const t = userText.trim();
       const deny = /不对|错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
-      if (deny) return '好，哪点要改？告诉我，其它对的我留着。';
+      if (deny) return { reply: '好，哪点要改？告诉我，其它对的我留着。', asked: false };
       if (this.missingFields(act).length === 0) {
         const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
-        if (confirm) return '好，我按这个帮你把邮件配置生成好了，下面确认标签你可以看一眼再发。';
-        return this._replyFresh(act, this._readyLine(), FALLBACK_POOL);
+        if (confirm) return { reply: '好，我按这个帮你把邮件配置生成好了，下面确认标签你可以看一眼再发。', asked: false };
+        return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
       }
-      return this._probe(act, this.missingFields(act)[0]);
+      if (nonInfo) {
+        return { reply: this._replyFresh(act, '没事，咱不急。哪点想调直接说，其它对的我先留着。', FALLBACK_POOL), asked: false };
+      }
+      return { reply: this._probe(act, probeSlot || this.missingFields(act)[0]), asked: true };
     }
     if (act.stage === 'S3') {
       // S3 执行阶段：按用户意图分流，避免「进 S3 后每轮回复完全相同」（防复读）
@@ -617,7 +943,7 @@ class IGDE {
       const wantSend = /^(发|发吧|发送|发出|安排发)|发(送|吧|出)$|send|确认发送|去发|帮我发/.test(t);
       let cand;
       if (wantAdjust) {
-        cand = '好，回到前面。你想先调哪一项？受众、痛点、目标还是钩子？';
+        cand = '好，回到前面。你想先调哪一项？受众、挽回原因、目标还是钩子？';
       } else if (wantSend) {
         cand = '好，点下面「确认发送」就行；发完我会帮你盯送达和回流数据。';
       } else if (/生成|方案|配置|看卡|卡片|确认|行不|可以吗/.test(t)) {
@@ -630,14 +956,14 @@ class IGDE {
       if (last && last.role === 'assistant' && last.content === cand) {
         cand = '刚才那点没变。你说「发吧」我就帮你安排发送，或者换拨人再聊一轮。';
       }
-      return this._replyFresh(act, cand, FALLBACK_POOL);
+      return { reply: this._replyFresh(act, cand, FALLBACK_POOL), asked: false };
     }
-    return this._pickFallback(act);
+    return { reply: this._pickFallback(act), asked: false };
   }
 
-  /** 主要信息收集完时的自然收口话术（不在对话里列字段 — 字段只在确认标签里出现） */
+  /** 主要信息收集完时的自然收口话术（不在对话里列字段 — 字段只在确认标签里出现；含「确认/核对」引导） */
   _readyLine() {
-    return '我大概摸清了，帮你整理成一封邮件营销配置，下面弹出确认标签啦，你瞅瞅这样行不？';
+    return '四样都齐了。我帮你按这个配一封挽回邮件，你在下面确认卡里核对一遍，没问题就点确认。';
   }
 
   _criticRequired(text) {
@@ -657,6 +983,10 @@ class IGDE {
       memoryRejected: runtime.memoryRejected,
       profileAccepted: runtime.profileAccepted,
       profileRejected: runtime.profileRejected,
+      slotUpdatesAccepted: runtime.slotUpdatesAccepted,
+      slotUpdatesRejected: runtime.slotUpdatesRejected,
+      correctionsAdded: runtime.correctionsAdded,
+      conflictsRaised: runtime.conflictsRaised,
       agentProfile: runtime.profileChanged ? runtime.agentProfile : null
     };
   }
@@ -686,19 +1016,22 @@ class IGDE {
     return result;
   }
 
-  /** 真实模型：一次对话同时完成话术、needs patch 与来源可校验的 memory patch。
-   *  onReplyToken 仅流给首轮 coach 调用（critic / 重生成不流，护栏前的预览以返回值为权威）。 */
-  async _aiCoach(act, userText, runtime, onReplyToken) {
-    const promptNeeds = { ...act.needs };
+  /** 真实模型：一次对话同时完成话术与结构化提取（PRD v2 envelope）。
+   *  onReplyToken 仅流给首轮 coach 调用（critic / 重生成不流，护栏前的预览以返回值为权威）；
+   *  预览 token 由 handle 缓冲，B3 落库成功后才冲刷（严格先落库后回复）。 */
+  async _aiCoach(act, userText, runtime, onReplyToken, preProbe) {
+    const promptNeeds = plainNeeds(act.needs);
     if (!promptNeeds.offer && runtime.agentProfile.default_offer) {
       promptNeeds.offer = runtime.agentProfile.default_offer;
     }
+    const missing = preProbe ? [preProbe] : [];
     const context = buildCoachContext({
       act,
       userText,
       needs: promptNeeds,
       stage: act.stage,
-      missing: NEEDED_FIELDS.filter(field => !promptNeeds[field]),
+      missing,
+      chips: preProbe ? (SLOT_CHIPS[preProbe] || []) : [],
       agentProfile: runtime.agentProfile,
       contextOptions: this.contextOptions
     });
@@ -708,23 +1041,40 @@ class IGDE {
     act.context_version = 1;
 
     const res = await this._callAI(context.messages, runtime, onReplyToken ? { onReplyToken } : undefined);
-    let reply = '', needs = {}, memoryPatch = { facts: [], decisions: [], corrections: [] }, profilePatch = {};
+    let reply = '';
+    const emptyPatch = { facts: [], decisions: [], corrections: [] };
+    let slotUpdates = [], extras = [], corrections = [], restatement = [];
+    let needsLegacy = null, memoryPatch = emptyPatch, profilePatch = {};
+    const absorb = (j) => {
+      reply = typeof j.reply === 'string' ? j.reply : '';
+      restatement = Array.isArray(j.restatement) ? j.restatement : [];
+      slotUpdates = Array.isArray(j.slot_updates) ? j.slot_updates
+        : (Array.isArray(j.slotUpdates) ? j.slotUpdates : []);
+      extras = Array.isArray(j.extras) ? j.extras : [];
+      corrections = Array.isArray(j.corrections) ? j.corrections : [];
+      needsLegacy = (j.needs && typeof j.needs === 'object') ? j.needs : null;
+      memoryPatch = (j.memory_patch && typeof j.memory_patch === 'object') ? j.memory_patch
+        : (j.memoryPatch && typeof j.memoryPatch === 'object' ? j.memoryPatch : emptyPatch);
+      profilePatch = (j.profile_patch && typeof j.profile_patch === 'object') ? j.profile_patch
+        : (j.profilePatch && typeof j.profilePatch === 'object' ? j.profilePatch : {});
+    };
     if (typeof res === 'string') {
-      try {
-        const j = JSON.parse(res);
-        reply = j.reply || '';
-        needs = j.needs || {};
-        memoryPatch = j.memory_patch || memoryPatch;
-        profilePatch = j.profile_patch || profilePatch;
-      }
-      catch (e) { reply = res; } // 非 JSON → 整段当话术，needs 留空（引擎补抽取）
+      try { absorb(JSON.parse(res)); }
+      catch (e) { reply = res; } // 非 JSON → 整段当话术（0 提取），引擎补词表抽取
     } else if (res && typeof res === 'object') {
-      reply = res.reply || '';
-      needs = res.needs || {};
-      memoryPatch = res.memoryPatch || res.memory_patch || memoryPatch;
-      profilePatch = res.profilePatch || res.profile_patch || profilePatch;
+      absorb(res);
     }
-    return { reply, needs, memoryPatch, profilePatch };
+    // 旧契约兼容：{needs:{audience:...}} → slot_updates（explicit，confidence=1，仍过 B1 critic 校验）
+    if (needsLegacy) {
+      const { normalizeSlot } = require('./needs');
+      for (const f of NEEDED_FIELDS) {
+        let raw = needsLegacy[f];
+        if (f === 'reason' && !raw && needsLegacy.pain != null) raw = needsLegacy.pain;
+        const slot = normalizeSlot(raw);
+        if (slot) slotUpdates.push({ slot: f, value: slot.value, confidence: 1, inferred: false });
+      }
+    }
+    return { reply, restatement, slotUpdates, extras, corrections, memoryPatch, profilePatch };
   }
 
   /** L2 复核（本地正则 + critic 精判），供重生成后判定 */
@@ -751,16 +1101,18 @@ class IGDE {
         ? '严禁重复你上一句回复的原文或近似原文；必须换个角度、给例子或把对话往前推一步。'
         : '严禁在确认前输出方案卡/主题行/优惠码等配置内容；只做引导对话。';
     const regenText = `用户刚才说：「${userText}」。上一轮回复触发了护栏（${isPreachy ? '说教/推销' : why === 'repeat' ? '复读上一句' : '抢跑'}），${constraint}请重新组织一句回复。`;
-    const promptNeeds = { ...act.needs };
+    const promptNeeds = plainNeeds(act.needs);
     if (!promptNeeds.offer && runtime.agentProfile.default_offer) {
       promptNeeds.offer = runtime.agentProfile.default_offer;
     }
+    const probe = this._nextProbeSlot(act);
     const context = buildCoachContext({
       act,
       userText: regenText,
       needs: promptNeeds,
       stage: act.stage,
-      missing: NEEDED_FIELDS.filter(field => !promptNeeds[field]),
+      missing: probe ? [probe] : [],
+      chips: probe ? (SLOT_CHIPS[probe] || []) : [],
       agentProfile: runtime.agentProfile,
       contextOptions: this.contextOptions
     });
@@ -882,7 +1234,7 @@ class IGDE {
         `Unsubscribe anytime — we respect your choice.`
       ].join('\n');
     }
-    const pain = n.pain || '太久没联系';
+    const pain = n.reason || n.pain || '太久没联系';
     const verb = this._goalVerb(n.goal, 'zh');
     return [
       `Hi，注意到你${pain}，特地回来找你。`,
@@ -897,11 +1249,12 @@ class IGDE {
 
   /** S3：生成方案卡（邮件配置建议，§5③）
    *  字段：受众 / 主题 / 正文 / 海报(3款) / 折扣 / 独立优惠码 / 发送时机
+   *  PRD v2：inferred_slots 带出推断槽标记（C6），确认卡据此提示「这是我们的理解，可改」。
    *  ⚠️ 语种 lang 来自「收件人 locale」（opts.locale），绝不由商家聊天语言决定。
    *     opts.locale 缺省时回落 shopDefaultLocale（默认 en，跨境主客群）。
    *     发送时逐收件人本地化请用 renderForRecipient()，本卡只是「店铺默认语种」预览。 */
   producePlanCard(act, opts = {}) {
-    const n = act.needs;
+    const n = plainNeeds(act.needs); // 纯字符串视图（模板插值安全）
     const lang = this._collapseLang(opts.locale); // 仅 zh/en 有模板，其余语种回落 en
     const offer = this._offerText(n.offer, lang);
     // 折扣数值只在这里产生一处（% off 口径）：变体 / 海报 / 营销图统一读它，
@@ -936,7 +1289,8 @@ class IGDE {
         ];
     return {
       audience: n.audience || '高意向流失人群',
-      pain: n.pain || '',            // 确认卡「为什么挽回」直接读这两个字段，之前一直缺省显示 —（走查 P0-3/P2）
+      pain: n.reason || '',          // 确认卡「为什么挽回」（旧键保留兼容）
+      reason: n.reason || '',        // PRD v2 新键：与 needs.reason 对齐
       goal: n.goal || '',
       subject,
       body,
@@ -945,7 +1299,8 @@ class IGDE {
       coupon,
       posters,
       sendTiming: this._sendTiming(n, merchantLang),
-      needs: n,        // 保留 needs，供 renderForRecipient 逐收件人重新本地化
+      inferred_slots: inferredSlots(act.needs), // C6：推断槽带标记（如 ["audience"]），确认卡提示可改
+      needs: n,        // 纯字符串 needs，供 renderForRecipient 逐收件人重新本地化
       locale: lang,
       generatedAt: Date.now()
     };
@@ -984,5 +1339,5 @@ module.exports = {
   IGDE, extractNeeds, isNonInfo, scopeBoundary,
   guardrailL0, guardrailL1, guardrailL2, guardrailL3, guardrailL4,
   NEEDED_FIELDS, FIELD_LABEL, PREACH_PATTERNS, D_REDIRECT_POOL, FALLBACK_POOL,
-  clampNeedValue, looksLikeInjection
+  CORRECTION_TONE_RE, SLOT_CHIPS, valueGroundedInText, clampNeedValue, looksLikeInjection
 };

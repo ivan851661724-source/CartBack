@@ -119,7 +119,17 @@ function fitMessagesToBudget(messages, options = {}) {
 }
 
 function createEmptyMemory() {
-  return { facts: [], decisions: [], corrections: [] };
+  // PRD v2 契约：extras/prefs/ask_count/conflicts 为新代码的唯一写入面；
+  // facts/decisions 保留兼容（旧 memory_patch 路径），corrections 追加制。
+  return {
+    facts: [],
+    decisions: [],
+    corrections: [],
+    extras: [],
+    prefs: {},
+    ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    conflicts: []
+  };
 }
 
 function normalizeAgentProfile(profile) {
@@ -191,12 +201,70 @@ function cleanMemoryItem(item) {
   };
 }
 
+/** corrections 双形态兼容：旧 {key,value} / 新 {slot,old,new,at,scope?}（B-1 契约，追加制） */
+function cleanCorrectionItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const slot = String(item.slot != null ? item.slot : item.key || '').trim().slice(0, 48);
+  if (!slot) return null;
+  const hasNewShape = item.old != null || item.new != null;
+  if (hasNewShape) {
+    const old = String(item.old == null ? '' : item.old).trim().slice(0, 240);
+    const nw = String(item.new == null ? '' : item.new).trim().slice(0, 240);
+    if (!nw) return null;
+    return {
+      slot,
+      old,
+      new: nw,
+      at: Number.isFinite(item.at) ? item.at : null,
+      scope: item.scope === 'extras' ? 'extras' : undefined
+    };
+  }
+  const value = String(item.value || '').trim().slice(0, 240);
+  if (!value) return null;
+  return { slot, key: slot, value, old: '', new: value, at: Number.isFinite(item.at) ? item.at : null };
+}
+
+function cleanExtraItem(item) {
+  if (!item || typeof item !== 'object') return null;
+  const key = String(item.key || '').trim().slice(0, 48);
+  const value = String(item.value || '').trim().slice(0, 240);
+  if (!key || !value) return null;
+  return { key, value, at: Number.isFinite(item.at) ? item.at : null };
+}
+
 function normalizeMemory(memory) {
   const out = createEmptyMemory();
   if (!memory || typeof memory !== 'object') return out;
-  for (const section of Object.keys(out)) {
+  for (const section of ['facts', 'decisions']) {
     const list = Array.isArray(memory[section]) ? memory[section] : [];
     out[section] = list.map(cleanMemoryItem).filter(Boolean).slice(-MAX_MEMORY_ITEMS);
+  }
+  const corrections = Array.isArray(memory.corrections) ? memory.corrections : [];
+  out.corrections = corrections.map(cleanCorrectionItem).filter(Boolean).slice(-MAX_MEMORY_ITEMS);
+  const extras = Array.isArray(memory.extras) ? memory.extras : [];
+  out.extras = extras.map(cleanExtraItem).filter(Boolean).slice(-MAX_MEMORY_ITEMS);
+  // B2 冲突候选（跨轮存活：本轮追问 → 下轮未回应则 C6 兜底）
+  const conflicts = Array.isArray(memory.conflicts) ? memory.conflicts : [];
+  out.conflicts = conflicts
+    .filter(c => c && typeof c === 'object' && c.slot && c.new != null)
+    .map(c => ({
+      slot: String(c.slot).slice(0, 48),
+      old: String(c.old == null ? '' : c.old).slice(0, 240),
+      new: String(c.new).slice(0, 240),
+      at: Number.isFinite(c.at) ? c.at : null,
+      asked: c.asked === true
+    }))
+    .slice(-4);
+  if (memory.prefs && typeof memory.prefs === 'object' && !Array.isArray(memory.prefs)) {
+    for (const [k, v] of Object.entries(memory.prefs).slice(0, 32)) {
+      const value = String(v || '').trim().slice(0, 120);
+      if (k && value) out.prefs[k.slice(0, 48)] = value;
+    }
+  }
+  if (memory.ask_count && typeof memory.ask_count === 'object') {
+    for (const slot of ['audience', 'reason', 'offer', 'goal']) {
+      out.ask_count[slot] = Math.max(0, Math.trunc(Number(memory.ask_count[slot]) || 0));
+    }
   }
   return out;
 }
@@ -304,10 +372,22 @@ function updateSummary(act, cutoff) {
 
 function memorySystemMessage(memory) {
   const normalized = normalizeMemory(memory);
-  if (!normalized.facts.length && !normalized.decisions.length && !normalized.corrections.length) return null;
+  const hasCorrections = normalized.facts.length || normalized.decisions.length ||
+    normalized.corrections.length || normalized.extras.length;
+  if (!hasCorrections) return null;
   const semanticMemory = {};
-  for (const section of ['facts', 'decisions', 'corrections']) {
+  for (const section of ['facts', 'decisions']) {
     semanticMemory[section] = normalized[section].map(item => ({ key: item.key, value: item.value }));
+  }
+  // extras 是 PRD v2 的长期事实主写入面（品牌/品类/客单价/兴趣/时段…），模型据此呼应与回答 recall
+  semanticMemory.extras = normalized.extras.map(item => ({ key: item.key, value: item.value }));
+  if (normalized.corrections.length) {
+    // 双形态：新 {slot,old,new} → 人话；旧 {key,value} → 键值
+    semanticMemory.corrections = normalized.corrections.map(c => (
+      c.new != null && (c.old != null || c.value == null)
+        ? `${c.slot}: ${c.old || '(空)'} → ${c.new}`
+        : { key: c.slot, value: c.value }
+    ));
   }
   return {
     role: 'system',

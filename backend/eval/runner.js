@@ -60,6 +60,12 @@ function makeAct(id) {
   };
 }
 
+/** PRD v2 三态槽位（null | {value,source,at}）→ 断言用纯字符串（兼容旧纯字符串形态） */
+function slotVal(v) {
+  if (v == null) return undefined;
+  return typeof v === 'object' ? String(v.value || '') : v;
+}
+
 /** 逐项核对 expect，失败原因写入 failures */
 function check(id, exp, ctx, failures) {
   const { act, replies, guardrailUnion, last, profile } = ctx;
@@ -70,10 +76,11 @@ function check(id, exp, ctx, failures) {
     fail(`stage 期望 ${exp.stage}，实际 ${act.stage}`);
   }
   for (const [k, v] of Object.entries(exp.needs || {})) {
-    if (act.needs[k] !== v) fail(`needs.${k} 期望「${v}」，实际「${act.needs[k] === undefined ? '(未采集)' : act.needs[k]}」`);
+    const cur = slotVal(act.needs[k]);
+    if (cur !== v) fail(`needs.${k} 期望「${v}」，实际「${cur === undefined ? '(未采集)' : cur}」`);
   }
   for (const k of exp.needsAbsent || []) {
-    if (act.needs[k]) fail(`needs.${k} 应保持为空，实际「${act.needs[k]}」`);
+    if (slotVal(act.needs[k])) fail(`needs.${k} 应保持为空，实际「${slotVal(act.needs[k])}」`);
   }
   if (exp.planCard !== undefined && !!last.planCard !== exp.planCard) {
     fail(`planCard 期望 ${exp.planCard}，实际 ${!!last.planCard}`);

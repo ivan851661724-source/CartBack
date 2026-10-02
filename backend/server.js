@@ -11,6 +11,7 @@ const cfg = require('./lib/config');
 const { Store, uid } = require('./lib/store');
 const igdeMod = require('./lib/igde');
 const { IGDE, guardrailL2 } = igdeMod;
+const needsMod = require('./lib/needs');
 const { LLMClient } = require('./lib/llm');
 const { normalizeAgentProfile } = require('./lib/context');
 const { buildConnectors } = require('./lib/storeConnector');
@@ -387,8 +388,8 @@ function makeLlmClient() {
   });
 }
 
-// 真实模型教练：一次返回回复、needs patch 与来源待校验的 memory patch。
-// opts.onReplyToken 存在时走真流式（边生成边上屏），否则保持一次性结构化调用。
+// 真实模型教练：一次返回回复与结构化提取（PRD v2 envelope：slot_updates/extras/corrections）。
+// opts.onReplyToken 存在时走真流式（边生成边上屏——乐观预览，权威 reply 以返回值为准），否则保持一次性结构化调用。
 async function llmCoach(messages, opts) {
   if (!config.aiKey) throw new Error('AI 未配置');
   const client = makeLlmClient();
@@ -398,6 +399,9 @@ async function llmCoach(messages, opts) {
   return {
     reply: r.reply,
     needs: r.needs,
+    slotUpdates: r.slotUpdates || [],
+    extras: r.extras || [],
+    corrections: r.corrections || [],
     memoryPatch: r.memoryPatch,
     profilePatch: r.profilePatch,
     usage: r.usage,
@@ -407,6 +411,11 @@ async function llmCoach(messages, opts) {
 }
 
 function safeJson(s) { try { return JSON.parse(s); } catch (e) { return null; } }
+
+// —— PRD v2 引擎档位：llm 熔断 closed 且已配 key → online；open/half-open/未配 key → degraded（G2）——
+function engineOnline() {
+  return Boolean(config.aiKey) && breakers.get('llm').snapshot().state === 'closed';
+}
 
 async function callCritic(text) {
   if (!config.aiKey) return guardrailL2(text); // 本地启发式兜底（L2）
@@ -1012,6 +1021,7 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/state' && method === 'GET') {
       return sendJson(res, 200, {
         status: cfg.status(config),
+        engine: engineOnline() ? 'online' : 'degraded',   // PRD v2：llm 熔断 closed→online，open/half-open→degraded
         acts: store.getActsByUser(req.userId),
         drafts: store.getDraftsByUser(req.userId),
         audience: store.getAudience(),
@@ -1036,9 +1046,11 @@ const server = http.createServer(async (req, res) => {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
       const act = {
-        id: uid('act_'), stage: 'S0', needs: {}, messages: [],
-        memory: { facts: [], decisions: [], corrections: [] },
+        id: uid('act_'), stage: 'S0', needs: needsMod.emptyNeeds(), messages: [],
+        memory: { facts: [], decisions: [], corrections: [], extras: [], prefs: {}, ask_count: needsMod.emptyAskCount() },
         context_summary: null, summary_cursor: 0, context_version: 1,
+        code_status: 'none',       // PRD v2：优惠码生命周期占位（本波恒 none）
+        filled_count: 0,           // 派生字段：四槽 value 非空数（store.upsertAct 落库时重算并保证单调不减）
         status: 'active', created_at: Date.now(), updated_at: Date.now(),
         user_id: req.userId || null   // 整改 1c：打归属
       };
@@ -1051,7 +1063,7 @@ const server = http.createServer(async (req, res) => {
         if (presetAud && !igdeMod.looksLikeInjection(presetAud)) {
           igde.applyNeeds(act, { audience: presetAud });
           act.stage = 'S1';
-          act.messages.push({ role: 'assistant', content: `收到，这次针对【${act.needs.audience}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
+          act.messages.push({ role: 'assistant', content: `收到，这次针对【${act.needs.audience.value}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
         }
       }
       store.upsertAct(act);
@@ -1089,24 +1101,33 @@ const server = http.createServer(async (req, res) => {
       igde.aiEnabled = !!config.aiKey; // 动态：配了 key 走真模型，否则桩
       syncAgentConfig();
       // 邮件语种 = 店铺默认语种（收件人逐人本地化在发送环节 renderForRecipient 做）
-      const r = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
-        locale: config.shopDefaultLocale || 'en',
-        agentProfile: store.getAgentProfile(req.userId)
-      });
-      store.upsertAct(act);
-      persistAgentProfile(r, req.userId);
-      consumeAgentMeta(r);
-      if (r.guardrailHits && r.guardrailHits.length) {
-        r.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
-        logEvent('guardrail', { hits: r.guardrailHits });
+      // B3 记账：persist 回调在引擎内「先落库后回复」；落库失败 → 503（不落库不回复）
+      try {
+        const r = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
+          locale: config.shopDefaultLocale || 'en',
+          agentProfile: store.getAgentProfile(req.userId),
+          persist: () => store.upsertAct(act)
+        });
+        persistAgentProfile(r, req.userId);
+        consumeAgentMeta(r);
+        if (r.guardrailHits && r.guardrailHits.length) {
+          r.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
+          logEvent('guardrail', { hits: r.guardrailHits });
+        }
+        return sendJson(res, 200, r);
+      } catch (e) {
+        if (e && e.code === 'PERSIST_FAIL') return sendJson(res, 503, { error: e.message });
+        throw e;
       }
-      return sendJson(res, 200, r);
     }
 
     // —— 对话消息（SSE 交付 · 真流式）：头先写，IGDE 处理过程中逐 token 推帧；
+    //    B3 记账：token 帧在引擎内缓冲、upsertAct 成功后才冲刷（严格先落库后回复）——
+    //    落库失败 → error 帧「刚才那句我没存上，再说一次」（无任何 token/done 帧先行）；
     //    未流出 token（桩模式 / 边界拒绝 / 护栏重生成）时保留 3 字打字机兜底；
-    //    护栏替换了乐观流出的预览时发 replace 校正帧；done 帧的 result 永远是权威结果。
-    //    失败（error 帧）由前端降级一次性 /message —— handle 抛错时未落库，重发安全。
+    //    护栏替换了乐观流出的预览时发 replace 校正帧。
+    //    done 帧契约（PRD v2）：保留 result，新增 ok/stage/act/engine/chips 四字段，
+    //    act = 落库后的完整 act 序列化（含三态 needs / memory.extras / filled_count / code_status）。
     const sm2 = pathname.match(/^\/api\/act\/([\w-]+)\/message\/stream$/);
     if (sm2 && method === 'POST') {
       const act = store.getAct(sm2[1]);
@@ -1125,21 +1146,23 @@ const server = http.createServer(async (req, res) => {
       let closed = false;
       res.on('close', () => { closed = true; });                    // 客户端断连后停止写帧
       const send = (frame) => { if (!closed && !res.writableEnded) res.write(`data: ${JSON.stringify(frame)}\n\n`); };
-      let streamed = '';      // 已乐观流出的 reply 增量累计
+      let streamed = '';      // 已乐观流出的 reply 增量累计（落库成功后才开始积累）
       const onReplyToken = (piece) => { streamed += piece; send({ type: 'token', value: piece }); };
       let result;
       try {
         result = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
-          onReplyToken
+          onReplyToken,
+          persist: () => store.upsertAct(act)
         });
       } catch (e) {
-        send({ type: 'error', error: String(e && e.message || e) });
+        // B3：落库失败（或引擎异常）→ 不发回复，error 帧人话提示（前端可安全重发）
+        const msg = (e && e.code === 'PERSIST_FAIL') ? e.message : String(e && e.message || e);
+        send({ type: 'error', error: msg });
         res.end();
         return;
       }
-      store.upsertAct(act);
       persistAgentProfile(result, req.userId);
       consumeAgentMeta(result);
       if (result.guardrailHits && result.guardrailHits.length) {
@@ -1163,7 +1186,17 @@ const server = http.createServer(async (req, res) => {
           send({ type: 'replace', value: finalReply });
         }
       }
-      send({ type: 'done', result });
+      // PRD v2 done 帧：保留现有 result 字段不变，新增 ok/stage/act/engine/chips
+      const persistedAct = store.getAct(act.id) || act;
+      send({
+        type: 'done',
+        result,
+        ok: true,
+        stage: persistedAct.stage,
+        act: persistedAct,
+        engine: result.engine || (engineOnline() ? 'online' : 'degraded'),
+        chips: result.chips || []
+      });
       res.end();
       return;
     }
@@ -1181,9 +1214,9 @@ const server = http.createServer(async (req, res) => {
       const refCards = competitorsMod.topCards(store, req.userId, { audience: card.audience, discount: card.discount, k: 3 });
       const benchLib = benchmarkMod.getBenchmark(store);
       const benchHits = benchmarkMod.queryBenchmark(benchLib, { audience: card.audience, discount: card.discount, k: 3 });
-      // ④ 变体生成：需求（act.needs）× 标签分布 → 一次调用出三档；AI 离线全落标准三档
+      // ④ 变体生成：需求（act.needs 纯字符串视图）× 标签分布 → 一次调用出三档；AI 离线全落标准三档
       const act = body.actId ? store.getAct(body.actId) : null;
-      const needs = (act && act.needs) || {};
+      const needs = needsMod.plainNeeds((act && act.needs) || {});
       const tagDist = tagsMod.tagDistribution(store, matched);
       const draftFacts = {
         // M4 品牌链：设置页 shopBrand（非默认）> 方案卡 brand > CartBack 兜底；固化到 draft.brand

@@ -50,10 +50,11 @@ const COACH_SYSTEM_PROMPT = `你是「CartBack」的 AI 搭子，主业只有一
 - 用户问起已记下的信息（"我卖啥来着""折扣规矩是什么"）→ 直接用【持久会话记忆】【长期店铺资料】回答，答完再回到正题；绝不因为还在收集阶段就无视他的问题。
 
 【核心规矩（IGDE，最高业务优先级）】
-- 心里默默记四件事：针对谁（audience）、为啥丢（pain）、希望回来干啥（goal）、给什么钩子（offer）。别露出"字段"味儿。
+- 心里默默记四件事：针对谁（audience）、为啥丢（reason）、希望回来干啥（goal）、给什么钩子（offer）。别露出"字段"味儿。
 - needs.audience 只填行为客群段（如"加购未付客户""沉睡老客""浏览未买"）；地域/市场/商品这类长期信息记进 memory，别塞进 needs。
 - 缺哪样才问哪样，一轮只问一个，顺口自然地问；已明确的绝不重复问。
-- 绝不替用户决策：他没提钩子时，你可以列选项问他要哪个，但在他拍板前 needs.offer 保持空串、回复里也不说"就用X"这种定论（不能"那就打8折吧"）。他明确说"你定/看着办/随便"才算授权给默认建议——此时先说"我先按常见打法配一版，你看行不行"。
+- 用户本轮表述和已确认信息冲突时（比如客群前后说法不一），不要擅自替换：回复里自然地向他核实（"你刚说的和前面记的有点不一样，以哪个为准？"）。
+- 绝不替用户决策：他没提钩子时，你可以列选项问他要哪个，但在他拍板前 needs.offer 保持空、回复里也不说"就用X"这种定论（不能"那就打8折吧"）。他明确说"你定/看着办/随便"才算授权给默认建议——此时先说"我先按常见打法配一版，你看行不行"。
 - 用户明确说"别问了/直接给/别啰嗦"时，立刻停止追问：一句话说明还缺什么，然后给一版带占位符的通用写法，或说"我先按常见打法配一版，不合适再调"。
 - 四要素聊齐了，就说一句"我帮你按这个配一封挽回邮件，行不？"（复述要点用大白话，不列字段）。
 - 边界：违法有害（欺诈/钓鱼/违禁）→ 委婉拒；spam 群发/买名单 → 提醒风险不接；非邮箱渠道（社媒/短信）和深度电商战略/财务/法务 → 坦诚不擅长，接回邮件能帮的。
@@ -68,11 +69,12 @@ const COACH_SYSTEM_PROMPT = `你是「CartBack」的 AI 搭子，主业只有一
 阶段：{stage}
 
 【输出格式】只返回一个 JSON 对象，不要 JSON 之外的任何文字（无 markdown 代码块、无解释）：
-{"reply":"这一轮你对用户说的口语化的话","needs":{"audience":"","pain":"","goal":"","offer":""},"memory_patch":{"facts":[],"decisions":[],"corrections":[]},"profile_patch":{}}
-- needs：只填本轮用户明确说出的，值≤12字中性短语（"运费顾虑"而不是"嫌运费太贵"）；没聊到的保持 ""；绝不用你的建议冒充用户的决定。
-- memory_patch.facts/decisions/corrections：只记**本轮新说出**的长期事实/拍板决定/明确纠正，已出现在【持久会话记忆】里的绝不要重复提交；每项 {key, value, evidence}，key 用英文 snake_case 且同类事实沿用同一 key（product/market/tone/constraint/…），evidence 必须逐字摘自用户当前原话；没有新信息就空数组。严禁把你的建议写进记忆。
-- profile_patch：只允许 product/market/currency/brand_tone/default_offer/constraints，每项 {value, evidence(逐字)}；只有"以后/默认/每次"类长期表述才可入 default_offer/constraints；没有就空对象 {}。
-- reply 是说给用户听的口语：不出现 JSON、字段名、"方案卡/配置"等字眼；长度看情境，寒暄短、解释长。`;
+{"reply":"这一轮你对用户说的口语化的话（≤3句，先接住再问/确认）","restatement":["收到：<一句话复述用户刚说的要点>"],"slot_updates":[{"slot":"audience|reason|offer|goal","value":"≤12字中性短语","confidence":0.0到1.0,"inferred":false}],"extras":[{"key":"brand|category|aov|interest|feature|timing|frequency","value":"逐字来自用户原话"}],"corrections":[{"slot":"audience|reason|offer|goal 或 extras 的 key","old":"被纠正的旧值","new":"新值"}]}
+- slot_updates：只填本轮用户明确说出的四槽之一；value 必须能在用户本轮原话里找到依据（逐字或同义主干），绝不用你的建议冒充用户的决定；confidence<0.6 或你只是推测时 inferred:true；没聊到就空数组 []。slot 含义：audience=针对谁（行为客群段），reason=为什么挽回，offer=给什么钩子，goal=要什么结果。
+- extras：品牌名/品类/客单价/兴趣/产品特色/发送时段/发送频率等长期事实，每项 {key,value}，value 逐字来自用户原话；没有新信息就 []。
+- corrections：只有用户明确纠正（改成/换成/不对/不是X是Y）才提交；old 填被纠正的原值，new 填新值；corrections 里的 slot 若是 extras 的 key（如 客单价），引擎会同步更新对应 extras 条目。
+- profile_patch（可选）：只允许 product/market/currency/brand_tone/default_offer/constraints，每项 {value, evidence(逐字)}；只有"以后/默认/每次"类长期表述才可入 default_offer/constraints；没有就省略。
+- reply 是说给用户听的口语：不出现 JSON、字段名、"方案卡/配置"等字眼；长度看情境，寒暄短、解释长，中文口语不超过 3 句；若你提交了 inferred:true 的槽，reply 里必须带上"我理解为…，不对请纠正"类表述。`;
 
 /**
  * 组装多轮对话消息（体验层核心）：system + 持久记忆 + 较早摘要 + 最近原文 + 当前句。
@@ -83,7 +85,7 @@ const COACH_SYSTEM_PROMPT = `你是「CartBack」的 AI 搭子，主业只有一
  *   needs    : 已抽取意图（注入 system 进度）
  *   stage    : 当前阶段
  */
-function buildCoachContext({ act, userText, needs, stage, missing, agentProfile, contextOptions = {} }) {
+function buildCoachContext({ act, userText, needs, stage, missing, agentProfile, chips = [], contextOptions = {} }) {
   const sysNeeds = needs && Object.keys(needs).length
     ? JSON.stringify(needs)
     : '（还没聊出啥，先随便唠）';
@@ -105,12 +107,16 @@ function buildCoachContext({ act, userText, needs, stage, missing, agentProfile,
   const directive = miss.length
     ? `\n【本轮任务·硬约束】只补缺的：${miss.join('、')}。一轮只问一个字段（问句里可以列选项，但绝不同时问两个字段），换个自然的新问法；已确认的绝不再提、不复述。问 offer 用中性措辞（如"想给个什么钩子？折扣/满减/包邮，还是别的？"）。【防复读·硬约束】reply 绝不能重复你上一句回复的原文或近似原文；连续追问同一项时必须换角度、给例子或补充新信息。`
     : `\n${readyDirective}`;
+  // B4/chips：引擎决定本轮被问槽位并把快捷选项下发给交付层；提示词同步告知口径，保证问句与 chips 一致
+  const chipsDirective = Array.isArray(chips) && chips.length
+    ? `\n【快捷选项·硬约束】本轮追问若给选项，只准用这几个（顺序不变，口语化带出）：${chips.join(' / ')}。`
+    : '';
   const langDirective = isEn
     ? '\n【语言硬约束·最高优先级】用户正在用英文交流：reply 必须全程英文（口语、自然，像跟朋友发消息），needs 值保持简短中文短语。'
     : '';
   const system = COACH_SYSTEM_PROMPT
     .replace('{needs}', sysNeeds)
-    .replace('{stage}', stage || 'S0') + directive + langDirective;
+    .replace('{stage}', stage || 'S0') + directive + chipsDirective + langDirective;
   return buildContext({
     act,
     userText,
@@ -227,7 +233,8 @@ class LLMClient {
     if (!parsed) {
       const reply = this._cleanReply(res.content);
       return {
-        reply: reply || '', needs: {}, memoryPatch: { facts: [], decisions: [], corrections: [] },
+        reply: reply || '', needs: {}, slotUpdates: [], extras: [], corrections: [],
+        memoryPatch: { facts: [], decisions: [], corrections: [] },
         profilePatch: {},
         raw: res.raw, usage: res.usage, jsonOk: false, requestCount,
         contextMeta: res.contextMeta || null
@@ -241,7 +248,8 @@ class LLMClient {
     if (!parsed1) {
       const reply = this._cleanReply(res.content);
       return {
-        reply: reply || '', needs: {}, memoryPatch: { facts: [], decisions: [], corrections: [] },
+        reply: reply || '', needs: {}, slotUpdates: [], extras: [], corrections: [],
+        memoryPatch: { facts: [], decisions: [], corrections: [] },
         profilePatch: {},
         raw: res.raw, usage: res.usage, jsonOk: false, requestCount,
         contextMeta: res.contextMeta || null
@@ -251,6 +259,11 @@ class LLMClient {
     return {
       reply: typeof parsed.reply === 'string' ? parsed.reply : (Array.isArray(parsed.reply) ? parsed.reply.filter(x => typeof x === 'string').join('') : (res.content || '')),
       needs: (parsed.needs && typeof parsed.needs === 'object') ? parsed.needs : {},
+      // PRD v2 envelope 扩展：结构化槽位更新 / 长期事实 / 明确纠正（引擎侧做依据校验与冲突合并）
+      slotUpdates: Array.isArray(parsed.slot_updates) ? parsed.slot_updates
+        : (Array.isArray(parsed.slotUpdates) ? parsed.slotUpdates : []),
+      extras: Array.isArray(parsed.extras) ? parsed.extras : [],
+      corrections: Array.isArray(parsed.corrections) ? parsed.corrections : [],
       memoryPatch: (parsed.memory_patch && typeof parsed.memory_patch === 'object')
         ? parsed.memory_patch
         : { facts: [], decisions: [], corrections: [] },
@@ -303,6 +316,7 @@ class LLMClient {
       return {
         reply: this._cleanReply(full) || '',
         needs: {},
+        slotUpdates: [], extras: [], corrections: [],
         memoryPatch: { facts: [], decisions: [], corrections: [] },
         profilePatch: {},
         raw: { content: full },
@@ -318,6 +332,7 @@ class LLMClient {
       return {
         reply: this._cleanReply(full) || '',
         needs: {},
+        slotUpdates: [], extras: [], corrections: [],
         memoryPatch: { facts: [], decisions: [], corrections: [] },
         profilePatch: {},
         raw: { content: full },
@@ -328,6 +343,11 @@ class LLMClient {
     return {
       reply: typeof parsedN.reply === 'string' ? parsedN.reply : (this._cleanReply(full) || ''),
       needs: (parsedN.needs && typeof parsedN.needs === 'object') ? parsedN.needs : {},
+      // PRD v2 envelope 扩展：结构化槽位更新 / 长期事实 / 明确纠正（引擎侧做依据校验与冲突合并）
+      slotUpdates: Array.isArray(parsedN.slot_updates) ? parsedN.slot_updates
+        : (Array.isArray(parsedN.slotUpdates) ? parsedN.slotUpdates : []),
+      extras: Array.isArray(parsedN.extras) ? parsedN.extras : [],
+      corrections: Array.isArray(parsedN.corrections) ? parsedN.corrections : [],
       memoryPatch: (parsedN.memory_patch && typeof parsedN.memory_patch === 'object')
         ? parsedN.memory_patch
         : { facts: [], decisions: [], corrections: [] },
@@ -550,7 +570,7 @@ class LLMClient {
  *   // 非流式：一次拿结构化结果
  *   const msgs = buildCoachMessages({ act, userText, needs: act.needs, stage: act.stage });
  *   const r = await client.chatStructured({ messages: msgs });
- *   // r.reply = 自然话术；r.needs = { audience, pain, goal, offer }
+ *   // r.reply = 自然话术；r.slot_updates/extras/corrections = PRD v2 结构化提取；r.needs = { audience, reason, goal, offer }
  *
  *   // 流式：打字机效果（前端边收边渲染）
  *   await client.streamChat({

@@ -108,7 +108,7 @@ async function generateVariants({ draft = {}, needs = {}, llmJSON = null, strate
     '只返回一个 JSON 对象：{"variants":[{"tier":"discount","subject":"…","body":"…"},{"tier":"urgency",…},{"tier":"standard",…}]}，不要 markdown 代码块。';
   const facts = {
     brand: draft.brand || '', discount: draft.discount || '', coupon: draft.coupon || '',
-    product: draft.product || draft.audience || '', pain: needs.pain || '', goal: needs.goal || '',
+    product: draft.product || draft.audience || '', pain: needs.reason || needs.pain || '', goal: needs.goal || '',
     audience: needs.audience || '', offer: needs.offer || draft.offer || ''
   };
   const user = '【事实】' + JSON.stringify(facts) + '\n【基准模板（可在此基础上改写角度）】' +
