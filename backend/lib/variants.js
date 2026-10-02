@@ -39,20 +39,32 @@ function completeTiers(variants, standardBase) {
 
 /** 本地标准三档（确定性、零 LLM）：AI 离线降级 + LLM 输出的缺档补底
  *  文案口径：正文精简 ≤3 短句（不再堆段落）；{{cart}} 为逐收件人购物车金额位
- *  （render.js 展开为 "your $349 cart"，无金额时退 "your cart"）。 */
+ *  （render.js 展开为 "your $349 cart"，无金额时退 "your cart"）。
+ *  Wave 2：无钩子方案（discount=0，无折扣码）→ 不出现「% OFF」等折扣事实，纯提醒信文案
+ *  （E2 红线配套：卡面/邮件不虚构不存在的优惠）。 */
 function standardVariants(draft = {}) {
   const brand = draft.brand || 'CartBack';
-  const discountNum = Number(draft.discount) || 10;
-  const discount = Number.isInteger(discountNum) ? String(discountNum) : String(+discountNum.toFixed(1)); // "12.0"→"12"
+  const discountRaw = Number(draft.discount);
+  const hasDiscount = Number.isFinite(discountRaw) && discountRaw > 0;
+  const discount = hasDiscount
+    ? (Number.isInteger(discountRaw) ? String(discountRaw) : String(+discountRaw.toFixed(1)))
+    : '';
   const coupon = draft.coupon || '';
   const item = draft.product || 'items';
-  const couponLine = coupon ? `Code ${coupon}` : 'Discount auto-applied';
+  const couponLine = coupon ? `Code ${coupon}` : (hasDiscount ? 'Discount auto-applied' : 'No code needed');
+  const discountTier = hasDiscount
+    ? {
+        tier: 'discount',
+        subject: `${discount}% OFF — {{name}}, don't pay full price`,
+        body: `Hi {{name}},\n\n{{cart}} at ${brand} is still reserved — ${discount}% off is yours. ${couponLine} at checkout.`
+      }
+    : {
+        tier: 'discount',
+        subject: `{{name}}, your cart is still saved at ${brand}`,
+        body: `Hi {{name}},\n\n{{cart}} at ${brand} is still reserved — come back whenever you're ready. ${couponLine} at checkout.`
+      };
   return [
-    {
-      tier: 'discount',
-      subject: `${discount}% OFF — {{name}}, don't pay full price`,
-      body: `Hi {{name}},\n\n{{cart}} at ${brand} is still reserved — ${discount}% off is yours. ${couponLine} at checkout.`
-    },
+    discountTier,
     {
       tier: 'urgency',
       subject: '{{name}}, your cart is about to expire',

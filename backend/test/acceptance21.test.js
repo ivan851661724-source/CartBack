@@ -1,13 +1,14 @@
 'use strict';
 
 /**
- * PRD v2 21 句验收 —— in-scope 13 句（#1-#11、#15、#16）离线自动化。
+ * PRD v2 21 句验收 —— in-scope 14 句（#1-#11、#13、#15、#16）离线自动化。
  *
- * 用例本体在 eval/cases/prd-v2.jsonl（输入唯一来源：13 句 in-scope + 8 句 deferred）；
+ * 用例本体在 eval/cases/prd-v2.jsonl（输入唯一来源：14 句 in-scope + 7 句 deferred）；
  * 本测试按序重放到**同一个 act**，逐句断言（断言点 = 任务 B-4 剧本）。
  * 模型注入缝复用现有假 callAI 模式（eval/runner.js / igde-context / streaming 同款），
  * envelope 用 PRD v2 新契约 {reply, restatement, slot_updates, extras, corrections}，
  * 引擎侧 B1 依据校验 / B2 合并冲突 / B3 先落库后回复 / B4 选问与 chips / B5 组装全部真实执行。
+ * #13（Wave 2 启用）为降级补测：在线重放该句 + 文件底部「断开 LLM 重放 #1-#10」专门用例。
  */
 
 const test = require('node:test');
@@ -98,6 +99,15 @@ const ENVELOPES = {
     extras: [],
     corrections: []
   },
+  // #13（Wave 2 启用，降级补测）：方案卡/邮件预览类 —— 降级语义见文件底部专门用例（断开 LLM 重放 #1-#10）
+  // 注意：reply 避开 L4 抢跑词表（「方案卡/主题行/正文…」原词会触发重生成、打乱剧本）
+  p13: {
+    reply: '配置都在下面确认标签里了，四样都齐。点「确认」我就去你店铺建码、出正式卡片。',
+    restatement: ['收到：查看配置'],
+    slot_updates: [],
+    extras: [],
+    corrections: []
+  },
   // #15 时序编排：#4 冲突在 #5 被 C6 兜底（受众=年轻人 inferred）后，此处带修正语气重放，两条 correction 均可执行
   p15: {
     reply: '改好了：客群换成老客，钩子换成 15% off。确认卡里已经同步，你再核对一眼。',
@@ -117,15 +127,15 @@ const ENVELOPES = {
     corrections: []
   }
 };
-const IN_SCOPE_ORDER = ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08', 'p09', 'p10', 'p11', 'p15', 'p16'];
+const IN_SCOPE_ORDER = ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08', 'p09', 'p10', 'p11', 'p13', 'p15', 'p16'];
 
-test('prd-v2.jsonl 结构：21 句齐全，13 句 in-scope / 8 句 deferred', () => {
+test('prd-v2.jsonl 结构：21 句齐全，14 句 in-scope / 7 句 deferred', () => {
   const cases = acc.loadCases(CASES_FILE);
   assert.equal(cases.length, 21, 'prd-v2.jsonl 应含 21 句');
   const inScope = cases.filter(c => !c.deferred);
   const deferred = cases.filter(c => c.deferred);
-  assert.equal(inScope.length, 13, 'in-scope 应为 13 句');
-  assert.equal(deferred.length, 8, 'deferred 应为 8 句');
+  assert.equal(inScope.length, 14, 'in-scope 应为 14 句（Wave 2 启用 #13）');
+  assert.equal(deferred.length, 7, 'deferred 应为 7 句');
   for (const c of deferred) assert.deepEqual(c.expect, {}, 'deferred 句断言必须为空对象');
   assert.deepEqual(inScope.map(c => c.id), IN_SCOPE_ORDER, 'in-scope 句序应与剧本一致');
   for (const c of inScope) {
@@ -235,13 +245,22 @@ test('13 句 in-scope 重放到同一个 act：逐句断言全过', async () => 
       assert.equal(a.memory.corrections.length, ctx.corrBefore, 'p11 同值忽略不记 corrections');
       assert.deepEqual(r.chips, [], 'p11 无追问 chips=[]');
     },
+    p13(a, r) {
+      // #13（Wave 2）：S2 查看方案卡 —— 在线轮出「无码预览卡」（E2 红线：卡面无未真实存在的码）；stage 停留 S2
+      assert.equal(a.stage, 'S2', 'p13 stage 保持 S2（真实出卡在 /confirm 建码之后）');
+      assert.equal(a.filled_count, 4, 'p13 filled_count 保持 4');
+      assert.ok(r.planCard, 'p13 在线轮产出方案卡预览');
+      assert.equal(r.planCard.discount && r.planCard.discount.code || null, null, 'p13 预览卡不含折扣码');
+      assert.equal(r.planCard.coupon || '', '', 'p13 预览卡 coupon 为空（无假码）');
+      assert.ok(!/COMEBACK-/i.test(JSON.stringify(r.planCard)), 'p13 卡面不得出现本地拼的假码');
+      assert.deepEqual(r.chips, [], 'p13 无追问 chips=[]');
+    },
     p15(a, r) {
       // #15 同轮双 correction：audience→老客、offer→15%；corrections +2；回复复述两个新值
+      // （old 以库内现值重算——#13 重放后库内现值随原话采集演进，只断言 slot 与新值）
       const corr = a.memory.corrections.slice(-2);
-      assert.deepEqual(corr.map(c => [c.slot, c.old, c.new]).sort(), [
-        ['audience', '年轻人', '老客'],
-        ['offer', '10% off', '15% off']
-      ].sort(), 'p15 corrections 应追加两条（旧值以库内现值重算）');
+      assert.deepEqual(corr.map(c => c.slot).sort(), ['audience', 'offer'], 'p15 corrections 追加两条（audience/offer）');
+      assert.deepEqual(corr.map(c => c.new).sort(), ['15% off', '老客'].sort(), 'p15 correction 新值正确');
       acc.assertSlots(a, { audience: { contains: ['老客'], source: 'explicit' }, offer: { contains: ['15%'], source: 'explicit' } }, 'p15');
       acc.assertReplyIncludes(r, ['老客', '15%'], 'p15 回复复述两个新值');
       assert.equal(a.filled_count, 4, 'p15 filled_count 保持 4');
@@ -274,9 +293,9 @@ test('13 句 in-scope 重放到同一个 act：逐句断言全过', async () => 
     perTurn[id](act, r, { corrBefore });
   }
 
-  assert.equal(persistCalls.length, 13, '每句恰好落库一次');
-  assert.equal(Object.keys(ENVELOPES).length, 13);
-  assert.ok(results.p01, '13 轮全部执行');
+  assert.equal(persistCalls.length, 14, '每句恰好落库一次');
+  assert.equal(Object.keys(ENVELOPES).length, 14);
+  assert.ok(results.p01, '14 轮全部执行');
 
   // —— 终态汇总：extras 7 条、四槽全 explicit、id 不变 ——
   assert.equal(act.memory.extras.length, 7, '终态 extras 应为 7 条');
@@ -392,4 +411,50 @@ test('B2 冲突澄清的 C6 兜底：追问轮后用户岔开话题 → 候选�
   assert.equal(acc.slotText(act.needs.audience), '年轻白领', 'C6：候选值接受入槽');
   assert.equal(act.needs.audience.source, 'inferred', 'C6 兜底 source=inferred');
   assert.ok(/我理解为|不对请纠正/.test(r3.reply), 'C6 接受后回复带纠正话术');
+});
+
+test('剧本 #13 降级补测：断开 LLM 重放 #1-#10 输入 —— 状态机不瘫、降级不出 planCard', async () => {
+  const cases = acc.loadCases(CASES_FILE);
+  const byId = Object.fromEntries(cases.map(c => [c.id, c]));
+  // 断开 LLM：纯桩引擎（aiEnabled=false），与线上 AI 失联降级同路径（G2）
+  const igde = new IGDE({ aiEnabled: false, criticMode: 'off' });
+  const act = acc.makeAcceptanceAct('act_p13_degraded');
+  act.messages.push({ role: 'assistant', content: igde.opening().reply, ts: 0 });
+
+  const replayIds = ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08', 'p09', 'p10', 'p13'];
+  const countFilled = require('../lib/needs').countFilled; // 降级轮无 persist：filled_count 以 needs 现算为准
+  let sawProbe = false;       // 逐项确认+下一问（缺失槽轮必有追问与 chips）
+  let lastResult = null;
+  for (const id of replayIds) {
+    const input = byId[id].input;
+    assert.ok(input, `${id} input 已回填`);
+    const t0 = Date.now();
+    const r = await igde.handle(act, input, { locale: 'en' });
+    const dt = Date.now() - t0;
+    // 降级轮硬口径
+    assert.equal(r.engine, 'degraded', `${id} engine=degraded`);
+    assert.equal(r.planCard, null, `${id} 降级轮不出 planCard（真实出卡在 /confirm 建码之后）`);
+    assert.ok(dt < 1000, `${id} 每轮延迟 <1s（实际 ${dt}ms）`);
+    // 状态机仍在推进：缺失槽轮必有单点追问 + 对应 chips；齐了之后 chips=[] 且引导确认
+    if (countFilled(act.needs) < 4) {
+      if (r.askedSlot) {
+        sawProbe = true;
+        assert.deepEqual(r.chips, acc.chipsFor(r.askedSlot), `${id} chips=被问槽快捷项（逐项确认+下一问）`);
+      }
+    } else {
+      assert.deepEqual(r.chips, [], `${id} 4/4 后无追问 chips`);
+      assert.ok(!r.askedSlot, `${id} 4/4 后不再追问`);
+    }
+    lastResult = r;
+  }
+  assert.ok(sawProbe, '重放 #1-#10 过程中状态机持续逐项追问（未瘫）');
+  // 4/4 时 stage=S2 且不出 planCard（降级口径；降级轮无 persist，四要素以 needs 现算为准）
+  assert.equal(countFilled(act.needs), 4, '重放结束四要素齐');
+  assert.equal(act.stage, 'S2', '4/4 时 stage=S2');
+  assert.equal(lastResult.planCard, null, '4/4 时不出 planCard');
+  assert.ok(/确认|核对|方案/.test(lastResult.reply || ''), '降级收口仍引导确认（不空转）');
+  // 四槽语义抽查：降级词表抽取在重放过程中接住了四槽（原话为准，值随输入演进）
+  assert.ok(acc.slotText(act.needs.audience).includes('加购'), 'audience 已采集');
+  assert.ok(acc.slotText(act.needs.reason), 'reason 已采集');
+  assert.equal(acc.slotText(act.needs.offer), '10% off', 'offer 已采集（数值+单位）');
 });

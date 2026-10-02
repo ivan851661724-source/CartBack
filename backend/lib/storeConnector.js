@@ -71,6 +71,16 @@ class StoreConnector {
   async listBehaviorEvents(filter = {}) { throw new Error('listBehaviorEvents not implemented'); }
   /** 连通性自检：{ ok, type, detail } */
   async health() { throw new Error('health not implemented'); }
+  /**
+   * Wave 2 E2：真实建码（POST price_rules + discount_code，Admin REST）。
+   * @returns { code, percent_off, price_rule_id?, raw? } —— code 必须来自店铺回执，禁止本地拼
+   * @throws 创建失败（网络/权限/超时）——调用方捕获后走「不出卡三出口」
+   */
+  async createDiscountCode() { throw new Error('createDiscountCode not implemented'); }
+  /** Wave 2 E2/D4⑤：校验折扣码存在且有效 → { code, percent_off } | null；异常向上抛（闸门⑤视为不过） */
+  async verifyDiscountCode() { throw new Error('verifyDiscountCode not implemented'); }
+  /** 连接器是否支持折扣码操作（E2 分支判定用） */
+  supportsDiscountCodes() { return false; }
 }
 
 /* ----------------------------- Shopify 适配器 ----------------------------- */
@@ -135,6 +145,64 @@ class ShopifyConnector extends StoreConnector {
     }
     return out;
   }
+
+  supportsDiscountCodes() { return true; }
+
+  /**
+   * E2 真实建码：POST /price_rules.json（percentage 规则）→ POST /price_rules/:id/discount_codes.json。
+   * 返回的 code 一律取自店铺回执（ discount_code.code 原样），失败抛错（调用方走三出口）。
+   */
+  async createDiscountCode({ code, percent_off } = {}) {
+    const name = String(code || '').trim().toUpperCase();
+    const pct = Number(percent_off);
+    if (!name || !Number.isFinite(pct) || pct <= 0 || pct > 90) {
+      throw new Error('createDiscountCode: code/percent_off 参数非法');
+    }
+    const pr = await fetchJson(this._base() + '/price_rules.json', {
+      method: 'POST',
+      headers: this._headers(),
+      body: JSON.stringify({
+        price_rule: {
+          title: 'CartBack comeback ' + name,
+          target_type: 'line_item',
+          target_selection: 'all',
+          allocation_method: 'across',
+          value_type: 'percentage',
+          value: -pct,                 // Shopify 口径：折扣为负数
+          once_per_customer: true
+        }
+      })
+    });
+    const rule = pr && pr.price_rule;
+    if (!rule || !rule.id) throw new Error('price_rule 创建失败：' + JSON.stringify(pr).slice(0, 200));
+    const dc = await fetchJson(`${this._base()}/price_rules/${rule.id}/discount_codes.json`, {
+      method: 'POST',
+      headers: this._headers(),
+      body: JSON.stringify({ discount_code: { code: name } })
+    });
+    const created = dc && dc.discount_code;
+    if (!created || !created.code) throw new Error('discount_code 创建失败：' + JSON.stringify(dc).slice(0, 200));
+    // 真实回执优先：店铺返回的 code（可能被规范化）作为唯一权威
+    return { code: String(created.code).toUpperCase(), percent_off: pct, price_rule_id: rule.id, raw: created };
+  }
+
+  /** D4⑤ 校验码存在且有效：扫 price_rules + discount_codes（cap 50 条规则，防慢查询），命中返回回执 */
+  async verifyDiscountCode(code) {
+    const target = String(code || '').trim().toUpperCase();
+    if (!target) return null;
+    const prs = await fetchJson(this._base() + '/price_rules.json?limit=50', { headers: this._headers() });
+    for (const rule of (prs && prs.price_rules) || []) {
+      const dc = await fetchJson(`${this._base()}/price_rules/${rule.id}/discount_codes.json?limit=250`, { headers: this._headers() })
+        .catch(() => ({ discount_codes: [] }));
+      for (const c of (dc && dc.discount_codes) || []) {
+        if (String(c.code || '').trim().toUpperCase() === target) {
+          const pct = rule.value_type === 'percentage' ? Math.abs(Number(rule.value)) || 0 : 0;
+          return { code: target, percent_off: pct, price_rule_id: rule.id };
+        }
+      }
+    }
+    return null;
+  }
 }
 
 /* --------------------------- 通用 REST 适配器 --------------------------- */
@@ -192,17 +260,61 @@ class GenericRestConnector extends StoreConnector {
       ts: e.ts || Date.parse(e.time) || Date.now()
     })).filter(e => e.email);
   }
+
+  supportsDiscountCodes() { return true; }
+  /** 通用 REST 约定：POST /discounts 建码、GET /discounts?code= 校验（自建站按此契约实现） */
+  async createDiscountCode({ code, percent_off } = {}) {
+    const j = await fetchJson(this.baseUrl + '/discounts', {
+      method: 'POST', headers: this._headers(),
+      body: JSON.stringify({ code: String(code || '').toUpperCase(), percent_off: Number(percent_off) || 0 })
+    });
+    if (!j || !j.code) throw new Error('discount 创建失败：' + JSON.stringify(j).slice(0, 160));
+    return { code: String(j.code).toUpperCase(), percent_off: Number(j.percent_off) || Number(percent_off) || 0, raw: j };
+  }
+  async verifyDiscountCode(code) {
+    const j = await fetchJson(this.baseUrl + '/discounts?code=' + encodeURIComponent(String(code || '').toUpperCase()), { headers: this._headers() });
+    const d = j && (j.discount || j);
+    return d && d.code ? { code: String(d.code).toUpperCase(), percent_off: Number(d.percent_off) || 0 } : null;
+  }
 }
 
 /* ------------------------------ Mock 适配器 ------------------------------ */
 /**
  * 本地/开发验证用：返回混合语种 + 混合行为的样本，无需任何凭证即可端到端验证
  * 「语种跟收件人 locale」与「连接器能拉用户+行为」两条链路。
+ * Wave 2：折扣码注入缝（参照 callAI 缝模式）——
+ *   spec.codes        预置现成码 map（默认含 SAVE10=10%，供 reused 分支）
+ *   spec.createFails  置 true 时 createDiscountCode 恒抛错（E2 失败分支测试）
+ *   spec.createLatencyMs  建码延迟（超时分支测试用）
  */
 class MockConnector extends StoreConnector {
-  constructor(spec = {}) { super(spec); this.shop = spec.shop || 'Mock Store'; }
+  constructor(spec = {}) {
+    super(spec);
+    this.shop = spec.shop || 'Mock Store';
+    this.codes = new Map();
+    const seed = spec.codes || { SAVE10: { percent_off: 10 } };
+    for (const [code, meta] of Object.entries(seed)) {
+      this.codes.set(String(code).toUpperCase(), { percent_off: Number(meta && meta.percent_off) || 10 });
+    }
+  }
   async health() { return { ok: true, type: 'mock', detail: this.shop }; }
   async getShopMeta() { return { name: this.shop, defaultLocale: 'en', currency: 'USD', domain: 'mock.local' }; }
+  supportsDiscountCodes() { return true; }
+  async createDiscountCode({ code, percent_off } = {}) {
+    if (this.spec.createLatencyMs) await new Promise(r => setTimeout(r, this.spec.createLatencyMs));
+    if (this.spec.createFails) throw new Error('mock: 店铺建码失败（HTTP 503）');
+    const name = String(code || '').trim().toUpperCase();
+    const pct = Number(percent_off);
+    if (!name || !Number.isFinite(pct) || pct <= 0) throw new Error('mock: code/percent_off 参数非法');
+    if (this.codes.has(name)) throw new Error('mock: 折扣码已存在（' + name + '）');
+    this.codes.set(name, { percent_off: pct });
+    return { code: name, percent_off: pct, price_rule_id: 'mock_' + name.toLowerCase() }; // 模拟店铺回执
+  }
+  async verifyDiscountCode(code) {
+    const name = String(code || '').trim().toUpperCase();
+    const hit = name ? this.codes.get(name) : null;
+    return hit ? { code: name, percent_off: hit.percent_off } : null;
+  }
   async listCustomers() {
     return [
       { id: 'm1', email: 'alice@example.com', name: 'Alice', locale: 'en', country: 'US', tags: ['vip'], totalSpent: 1200, ordersCount: 5 },
@@ -243,6 +355,18 @@ class MultiStoreConnector extends StoreConnector {
   async listBehaviorEvents(filter = {}) {
     const lists = await Promise.all(this.connectors.map(c => c.listBehaviorEvents(filter).catch(() => [])));
     return lists.flat();
+  }
+  /** 多店：折扣码操作委托给第一个支持的连接器（E2 建码只在主店做，跨店不同步） */
+  supportsDiscountCodes() { return this.connectors.some(c => c.supportsDiscountCodes && c.supportsDiscountCodes()); }
+  async createDiscountCode(params) {
+    const c = this.connectors.find(x => x.supportsDiscountCodes && x.supportsDiscountCodes());
+    if (!c) throw new Error('multi: 无支持建码的连接器');
+    return c.createDiscountCode(params);
+  }
+  async verifyDiscountCode(code) {
+    const c = this.connectors.find(x => x.supportsDiscountCodes && x.supportsDiscountCodes());
+    if (!c) throw new Error('multi: 无支持校验码的连接器');
+    return c.verifyDiscountCode(code);
   }
 }
 

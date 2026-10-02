@@ -37,14 +37,16 @@ class JobQueue {
   /**
    * 入队。返回 { job, deduped }；deduped=true 表示命中同 dedupe_key 的进行中任务。
    * payload 必须可 JSON 序列化（落库）。
+   * runAfter：最早执行时间（epoch ms；Wave 2 D4① 时段闸缓发用）——未到点的 pending 任务不被调度。
    */
-  enqueue({ type, payload = {}, dedupeKey = null, maxRetries = null }) {
+  enqueue({ type, payload = {}, dedupeKey = null, maxRetries = null, runAfter = null }) {
     const { job, deduped } = this.store.createJob({
       type, payload, dedupe_key: dedupeKey,
       max_retries: maxRetries != null ? maxRetries : this.maxRetries,
+      run_after: Number(runAfter) || 0,
       status: 'pending'
     });
-    if (!deduped) this.log('job_enqueue', { job_id: job.id, type, dedupe_key: dedupeKey });
+    if (!deduped) this.log('job_enqueue', { job_id: job.id, type, dedupe_key: dedupeKey, run_after: job.run_after || 0 });
     this._schedule();
     return { job, deduped };
   }
@@ -63,6 +65,7 @@ class JobQueue {
     const rows = this.store._read('jobs');
     return {
       pending: rows.filter(j => j.status === 'pending').length,
+      scheduled: rows.filter(j => j.status === 'pending' && (j.run_after || 0) > Date.now()).length,
       running: rows.filter(j => j.status === 'running').length,
       inflight: this.inflight
     };
@@ -70,16 +73,29 @@ class JobQueue {
 
   _schedule() {
     if (this._stopped) return;
-    if (this._timer) return;
-    this._timer = setTimeout(() => { this._timer = null; this._tick(); }, 0);
+    // Wave 2：支持 run_after 定时任务。有已到点的任务 → 立即 tick（必要时重置未到点的旧定时器，
+    // 防止新入队的即时任务被最长 60s 的缓发定时器压住）；只有未到点任务 → 定时到最近到点时刻。
+    const pending = this.store.listPendingJobs().filter(j => this.handlers.has(j.type));
+    const hasDue = pending.some(j => (j.run_after || 0) <= Date.now());
+    if (this._timer) {
+      if (!hasDue || this._timerAt <= Date.now()) return;
+      clearTimeout(this._timer);
+      this._timer = null;
+      this._timerAt = 0;
+    }
+    const future = pending.map(j => (j.run_after || 0) - Date.now()).filter(d => d > 0);
+    const waitMs = hasDue ? 0 : Math.min(future.length ? Math.min(...future) : 0, 60000);
+    this._timerAt = Date.now() + waitMs;
+    this._timer = setTimeout(() => { this._timer = null; this._timerAt = 0; this._tick(); }, waitMs);
   }
 
   async _tick() {
     while (!this._stopped && this.inflight < this.concurrency) {
-      const next = this.store.listPendingJobs()
+      const due = this.store.listPendingJobs()
         .filter(j => this.handlers.has(j.type))
-        .sort((a, b) => a.created_at - b.created_at)[0];
-      if (!next) return;
+        .filter(j => (j.run_after || 0) <= Date.now());   // Wave 2：未到缓发点的不取
+      const next = due.sort((a, b) => a.created_at - b.created_at)[0];
+      if (!next) break;
       this._run(next);
     }
   }

@@ -10,7 +10,7 @@
 {"id": "p10", "input": "发送频率每周不超过 2 封", "expect": {"assert": "offer 不动（错切回归样本：发送 的 送 不得触发钩子抽取）；extras 增加 发送频率；stage 保持 S2", "filled": 4, "chips": []}, "deferred": false}
 {"id": "p11", "input": "我希望拿到的结果是：本月挽回 100 单", "expect": {"assert": "goal 已填 → 同值忽略不清零：filled_count 保持 4、act.id 不变、stage 保持 S2、corrections 不新增", "filled": 4, "chips": []}, "deferred": false}
 {"id": "p12", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #12（确认卡查看/摘要类，原文待 PRD v2 文档归库后回填）"}
-{"id": "p13", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #13（方案卡/邮件预览类，原文待回填）"}
+{"id": "p13", "input": "加购未付的客户忘了付款，希望他们回来完成付款，把方案卡给我看看", "expect": {"assert": "Wave 2 启用（降级补测）：断开 LLM 后按序重放 #1-#10 与本句输入 —— 回复仍走状态机（逐项确认+下一问→齐后引导确认）、每轮延迟<1s、engine=degraded、4/4 时 stage=S2 且不出 planCard（真实出卡在 /confirm 建码之后）", "filled": 4, "chips": []}, "deferred": false, "note": "PRD 21 句剧本 #13（方案卡/邮件预览类）；Wave 2 以降级语义启用，input 为代表性话术，测试本体重放 #1-#10 输入"}
 {"id": "p14", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #14（草稿生成/编辑类，原文待回填）"}
 {"id": "p15", "input": "受众改成老客，折扣换 15%", "expect": {"assert": "同轮两条 correction 生效：audience.value 含 老客、offer.value 含 15%；corrections 追加 2 条；回复复述两个新值；filled_count 保持 4", "filled": 4, "chips": []}, "deferred": false}
 {"id": "p16", "input": "嗯，我知道了", "expect": {"assert": "4/4 且 S2 后任意输入 → 回复为引导确认（含 确认 或 核对 字样），不继续问四槽、不产出新追问 chips（chips=[]），stage 保持 S2", "filled": 4, "chips": []}, "deferred": false}

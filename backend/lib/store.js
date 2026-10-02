@@ -17,7 +17,9 @@ const SCHEMA = {
     status: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER',
     user_id: 'TEXT',   // 归属用户（整改 1b）；null/缺失 = 本地模式历史数据
     memory: 'JSON', context_summary: 'JSON',
-    summary_cursor: 'INTEGER', context_version: 'INTEGER'
+    summary_cursor: 'INTEGER', context_version: 'INTEGER',
+    plan_card: 'JSON',            // Wave 2 D3：confirm 产出的服务端权威 planCard（S3 可回读；S2 改参后作废）
+    execution_snapshot: 'JSON'    // Wave 2 D3：confirm 冻结的四字段快照（audience/reach_count/discount/estGmv），闸门⑤ diff 依据
   },
   drafts: {
     id: 'TEXT', act_id: 'TEXT', subject: 'TEXT', body: 'TEXT', audience: 'JSON',
@@ -73,12 +75,26 @@ const SCHEMA = {
     // 异步任务持久化（队列兜底可见性；执行态在内存驱动，重启后 pending 任务可续跑/标记失败）
     id: 'TEXT', type: 'TEXT', payload: 'JSON', status: 'TEXT',
     dedupe_key: 'TEXT', retry_count: 'INTEGER', max_retries: 'INTEGER',
-    result: 'JSON', error: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER'
+    result: 'JSON', error: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER',
+    run_after: 'INTEGER'      // Wave 2 D4①：时段闸缓发的最早执行时间（epoch ms；0/空 = 立即）
   },
   agent_profiles: {
     user_id: 'TEXT', profile: 'JSON', updated_at: 'INTEGER'
   },
   meta: { key: 'TEXT', value: 'TEXT' },
+  // —— Wave 2：sends 实发流水（逐收件人逐封，最终态一行，重试幂等更新）——
+  sends: {
+    id: 'TEXT', act_id: 'TEXT', campaign_id: 'TEXT',   // campaign_id = draft id（无草稿为 NULL）
+    recipient: 'TEXT', template: 'TEXT', tag: 'TEXT', code: 'TEXT',
+    tz: 'TEXT', gate_snapshot: 'JSON', at: 'INTEGER', status: 'TEXT'
+    // 幂等键 = (campaign_id, recipient)：重试不追加新行，只更新 status/at（PRD Wave 2 契约⑤）
+  },
+  // —— Wave 2：holdout 对照组（冻结名单绝不写入 sends、不收信、不计挽回）——
+  holdouts: {
+    id: 'TEXT', act_id: 'TEXT', campaign_id: 'TEXT',
+    recipient: 'TEXT', frozen_at: 'INTEGER', ratio: 'REAL', source: 'TEXT'
+    // source 本波恒 "single_plan"；幂等键 = (campaign_id, recipient)
+  },
   // —— 用户账号体系（架构方案 v4 D7/D8）——
   // users/sessions 为全局表，行级语义；当前单进程下「读全表→过滤→写回」安全（读写间无 await），
   // 多实例部署必须改行级 SQL（insertRow/updateRow/deleteRow），否则并发互相覆盖丢数据（整改 6）。
@@ -234,6 +250,22 @@ class Store {
   }
   deleteAct(id) {
     this._write('acts', this._read('acts').filter(a => a.id !== id));
+  }
+
+  // —— Wave 2 closed 触发点：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）——
+  // 可见性同 getActsByUser 口径：本用户的 act + 无归属的历史 act（本地模式共享语义）。
+  closeOpenActs(userId, exceptId) {
+    const rows = this._read('acts');
+    let n = 0;
+    for (const a of rows) {
+      if (a.id === exceptId || a.stage === 'closed') continue;
+      if (a.user_id && a.user_id !== userId) continue;
+      a.stage = 'closed';
+      a.updated_at = Date.now();
+      n++;
+    }
+    if (n) this._write('acts', rows);
+    return n;
   }
 
   // —— 每用户一份简单长期资料（MVP；多店铺作用域后续再扩展） ——
@@ -496,6 +528,67 @@ class Store {
     this._write('jobs', rows); return j;
   }
   listPendingJobs() { return this._read('jobs').filter(j => j.status === 'pending'); }
+
+  // —— Wave 2：sends 实发流水（逐收件人逐封；幂等键 campaign_id+recipient，重试不追加新行）——
+  /**
+   * 记录/更新一行最终态。status ∈ 'sent' | 'failed'（'sending' 为中间态，重试覆盖）。
+   * 同 (campaign_id, recipient) 已存在 → 原行更新（gate_snapshot/模板/时区/状态刷新），绝不追加。
+   */
+  recordSendRow({ act_id, campaign_id, recipient, template, tag, code, tz, gate_snapshot, at, status }) {
+    if (!campaign_id || !recipient) return null;
+    const rows = this._read('sends');
+    const key = String(recipient).toLowerCase();
+    const existing = rows.find(r => r.campaign_id === campaign_id && String(r.recipient).toLowerCase() === key);
+    const row = existing || { id: uid('snd_'), campaign_id, recipient: key, act_id: act_id || null };
+    Object.assign(row, {
+      act_id: act_id || row.act_id || null,
+      template: template != null ? template : row.template,
+      tag: tag != null ? tag : row.tag,
+      code: code != null ? code : row.code,
+      tz: tz != null ? tz : row.tz,
+      gate_snapshot: gate_snapshot != null ? gate_snapshot : row.gate_snapshot,
+      at: at || Date.now(),
+      status: status || row.status || 'sending'
+    });
+    if (!existing) rows.push(row);
+    this._write('sends', rows);
+    return row;
+  }
+  getSends(filter = {}) {
+    let rows = this._read('sends');
+    if (filter.campaign_id) rows = rows.filter(r => r.campaign_id === filter.campaign_id);
+    if (filter.act_id) rows = rows.filter(r => r.act_id === filter.act_id);
+    if (filter.status) rows = rows.filter(r => r.status === filter.status);
+    return rows;
+  }
+
+  // —— Wave 2：holdout 对照组（冻结一次幂等；成员绝不写入 sends）——
+  /** (campaign_id, recipient) 已冻结 → 原行保留（不覆盖 frozen_at），返回是否新冻结 */
+  freezeHoldouts({ act_id, campaign_id, recipients, ratio, source, frozen_at }) {
+    const list = (Array.isArray(recipients) ? recipients : []).map(r => String(r || '').toLowerCase()).filter(Boolean);
+    if (!list.length) return { inserted: 0, members: [] };
+    const rows = this._read('holdouts');
+    const have = new Set(rows.filter(r => r.campaign_id === campaign_id).map(r => String(r.recipient).toLowerCase()));
+    const members = [];
+    for (const email of list) {
+      if (have.has(email)) continue;
+      have.add(email);
+      const row = {
+        id: uid('hold_'), act_id: act_id || null, campaign_id: campaign_id || null,
+        recipient: email, frozen_at: frozen_at || Date.now(),
+        ratio: Number(ratio) || 0.1, source: source || 'single_plan'
+      };
+      rows.push(row); members.push(email);
+    }
+    if (members.length) this._write('holdouts', rows);
+    return { inserted: members.length, members };
+  }
+  getHoldouts(filter = {}) {
+    let rows = this._read('holdouts');
+    if (filter.campaign_id) rows = rows.filter(r => r.campaign_id === filter.campaign_id);
+    if (filter.act_id) rows = rows.filter(r => r.act_id === filter.act_id);
+    return rows;
+  }
 
   // —— meta ——
   getMeta(key) { const r = this._read('meta').find(m => m.key === key); return r ? r.value : null; }

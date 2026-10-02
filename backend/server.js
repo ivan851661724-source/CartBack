@@ -12,6 +12,7 @@ const { Store, uid } = require('./lib/store');
 const igdeMod = require('./lib/igde');
 const { IGDE, guardrailL2 } = igdeMod;
 const needsMod = require('./lib/needs');
+const execution = require('./lib/execution');   // Wave 2：D3 planCard 同源 / D4 五道闸门 / E2 建码决策 / holdout / E3 时区
 const { LLMClient } = require('./lib/llm');
 const { normalizeAgentProfile } = require('./lib/context');
 const { buildConnectors } = require('./lib/storeConnector');
@@ -201,8 +202,8 @@ async function generateMailHtml(draft, card, opts = {}) {
     // 与本地 email-automation 一致；不再「优先复用 Agent 产出省 Token」，那样质量明显更低且与设计不符）
     subject: card.subject || '',
     body: card.body || '',
-    // 折扣数值口径唯一：优先方案卡 discountNum（producePlanCard 统一产生，% off），文本兜底解析；默认与 variants/render 一致（10）
-    discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
+    // 折扣数值口径唯一：方案卡 discountNum（% off）；card.discount 兼容数字/对象（Wave 2 planCard.discount 为对象）
+    discount: execution.resolveDiscountNum(card),
     brand: resolveBrand(card),
     audience: card.audience || '',
     cart_url: card.cart_url || config.shopCartUrl || 'https://cartback.demo',
@@ -558,6 +559,21 @@ function matchAudienceByDesc(desc) {
 function resolveRecipients(draft) {
   return filterTargetable(matchAudienceByDesc(draft.audience)).slice(0, 200);
 }
+// Wave 2 D3：净名单唯一口径（可发送上限 200 与 reach_count / matchedCount / holdout 圈定同源）
+function audienceNetList(desc) {
+  return filterTargetable(matchAudienceByDesc(desc)).slice(0, 200)
+    .filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
+}
+
+// Wave 2 D4③ 白标：商家品牌解析链（设置页 shopBrand 非默认 > 对话 extras「brand/品牌」 > 工具默认 'CartBack'）。
+// 返回 'CartBack' = 未白标 → 闸门③拦截（署名绝不能落到工具品牌上）。
+function resolveMerchantBrand(act) {
+  if (config.shopBrand && config.shopBrand !== 'CartBack') return config.shopBrand;
+  const extras = (act && act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [];
+  const hit = extras.find(e => e && (e.key === 'brand' || e.key === '品牌') && String(e.value || '').trim());
+  if (hit) return String(hit.value).trim().slice(0, 40);
+  return 'CartBack';
+}
 
 // PRD §1 过滤口径：真实邮箱 且 未转化 且 挽回窗口 30 天（与确认卡展示的圈选条件同源，说到做到）
 const RECOVERY_WINDOW_MS = 30 * 86400000;
@@ -597,26 +613,8 @@ function audienceConditions(desc) {
   };
 }
 
-// —— ③ 72h 频控：同收件人同活动（受众口径）72h 内不重发（PRD §3.4）——
-// 按商家（user_id）隔离：防打扰是商家自己的发送礼仪，不跨账号共享 ——
-// demo 多账号共享同一批演示受众，A 家发过不应封住 B 家（线上 zhaizhai 被 N4D 的发送误伤实锤）
-const FREQ_WINDOW_MS = 72 * 3600 * 1000;
-function frequencyFilter(recipients, draft) {
-  const cutoff = Date.now() - FREQ_WINDOW_MS;
-  const campaignKey = (draft.audience || '').toLowerCase();
-  const emailedEvents = store.getEvents().filter(e => e.type === 'emailed' && e.ts >= cutoff);
-  // 已发过的收件人（72h 内任意草稿）；同活动（同受众口径）且同商家的才拦截，跨活动/跨商家放行
-  const draftsById = new Map(store.getDrafts().map(d => [d.id, d]));
-  const recentlyEmailed = new Set();
-  for (const e of emailedEvents) {
-    const d = draftsById.get(e.draft_id);
-    if (!d || (d.audience || '').toLowerCase() !== campaignKey) continue;
-    if ((d.user_id || null) !== (draft.user_id || null)) continue;
-    recentlyEmailed.add(e.audience_id);
-  }
-  const allow = recipients.filter(r => !recentlyEmailed.has(r.id));
-  return { allow, skipped: recipients.length - allow.length };
-}
+// —— ③ 72h 频控已并入 D4 闸门②（lib/execution.frequencyFilter）——
+// 窗口常量单处收敛在 lib/config.js（「PRD 口径 7 天，挂起裁决先不动 72h」）。
 
 // —— ESP 发信就绪判定（按供应商取凭证；走查部署 P0：smtp 供应商此前被 espKey 门槛永远判成未配置）——
 function espReady() {
@@ -627,6 +625,7 @@ function espReady() {
 }
 
 // —— ③ 发送前预检 + 失败分类（PRD §3.4：域名验证/邮箱格式/限额，失败给分类人话提示）——
+// Wave 2：72h 频控从预检移入 D4 闸门②（409 checklist 口径），本函数只管「配置类」硬故障
 function precheckSend(draft, { dryRun = false } = {}) {
   const problems = [];
   if (config.mode === 'real') {
@@ -645,18 +644,15 @@ function precheckSend(draft, { dryRun = false } = {}) {
   const all = resolveRecipients(draft);
   const valid = all.filter(r => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(r.email || '') && r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
   if (!valid.length) problems.push({ type: 'no_recipients', human: '没有可发送的收件人（邮箱无效或都被退信剔除了）。' });
-  const freq = frequencyFilter(valid, draft);
-  if (!freq.allow.length) problems.push({ type: 'frequency_capped', human: '这批人 72 小时内已经发过同一场活动，先别打扰了。' });
-  if (config.sendRateLimitPerMin > 0 && freq.allow.length > config.sendRateLimitPerMin * 5) {
-    problems.push({ type: 'quota_warning', human: `本批 ${freq.allow.length} 人超过当前发送限额建议值，系统会自动分批限速。` });
+  if (config.sendRateLimitPerMin > 0 && valid.length > config.sendRateLimitPerMin * 5) {
+    problems.push({ type: 'quota_warning', human: `本批 ${valid.length} 人超过当前发送限额建议值，系统会自动分批限速。` });
   }
   const blocking = problems.filter(p => !['quota_warning', 'domain_mismatch'].includes(p.type));
   return {
     ok: blocking.length === 0,
     problems,
     recipients: valid.length,
-    skippedByFrequency: freq.skipped,
-    sendable: freq.allow.length
+    sendable: valid.length
   };
 }
 
@@ -734,9 +730,22 @@ function upsertDraftPreservingAsync(draft) {
   return store.upsertDraft(draft);
 }
 
-async function sendDraft(draft) {
+// —— D4 五道闸门不过时的 draft 失败收口（人话原因 + checklist 留痕）——
+function failDraftByGates(draft, checklist) {
+  const failing = checklist.items.filter(i => !i.pass);
+  draft.status = 'failed';
+  draft.fail_reason = '发送闸门未通过：' + failing.map(f => f.reason || f.label).join('；');
+  draft.gate_checklist = checklist.items;
+  upsertDraftPreservingAsync(draft);
+  metricsInc('send_fail');
+  logEvent('send_gate_fail', { draft_id: draft.id, gates: failing.map(f => f.gate) });
+  return { error: draft.fail_reason, checklist: checklist.items, recipients: 0, cost: 0, estGmv: draft.estGmv };
+}
+
+async function sendDraft(draft, opts = {}) {
+  const act = draft.act_id ? store.getAct(draft.act_id) : null;
   const all = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
-  // 预检不通过（无人可发）直接失败并分类提示
+  // 预检不通过（配置类硬故障/无人可发）直接失败并分类提示
   const check = precheckSend(draft);
   if (!check.ok) {
     draft.status = 'failed';
@@ -746,7 +755,28 @@ async function sendDraft(draft) {
     logEvent('send_fail', { draft_id: draft.id, reason: draft.fail_reason });
     return { error: draft.fail_reason, problems: check.problems, recipients: 0, cost: 0, estGmv: draft.estGmv };
   }
-  const { allow, skipped } = frequencyFilter(all, draft);
+  // —— D4 五道闸门重跑（服务端兜底；POST /send 已跑过一次）——
+  //    唯一闸门=时段且不过 → 缓发（返回 deferred，由队列带 run_after 重新入队，非永久拒绝）；
+  //    其余任一不过 → 永久拒绝并说明原因；店铺 API 校验超时在闸门⑤内视为不过（宁缓发不错发）。
+  const checklist = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: all });
+  if (!checklist.all_pass) {
+    const failing = checklist.items.filter(i => !i.pass);
+    if (failing.length === 1 && failing[0].gate === 'window' && !opts.noReschedule) {
+      return { deferred: true, retryAt: checklist.windowRetryAt, checklist: checklist.items };
+    }
+    return failDraftByGates(draft, checklist);
+  }
+  // —— holdout 对照组（J3 前置子集）：先冻结（幂等）再从净值名单剔除；对照成员不收信、不计挽回、绝不写 sends ——
+  const holdoutPlan = execution.selectHoldout(checklist.net);
+  const holdoutMembers = new Set(store.getHoldouts({ campaign_id: draft.id }).map(h => String(h.recipient).toLowerCase()));
+  if (holdoutPlan.frozen) {
+    store.freezeHoldouts({ act_id: draft.act_id, campaign_id: draft.id, recipients: holdoutPlan.members, ratio: holdoutPlan.ratio, source: 'single_plan' });
+    for (const m of holdoutPlan.members) holdoutMembers.add(m);
+  }
+  const allow = checklist.net.filter(r => !holdoutMembers.has(String(r.email).toLowerCase()));
+  const heldOut = checklist.net.length - allow.length;
+  // 闸门快照（逐收件人 sends.gate_snapshot 共用；五项全过时刻的留痕）
+  const gateSnapshot = { items: checklist.items, all_pass: true, at: Date.now(), timezone: checklist.timezone };
   metricsInc('send_volume', allow.length);
   const real = (config.mode === 'real' && espReady());
   draft.status = 'sending'; upsertDraftPreservingAsync(draft);
@@ -755,14 +785,23 @@ async function sendDraft(draft) {
     draft.sent_at = Date.now();
     draft.esp_message_id = 'sim_' + uid();
     draft.cost = +(allow.length * 0.02).toFixed(2); // 仿真混合成本
-    draft.skipped_by_frequency = skipped;
+    draft.skipped_by_frequency = checklist.skippedByFrequency;
+    draft.holdout_count = heldOut;
     draft.g0_blocked = [];   // 仿真档不做 G0 拦截（内容为商家确认过的原稿）
     upsertDraftPreservingAsync(draft);
     scheduleSimEvents(draft, allow);
+    // Wave 2：逐收件人落 sends（demo 同口径；tz 按收件人时区）
+    for (const r of allow) {
+      store.recordSendRow({
+        act_id: draft.act_id, campaign_id: draft.id, recipient: r.email,
+        template: 'standard', tag: r.intent || null, code: draft.coupon || null,
+        tz: execution.tzForRecipient(r), gate_snapshot: gateSnapshot, status: 'sent'
+      });
+    }
     benchmarkMod.rebuildBenchmark(store);
     metricsInc('send_sim');
-    logEvent('send', { real: false, recipients: allow.length, skipped_by_frequency: skipped, cost: draft.cost });
-    return { real: false, recipients: allow.length, skippedByFrequency: skipped, cost: draft.cost, estGmv: draft.estGmv };
+    logEvent('send', { real: false, recipients: allow.length, skipped_by_frequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost });
+    return { real: false, recipients: allow.length, skippedByFrequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost, estGmv: draft.estGmv };
   }
   // ④ 渲染管线（真实模式）：变体→语种→模板展开→G0
   const rendered = await renderForDraft(draft, allow);
@@ -796,25 +835,43 @@ async function sendDraft(draft) {
       draft.sent_at = Date.now();
       draft.esp_message_id = r.id || ('real_' + uid());
       draft.cost = +(sendable.length * 0.0004).toFixed(4);
-      draft.skipped_by_frequency = skipped;
+      draft.skipped_by_frequency = checklist.skippedByFrequency;
+      draft.holdout_count = heldOut;
       // 记录 per-recipient 发送事实（频控 / 标签反哺窗口 / ESP 回执映射的依据）
       const espIds = Array.isArray(r.ids) ? r.ids : [];
       for (let i = 0; i < sendable.length; i++) {
+        const m = sendable[i];
         store.addEvent({
           type: 'emailed', draft_id: draft.id,
-          audience_id: (sendable[i].recipient || {}).id || null,
+          audience_id: (m.recipient || {}).id || null,
           esp_id: espIds[i] || null, ts: Date.now()
+        });
+        // Wave 2：sends 实发流水（幂等键 campaign+recipient，重试不追加新行）
+        store.recordSendRow({
+          act_id: draft.act_id, campaign_id: draft.id, recipient: m.email,
+          template: m.tier || 'standard', tag: ((m.recipient || {}).intent) || null,
+          code: draft.coupon || null, tz: execution.tzForRecipient(m.recipient),
+          gate_snapshot: gateSnapshot, status: 'sent'
         });
       }
       upsertDraftPreservingAsync(draft);
       benchmarkMod.rebuildBenchmark(store);
       metricsInc('send_real');
-      logEvent('send', { real: true, recipients: sendable.length, skipped_by_frequency: skipped, g0_blocked: blockedList.length, attempt, cost: draft.cost });
-      return { real: true, id: draft.esp_message_id, recipients: sendable.length, skippedByFrequency: skipped, g0Blocked: blockedList.length, cost: draft.cost, estGmv: draft.estGmv };
+      logEvent('send', { real: true, recipients: sendable.length, skipped_by_frequency: checklist.skippedByFrequency, holdout: heldOut, g0_blocked: blockedList.length, attempt, cost: draft.cost });
+      return { real: true, id: draft.esp_message_id, recipients: sendable.length, skippedByFrequency: checklist.skippedByFrequency, holdout: heldOut, g0Blocked: blockedList.length, cost: draft.cost, estGmv: draft.estGmv };
     } catch (e) { lastErr = e; await sleep(1000 * attempt); }
   }
   draft.status = 'failed';
   draft.fail_reason = String(lastErr && lastErr.message || lastErr);
+  // 最终失败：逐收件人 sends 落失败终态（同键更新，不追加新行）
+  for (const m of sendable) {
+    store.recordSendRow({
+      act_id: draft.act_id, campaign_id: draft.id, recipient: m.email,
+      template: m.tier || 'standard', tag: ((m.recipient || {}).intent) || null,
+      code: draft.coupon || null, tz: execution.tzForRecipient(m.recipient),
+      gate_snapshot: gateSnapshot, status: 'failed'
+    });
+  }
   upsertDraftPreservingAsync(draft);
   metricsInc('send_fail');
   logEvent('send_fail', { recipients: sendable.length, error: draft.fail_reason });
@@ -827,7 +884,240 @@ async function processSendJob({ job, payload }) {
   if (!draft) return { skipped: 'draft not found' };
   if (['sent', 'sending'].includes(draft.status)) return { skipped: 'already ' + draft.status };
   const r = await sendDraft(draft);
+  if (r && r.deferred) {
+    // D4① 时段闸缓发：重新入队到下一个合理时段（复用 jobs 机制 run_after），非永久拒绝
+    const retryAt = r.retryAt || (Date.now() + 3600 * 1000);
+    const { job: next } = queue.enqueue({
+      type: 'send_draft',
+      payload: { draftId: draft.id },
+      dedupeKey: 'send:sched:' + draft.id + ':' + retryAt,
+      runAfter: retryAt
+    });
+    draft.status = 'queued';
+    draft.scheduled_at = retryAt;
+    upsertDraftPreservingAsync(draft);
+    logEvent('send_deferred', { draft_id: draft.id, retry_at: retryAt, next_job_id: next.id });
+    return { rescheduled: true, next_job_id: next.id, retry_at: retryAt, checklist: r.checklist };
+  }
   return r;
+}
+
+// —— Wave 2 D3：草稿创建唯一实现（confirm 同源路径与 /api/draft 兼容路径共用）——
+// authoritative=true：card 来自 act.execution_snapshot/confirm 权威序列化，estGmv/matchedCount 直接取卡上口径，
+// 保证「卡 ↔ 草稿」四字段（audience/discount/count/estGmv）逐字段相等（闸门⑤ diff=0 的前提）。
+async function createDraftFromCard(card, { actId = null, userId = null, authoritative = false, draftId = null } = {}) {
+  const net = audienceNetList(card.audience);
+  const estGmv = authoritative && card.estGmv ? card.estGmv.amount : +net.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
+  const matchedCount = authoritative ? (Number(card.reach_count) || net.length) : net.length;
+  const conditions = audienceConditions(card.audience);
+  // ⑥ 竞品套路卡检索（G6：只出结构卡，raw_email 绝不外发）+ 基准库 Top-3
+  const refCards = competitorsMod.topCards(store, userId, { audience: card.audience, discount: card.discount, k: 3 });
+  const benchLib = benchmarkMod.getBenchmark(store);
+  const benchHits = benchmarkMod.queryBenchmark(benchLib, { audience: card.audience, discount: card.discount, k: 3 });
+  // ④ 变体生成：需求（act.needs 纯字符串视图）× 标签分布 → 一次调用出三档；AI 离线全落标准三档
+  const act = actId ? store.getAct(actId) : null;
+  const needs = needsMod.plainNeeds((act && act.needs) || {});
+  const tagDist = tagsMod.tagDistribution(store, net);
+  const discountNum = execution.resolveDiscountNum(card);
+  const draftFacts = {
+    // M4 品牌链：设置页 shopBrand（非默认）> 方案卡 brand > CartBack 兜底；固化到 draft.brand
+    brand: resolveBrand(card),
+    // 折扣数值唯一出处 = 方案卡 discountNum（% off；0 = 无钩子方案，文案不虚报折扣）
+    discount: discountNum,
+    coupon: card.coupon,
+    // M6 商品位：方案卡 product > 风格品类标签兜底（避免变体里商品位永远为空）
+    product: card.product || productFallbackFor({ tag_distribution: tagDist }), offer: card.offer || ''
+  };
+  const llmJSON = config.aiKey ? async (messages) => {
+    const r = await breakers.get('llm').exec(() => makeLlmClient().chatStructured({ messages, maxTokens: 2048 }));
+    return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
+  } : null;
+  const strategyHints = refCards.map(c => ({ theme_formula: c.theme_formula, angle: c.angle, discount_range: c.discount_range, timing: c.timing }));
+  const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
+  if (v.warning) logEvent('variants_fallback', { warning: v.warning });
+  metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
+  // M5 口径护栏：加购未付人群的主题禁 order/purchase 措辞（生成侧规则 + 出口兜底双保险）
+  for (const variant of v.variants) variant.subject = applySubjectTone(variant.subject, card.audience);
+  const draft = {
+    id: draftId || uid('dr_'), act_id: actId || null,
+    subject: applySubjectTone(card.subject, card.audience), body: card.body, audience: card.audience,
+    // 数值口径（% off）：变体/逐收件人渲染统一读数值；「给什么钩子」的展示文案在 planCard.discount
+    discount: discountNum,
+    coupon: card.coupon, posters: card.posters,
+    estGmv, matchedCount, sendTiming: card.sendTiming || null,
+    tag_distribution: tagDist,   // 圈中受众的标签分布快照（邮件卡展示产品分类/年龄段/机型代表值）
+    brand: draftFacts.brand,     // M4 白标快照（落款/页脚/发件人名/图片 alt 统一品牌位）
+    product: draftFacts.product, // M6 商品位快照（变体渲染复用）
+    status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
+    user_id: userId || null,
+    locale: card.locale || null,
+    html: '', image_path: '',   // 待异步生成
+    variants: v.variants, variants_provider: v.provider,
+    strategy_card_ids: refCards.map(c => c.id),
+    audience_conditions: conditions
+  };
+  store.upsertDraft(draft);
+
+  // 同步生成 HTML 邮件 + 营销图片（标准档直出 html；变体在发送环节逐收件人渲染）
+  try {
+    await generateMailHtml(draft, card);
+    draft.image_path = draft.image_path || '';
+    store.upsertDraft(draft);
+  } catch (err) {
+    draft.html = 'ERROR: ' + (err.message || err);
+    draft.image_path = '';
+    store.upsertDraft(draft);
+  }
+  return { draft, estGmv, matchedCount, conditions, tagDist, refCards, benchHits, variants_provider: v.provider };
+}
+
+// —— Wave 2 E2/D3：S2 确认动作（POST /api/act/:id/confirm 的执行体）——
+// 时序前置：S2 确认通过后、D3 出卡前，先调店铺 API 真实建码；
+//   成功（created/reused）或无钩子（none）→ 服务端同源序列化 planCard + 冻结 execution_snapshot + 建 draft，stage→S3；
+//   建码失败 → 409（不出卡、不建 draft、停留 S2，明示原因与三条出口）；
+//   未连接店铺 → 过渡期出无钩子卡（明示「未创建折扣码：连接店铺后可补」）。
+// 共同红线：卡面上绝不出现未真实存在的折扣码（code 一律取店铺连接器真实回执）。
+const CONFIRM_FAIL_OPTIONS = ['重试建码', '改用店内现成码', '改发无钩子提醒信'];
+
+function checklistContract(raw, { frozen = false, note = null } = {}) {
+  const holdout = {
+    frozen: Boolean(frozen),
+    count: raw.holdoutPlan.count,
+    ratio: raw.holdoutPlan.ratio
+  };
+  const n = note != null ? note : raw.holdoutPlan.note;
+  if (n) holdout.note = n;
+  return { items: raw.items, all_pass: raw.all_pass, holdout };
+}
+
+// —— Wave 2：S2 消息轮的「无码预览卡」升级为 planCard 权威形状（与 confirm 出卡同构，前端同一组件渲染）——
+// base（igde 基础卡，discount 为文案字符串）→ 补 reach_count/estGmv/signature/discount 对象（code_status=pending）。
+// S3 轮回传的 act.plan_card 已是权威形状，原样返回。
+function withAuthoritativePreview(act, planCard) {
+  if (!planCard || (planCard.discount && typeof planCard.discount === 'object')) return planCard;
+  const wrapped = execution.buildPlanCard({
+    base: planCard, code: null, codeStatus: 'pending',
+    reachCount: audienceNetList(planCard.audience).length,
+    extras: (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [],
+    brand: resolveMerchantBrand(act),
+    unsubscribeOk: Boolean(config.publicBaseUrl)
+  });
+  if (!config.visionKey) wrapped.skip_image = true;
+  wrapped.brand = resolveMerchantBrand(act);
+  return wrapped;
+}
+
+async function confirmActToStage3(act, body = {}, userId = null) {
+  needsMod.migrateAct(act);
+  const locale = config.shopDefaultLocale || 'en';
+  const extras = (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [];
+
+  // 幂等重确认：S3 且快照/卡/草稿都在 → 回已有权威卡（重确认不是新方案，不重复建码）
+  if (act.stage === 'S3' && act.execution_snapshot && act.plan_card && !(body && (body.nohook || body.reuse_code))) {
+    const existing = act.plan_card.draft_id ? store.getDraft(act.plan_card.draft_id) : null;
+    if (existing) {
+      const raw = await execution.evaluateChecklist({ act, draft: existing, store, config, connector: connectors, recipients: audienceNetList(existing.audience) });
+      const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') });
+      return { ok: true, repeated: true, act, planCard: act.plan_card, checklist: cc, holdout: cc.holdout, draft_id: existing.id, draft: existing };
+    }
+  }
+  if (act.stage === 'closed') return { ok: false, status: 409, error: '会话已收尾归档，不能再确认' };
+  if (needsMod.missingSlots(act.needs).length) return { ok: false, status: 409, error: '四项要素还没齐（针对谁/为什么挽回/给什么钩子/要什么结果），先在对话里补全再确认' };
+
+  const offerText = needsMod.slotText(act.needs, 'offer');
+  let codeStatus = 'none';
+  let code = null;
+  let percent = execution.parseOfferPercent(offerText); // null = 非折扣型钩子（包邮/赠品/无额外优惠…）
+  let note = null;
+  let createError = null;
+
+  if (body && body.nohook === true) {
+    // 无钩子重试出口：跳过建码，出无钩子卡
+    codeStatus = 'none';
+    percent = 0;
+    note = '改发无钩子提醒信：未创建折扣码';
+  } else if (body && typeof body.reuse_code === 'string' && body.reuse_code.trim()) {
+    // 自带码出口：校验存在且有效后出卡（code_status=reused）
+    const want = body.reuse_code.trim().toUpperCase();
+    if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
+      createError = '店铺未连接，无法校验现成折扣码「' + want + '」';
+    } else {
+      try {
+        const hit = await connectors.verifyDiscountCode(want);
+        if (!hit) createError = '店内没有找到可用折扣码「' + want + '」，请确认码名后再试';
+        else {
+          codeStatus = 'reused';
+          code = String(hit.code).toUpperCase();
+          percent = Number(hit.percent_off) || percent || 10;
+        }
+      } catch (e) {
+        createError = '店铺校验折扣码失败或超时：' + String(e && e.message || e).slice(0, 140);
+      }
+    }
+  } else if (percent != null && percent > 0) {
+    if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
+      // 未连接店铺 → 过渡期：允许出无钩子 planCard（不含折扣码，卡上明示），发送入口保留
+      codeStatus = 'none';
+      percent = 0;
+      note = '未创建折扣码：连接店铺后可补';
+    } else {
+      // E2 主路径：先建码后出卡；每次方案新建码不复用历史码；code 必须来自店铺真实回执
+      const named = execution.parseOfferCodeName(offerText);
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3 && !code; attempt++) {
+        const candidate = (named && attempt === 0) ? named : 'COMEBACK-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+        try {
+          const receipt = await connectors.createDiscountCode({ code: candidate, percent_off: percent });
+          codeStatus = 'created';
+          code = String(receipt.code).toUpperCase();   // 真实回执优先（禁止本地拼）
+          percent = Number(receipt.percent_off) || percent;
+        } catch (e) {
+          lastErr = e;
+          // 用户指定码名重名/失败 → 换系统随机码再试；随机码仍失败 → 走失败出口
+          if (!(named && attempt === 0)) break;
+        }
+      }
+      if (!code) createError = '店铺建码失败：' + String(lastErr && lastErr.message || lastErr || '未知原因').slice(0, 160);
+    }
+  }
+
+  // —— E2 失败分支：planCard 不出卡（卡不出、不发），停留 S2，明示原因与三条出口 ——
+  if (createError) {
+    act.code_status = 'failed';
+    act.stage = 'S2';
+    act.execution_snapshot = null;
+    act.plan_card = null;
+    store.upsertAct(act);
+    return { ok: false, status: 409, code_status: 'failed', reason: createError, options: CONFIRM_FAIL_OPTIONS, act };
+  }
+
+  // —— 成功路径：服务端同源序列化（先序列化 JSON，卡面渲染与草稿渲染都读这一份）——
+  const effectivePercent = (codeStatus === 'created' || codeStatus === 'reused') ? (Number(percent) || 0) : 0;
+  const base = igde.producePlanCard(act, { locale, code, codeStatus });
+  base.discountNum = effectivePercent;
+  const brand = resolveMerchantBrand(act);
+  const reachCount = audienceNetList(base.audience).length;
+  const draftId = uid('dr_');
+  const planCard = execution.buildPlanCard({
+    base, code, codeStatus, reachCount, extras, brand,
+    unsubscribeOk: Boolean(config.publicBaseUrl), draftId, note,
+    sendWindowText: null
+  });
+  if (!config.visionKey) planCard.skip_image = true; // 未配图像 AI：出卡不跑图片生成（离线确定性）
+  planCard.brand = brand;                            // 草稿/mailgen 品牌链消费（内部键）
+  act.execution_snapshot = execution.serializeSnapshot(planCard); // D3 四字段快照冻结（闸门⑤ diff 依据）
+  act.plan_card = planCard;
+  act.stage = 'S3';
+  act.code_status = codeStatus;
+  store.upsertAct(act);
+
+  const created = await createDraftFromCard(planCard, { actId: act.id, userId, authoritative: true, draftId });
+  const draft = created.draft;
+
+  // confirm 时闸门预检一次返回；holdout 先圈定展示但不落库（真正落库冻结在 send 放行时）
+  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: audienceNetList(draft.audience) });
+  const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') + '；确认后名单变动不影响，冻结以放行时刻为准' });
+  return { ok: true, act, planCard, checklist: cc, holdout: cc.holdout, draft_id: draft.id, draft };
 }
 
 // G6：策略卡对外形态——原文（raw_email）绝不出库，只出结构卡
@@ -1049,13 +1339,15 @@ const server = http.createServer(async (req, res) => {
         id: uid('act_'), stage: 'S0', needs: needsMod.emptyNeeds(), messages: [],
         memory: { facts: [], decisions: [], corrections: [], extras: [], prefs: {}, ask_count: needsMod.emptyAskCount() },
         context_summary: null, summary_cursor: 0, context_version: 1,
-        code_status: 'none',       // PRD v2：优惠码生命周期占位（本波恒 none）
+        code_status: 'none',       // Wave 2 E2：优惠码生命周期（none→pending→created/reused/failed；confirm 时推进）
         filled_count: 0,           // 派生字段：四槽 value 非空数（store.upsertAct 落库时重算并保证单调不减）
         status: 'active', created_at: Date.now(), updated_at: Date.now(),
         user_id: req.userId || null   // 整改 1c：打归属
       };
       const op = igde.opening();
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
+      // Wave 2 closed 触发点（Wave 1 遗留补齐）：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）
+      store.closeOpenActs(req.userId || null, act.id);
       // 注入防御：preset.audience 是不可信输入 —— 收口（去控制符/折叠空白/限长），
       // 疑似注入话术（忽略指令/角色切换/索要系统提示词）直接忽略该预选，走正常开场。
       if (body.preset && typeof body.preset.audience === 'string' && body.preset.audience.trim()) {
@@ -1110,6 +1402,7 @@ const server = http.createServer(async (req, res) => {
         });
         persistAgentProfile(r, req.userId);
         consumeAgentMeta(r);
+        if (r.planCard) r.planCard = withAuthoritativePreview(act, r.planCard); // S2 预览卡升级为权威形状（无码）
         if (r.guardrailHits && r.guardrailHits.length) {
           r.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
           logEvent('guardrail', { hits: r.guardrailHits });
@@ -1165,6 +1458,7 @@ const server = http.createServer(async (req, res) => {
       }
       persistAgentProfile(result, req.userId);
       consumeAgentMeta(result);
+      if (result.planCard) result.planCard = withAuthoritativePreview(act, result.planCard); // S2 预览卡升级为权威形状（无码）
       if (result.guardrailHits && result.guardrailHits.length) {
         result.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
         logEvent('guardrail', { hits: result.guardrailHits });
@@ -1201,89 +1495,74 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // —— 生成草稿（从方案卡）：× 消费者标签分布 → 变体；检索套路卡/基准注入参考 ——
+    // —— 生成草稿（Wave 2 D3：服务端同源为唯一权威）——
+    //   actId 路径（权威）：从 act 冻结快照/needs 服务端序列化 planCard → 草稿，不信任前端回传；
+    //     已 confirm（有 execution_snapshot）→ 权威卡（含真实码）；未 confirm → 无码预览卡（E2 红线）。
+    //   planCard 直传路径（兼容）：仅保留给 mailgen 冒烟/旧前端 —— 此路径出的草稿没有执行快照，闸门⑤必拦，发不出去。
     if (pathname === '/api/draft' && method === 'POST') {
       const body = await readBody(req);
-      const card = body.planCard;
-      if (!card) return sendJson(res, 400, { error: 'missing planCard' });
-      // 预估可挽回 GMV + 受众圈选条件（确认卡展示）
-      const matched = matchAudienceByDesc(card.audience);
-      const estGmv = +matched.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
-      const conditions = audienceConditions(card.audience);
-      // ⑥ 竞品套路卡检索（G6：只出结构卡，raw_email 绝不外发）+ 基准库 Top-3
-      const refCards = competitorsMod.topCards(store, req.userId, { audience: card.audience, discount: card.discount, k: 3 });
-      const benchLib = benchmarkMod.getBenchmark(store);
-      const benchHits = benchmarkMod.queryBenchmark(benchLib, { audience: card.audience, discount: card.discount, k: 3 });
-      // ④ 变体生成：需求（act.needs 纯字符串视图）× 标签分布 → 一次调用出三档；AI 离线全落标准三档
-      const act = body.actId ? store.getAct(body.actId) : null;
-      const needs = needsMod.plainNeeds((act && act.needs) || {});
-      const tagDist = tagsMod.tagDistribution(store, matched);
-      const draftFacts = {
-        // M4 品牌链：设置页 shopBrand（非默认）> 方案卡 brand > CartBack 兜底；固化到 draft.brand
-        brand: resolveBrand(card),
-        // 折扣数值唯一出处 = 方案卡 discountNum（% off）；文本「8 折」等已在 producePlanCard 换算
-        discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
-        coupon: card.coupon,
-        // M6 商品位：方案卡 product > 风格品类标签兜底（避免变体里商品位永远为空）
-        product: card.product || productFallbackFor({ tag_distribution: tagDist }), offer: card.offer || ''
-      };
-      const llmJSON = config.aiKey ? async (messages) => {
-        const r = await breakers.get('llm').exec(() => makeLlmClient().chatStructured({ messages, maxTokens: 2048 }));
-        return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
-      } : null;
-      const strategyHints = refCards.map(c => ({ theme_formula: c.theme_formula, angle: c.angle, discount_range: c.discount_range, timing: c.timing }));
-      const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
-      if (v.warning) logEvent('variants_fallback', { warning: v.warning });
-      metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
-      // M5 口径护栏：加购未付人群的主题禁 order/purchase 措辞（生成侧规则 + 出口兜底双保险）
-      for (const variant of v.variants) variant.subject = applySubjectTone(variant.subject, card.audience);
-      const draft = {
-        id: uid('dr_'), act_id: body.actId || null,
-        subject: applySubjectTone(card.subject, card.audience), body: card.body, audience: card.audience,
-        // 数值口径（% off）：变体/逐收件人渲染统一读数值；「给什么钩子」的展示文案在 planCard.discount
-        discount: Number(card.discountNum) || parseFloat(card.discount) || 10,
-        coupon: card.coupon, posters: card.posters,
-        estGmv, matchedCount: matched.length, sendTiming: card.sendTiming || null,
-        tag_distribution: tagDist,   // 圈中受众的标签分布快照（邮件卡展示产品分类/年龄段/机型代表值）
-        brand: draftFacts.brand,     // M4 白标快照（落款/页脚/发件人名/图片 alt 统一品牌位）
-        product: draftFacts.product, // M6 商品位快照（变体渲染复用）
-        status: 'draft', created_at: Date.now(), sent_at: null, esp_message_id: null, cost: 0,
-        user_id: req.userId || null,
-        locale: card.locale || null,
-        html: '', image_path: '',   // 待异步生成
-        variants: v.variants, variants_provider: v.provider,
-        strategy_card_ids: refCards.map(c => c.id),
-        audience_conditions: conditions
-      };
-      store.upsertDraft(draft);
-
-      // 同步生成 HTML 邮件 + 营销图片（标准档直出 html；变体在发送环节逐收件人渲染）
-      try {
-        await generateMailHtml(draft, card);
-        // image_path 为空（万相失败/未配）时留空，EditModal 据此不渲染碎图；
-        // html 由 email-builder 兜底始终非空，无需 FALLBACK 占位。
-        draft.image_path = draft.image_path || '';
-        store.upsertDraft(draft);
-      } catch (err) {
-        draft.html = 'ERROR: ' + (err.message || err);
-        draft.image_path = '';
-        store.upsertDraft(draft);
+      let card = null;
+      let actId = body.actId || null;
+      let authoritative = false;
+      if (actId) {
+        const act = store.getAct(actId);
+        if (!act) return sendJson(res, 404, { error: 'act not found' });
+        if (act.user_id && req.userId && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+        if (act.execution_snapshot && act.plan_card) {
+          card = act.plan_card;             // confirm 产出的权威卡（同源 JSON，含真实码）
+          authoritative = true;
+        } else {
+          // 未 confirm：服务端按冻结 needs 出无码预览卡（不含折扣码 —— E2 红线）
+          const base = igde.producePlanCard(act, { locale: config.shopDefaultLocale || 'en' });
+          card = execution.buildPlanCard({
+            base, code: null, codeStatus: 'pending',
+            reachCount: audienceNetList(base.audience).length,
+            extras: (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [],
+            brand: resolveMerchantBrand(act),
+            unsubscribeOk: Boolean(config.publicBaseUrl)
+          });
+          if (!config.visionKey) card.skip_image = true;
+          card.brand = resolveMerchantBrand(act);
+        }
+      } else if (body.planCard) {
+        card = body.planCard;
+      } else {
+        return sendJson(res, 400, { error: 'missing planCard or actId' });
       }
-
-      // 海报已下线（前端不再展示，改展示主图）——不再入队生成，省 LLM/万相算力。
-      // /api/posters 路由与 posters 队列 handler 暂留为死代码，待后续整体清理 posters.js。
+      const r = await createDraftFromCard(card, { actId, userId: req.userId, authoritative, draftId: authoritative ? (card.draft_id || null) : null });
 
       return sendJson(res, 200, {
-        draft, estGmv, matchedCount: matched.length,
-        audience_conditions: conditions,
-        tag_distribution: tagDist,
+        draft: r.draft, estGmv: r.estGmv, matchedCount: r.matchedCount,
+        audience_conditions: r.conditions,
+        tag_distribution: r.tagDist,
         references: {
-          strategy_cards: refCards.map(c => ({ id: c.id, competitor_name: c.competitor_name, theme_formula: c.theme_formula, angle: c.angle })),
-          strategy_cards_count: refCards.length,
-          benchmark: benchHits
+          strategy_cards: r.refCards.map(c => ({ id: c.id, competitor_name: c.competitor_name, theme_formula: c.theme_formula, angle: c.angle })),
+          strategy_cards_count: r.refCards.length,
+          benchmark: r.benchHits
         },
-        variants_provider: v.provider
+        variants_provider: r.variants_provider
       });
+    }
+
+    // —— Wave 2 E2/D3：S2 确认动作（无请求体；可选 {reuse_code} / {nohook:true}）——
+    // 成功：200 {ok,act,planCard,checklist,holdout,draft_id,draft}（act.stage→S3，draft 服务端同源落库）；
+    // 建码失败：409 {ok:false,code_status:'failed',reason,options:['重试建码','改用店内现成码','改发无钩子提醒信'],act}；
+    const cm = pathname.match(/^\/api\/act\/([\w-]+)\/confirm$/);
+    if (cm && method === 'POST') {
+      const act = store.getAct(cm[1]);
+      if (!act) return sendJson(res, 404, { error: 'act not found' });
+      if (act.user_id && req.userId && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const r = await confirmActToStage3(act, body, req.userId);
+      if (!r.ok) {
+        const payload = { ok: false };
+        for (const k of ['error', 'code_status', 'reason', 'options', 'act']) if (r[k] !== undefined) payload[k] = r[k];
+        return sendJson(res, r.status || 409, payload);
+      }
+      logEvent('act_confirmed', { act_id: act.id, code_status: act.code_status, draft_id: r.draft_id, all_pass: r.checklist.all_pass });
+      metricsInc('act_confirm_' + (act.code_status || 'none'));
+      return sendJson(res, 200, r);
     }
 
     if (pathname === '/api/drafts' && method === 'GET') {
@@ -1347,7 +1626,7 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // —— 发送（PRD §0.6：改 202 入队；预检 + 频控 + 幂等键 send:{userId}:{draftId}）——
+    // —— 发送（PRD §0.6：改 202 入队；预检 + D4 五道闸门 + holdout 冻结 + 幂等键 send:{userId}:{draftId}）——
     const sm = pathname.match(/^\/api\/draft\/([\w-]+)\/send$/);
     if (sm && method === 'POST') {
       const draft = store.getDraft(sm[1]);
@@ -1358,6 +1637,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
       }
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
+      // 注：主题/正文不在 D3 四字段 diff 口径内（audience/discount/count/estGmv），不破坏快照同源
       try {
         const body = await readBody(req);
         if (body && typeof body.subject === 'string' && body.subject.trim()) draft.subject = applySubjectTone(body.subject.trim(), draft.audience);
@@ -1367,13 +1647,50 @@ const server = http.createServer(async (req, res) => {
       // M3：发送前刷新固化页脚链接（存量草稿生成时是 cart_url 兜底；publicBaseUrl 未配则原样）
       const refreshedHtml = applyFooterLinks(draft.html, draft.id);
       if (refreshedHtml !== draft.html) { draft.html = refreshedHtml; store.upsertDraft(draft); }
-      // ③ 发送前预检：ESP 配置 / 发件域名 / 收件人有效性 / 72h 频控，失败分类人话提示
+      // ③ 发送前预检：ESP 配置 / 发件域名 / 收件人有效性，失败分类人话提示（频控已移入 D4 闸门②）
       const check = precheckSend(draft);
       if (!check.ok) {
         const first = check.problems.find(p => !['quota_warning', 'domain_mismatch'].includes(p.type));
         logEvent('send_precheck_fail', { draft_id: draft.id, problems: check.problems });
         return sendJson(res, 400, { error: first ? first.human : '发送预检未通过', problems: check.problems });
       }
+      // —— D4 五道闸门（服务端重跑；前端按钮本就该被禁用，这里是兜底）——
+      //    仅时段闸不过 → 缓发（重新入队带 scheduled_at，202）；其余任一不过 → 409 {ok:false, checklist}
+      const act = draft.act_id ? store.getAct(draft.act_id) : null;
+      const recipients = audienceNetList(draft.audience);
+      const gateCheck = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients });
+      const failing = gateCheck.items.filter(i => !i.pass);
+      if (failing.length) {
+        if (failing.length === 1 && failing[0].gate === 'window') {
+          const retryAt = gateCheck.windowRetryAt || (Date.now() + 3600 * 1000);
+          const { job } = queue.enqueue({
+            type: 'send_draft', payload: { draftId: draft.id },
+            dedupeKey: 'send:sched:' + draft.id + ':' + retryAt, runAfter: retryAt
+          });
+          draft.status = 'queued';
+          draft.scheduled_at = retryAt;
+          store.upsertDraft(draft);
+          logEvent('send_deferred_window', { draft_id: draft.id, retry_at: retryAt, job_id: job.id, timezone: gateCheck.timezone });
+          return sendJson(res, 202, {
+            job_id: job.id, queued: true, scheduled_at: retryAt, deferred: 'window',
+            checklist: checklistContract(gateCheck, { frozen: false, note: '时段闸缓发，将在下一合理时段自动发送' }),
+            draft
+          });
+        }
+        logEvent('send_gate_fail', { draft_id: draft.id, gates: failing.map(f => f.gate) });
+        return sendJson(res, 409, { ok: false, checklist: checklistContract(gateCheck) });
+      }
+      // —— 全过 → 先冻结 holdout 对照组（幂等；对照成员绝不写入 sends）→ 再入队发送 ——
+      const holdoutPlan = execution.selectHoldout(gateCheck.net);
+      if (holdoutPlan.frozen) {
+        store.freezeHoldouts({ act_id: draft.act_id, campaign_id: draft.id, recipients: holdoutPlan.members, ratio: holdoutPlan.ratio, source: 'single_plan' });
+      }
+      const holdoutContract = {
+        frozen: holdoutPlan.frozen,
+        count: store.getHoldouts({ campaign_id: draft.id }).length,
+        ratio: holdoutPlan.ratio,
+        ...(holdoutPlan.note ? { note: holdoutPlan.note } : {})
+      };
       if (!rateLimitOk()) {
         return sendJson(res, 429, { error: '发送频率超限（每分钟上限 ' + (config.sendRateLimitPerMin || 20) + '），请稍后再试' });
       }
@@ -1387,10 +1704,12 @@ const server = http.createServer(async (req, res) => {
         draft.status = 'queued';
         store.upsertDraft(draft);
       }
-      logEvent('send_queued', { draft_id: draft.id, job_id: job.id, deduped, sendable: check.sendable, skipped_by_frequency: check.skippedByFrequency });
+      logEvent('send_queued', { draft_id: draft.id, job_id: job.id, deduped, sendable: gateCheck.net.length - holdoutContract.count, skipped_by_frequency: gateCheck.skippedByFrequency, holdout: holdoutContract.count });
       return sendJson(res, 202, {
         job_id: job.id, queued: true, deduped,
-        check: { recipients: check.recipients, skippedByFrequency: check.skippedByFrequency, sendable: check.sendable, warnings: check.problems.filter(p => ['quota_warning', 'domain_mismatch'].includes(p.type)) },
+        check: { recipients: check.recipients, skippedByFrequency: gateCheck.skippedByFrequency, sendable: gateCheck.net.length - holdoutContract.count, warnings: check.problems.filter(p => ['quota_warning', 'domain_mismatch'].includes(p.type)) },
+        checklist: checklistContract(gateCheck, { frozen: holdoutContract.frozen, note: holdoutContract.note }),
+        holdout: holdoutContract,
         draft
       });
     }

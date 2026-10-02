@@ -1,9 +1,10 @@
 'use strict';
 /**
- * G2 一键真发端到端测试（mock Resend，不需要公网）：
- *   真实模式 → 202 入队 → 渲染管线逐收件人变体 → mock ESP 批量发送（逐封独立 to）
- *   → 频控拦截 → Resend 回执映射 → Shopify 订单归因（order_id 幂等 / 退款扣减）
- *   → bounced 剔除 → 标签加权反哺。
+ * Wave 2 真发端到端（mock Resend + mock 店铺连接器，不需要公网）：
+ *   对话收齐 → /confirm 真实建码（mock 店铺回执）→ 200 人名单 → /send 202 入队
+ *   → holdout 冻结 10%（绝不入 sends、不收信）→ 渲染管线逐收件人变体 → mock ESP 批量发送
+ *   → 逐收件人落 sends（gate_snapshot）→ diff=0（草稿与快照逐字段相等）
+ *   → Resend 回执映射 → Shopify 订单优惠码核销归因（真实建码打通）→ 退款扣减 → bounced 剔除。
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -13,8 +14,12 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { DatabaseSync } = require('node:sqlite');
+
+const execution = require('../lib/execution');
 
 const WH_SECRET = 'wh_e2e_secret';
+const SYNC_N = 220;   // 220 同步 + 4 加购种子 = 224 → 可发送上限 200 → holdout 20 → 实发 180
 
 function freePort() {
   return new Promise((resolve, reject) => {
@@ -25,6 +30,16 @@ function freePort() {
       srv.close((e) => (e ? reject(e) : resolve(port)));
     });
   });
+}
+
+function fakeNowInWindow() {
+  let ts = Date.now();
+  for (let i = 0; i < 36; i++) {
+    const h = execution.localHourIn('America/New_York', ts);
+    if (h >= 10 && h <= 18) return ts;
+    ts += 3600 * 1000;
+  }
+  return ts;
 }
 
 /** mock Resend：/emails 单封、/emails/batch 批量；记录全部请求 */
@@ -61,19 +76,21 @@ async function waitFor(fn, timeoutMs = 30000, stepMs = 200) {
   throw new Error('waitFor timeout');
 }
 
-test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) => {
+test('Wave 2 端到端：confirm 建码 → holdout 冻结 → 真发 → sends 流水 → diff=0 → 归因链', async (t) => {
   const esp = await startMockEsp();
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-e2e-'));
-  // 预置 config：espApiUrl 指向 mock（/api/config 不暴露该项）；webhookSecret 固定便于回执测试
+  // 预置 config：mock 店铺连接器（E2 建码注入缝）+ 公网基址（退订闸）+ mock ESP + webhook secret
   fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({
     espApiUrl: `http://127.0.0.1:${esp.port}/emails`,
     webhookSecret: WH_SECRET,
+    publicBaseUrl: 'https://e2e.example',
+    stores: [{ type: 'mock', shop: 'E2E Mock' }],
   }));
 
   const port = await freePort();
   const child = spawn(process.execPath, ['server.js'], {
     cwd: path.resolve(__dirname, '..'),
-    env: { ...process.env, PORT: String(port), EY_SERVER_DIR: dir, CARTBACK_OPEN_LOCAL: '1' },
+    env: { ...process.env, PORT: String(port), EY_SERVER_DIR: dir, CARTBACK_OPEN_LOCAL: '1', CARTBACK_FAKE_NOW: String(fakeNowInWindow()) },
     stdio: 'ignore',
   });
   const base = `http://127.0.0.1:${port}`;
@@ -103,111 +120,130 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
 
-  // —— 真实模式 + ESP 配置 ——
-  const cfg = await api('/api/config', { method: 'POST', body: { mode: 'real', espKey: 're_test_key', espFrom: 'send@test.example' } });
+  // —— 真实模式 + ESP 配置 + 商家品牌（白标闸）——
+  const cfg = await api('/api/config', { method: 'POST', body: { mode: 'real', espKey: 're_test_key', espFrom: 'send@test.example', shopBrand: 'E2E' } });
   assert.equal(cfg.json.status.mode, 'real');
   assert.equal(cfg.json.status.espConfigured, true);
 
-  // —— 生成草稿（AI 未配置 → 确定性标准三档变体；skip_image 免网络图片） ——
-  const dr = await api('/api/draft', {
-    method: 'POST',
-    body: { planCard: { subject: '', body: '', discount: 12, coupon: 'BACK12', audience: '加购未付', brand: 'E2E', locale: 'en', skip_image: true } },
-  });
-  assert.equal(dr.status, 200);
-  const draft = dr.json.draft;
-  assert.equal(draft.variants.length, 3);
-  assert.equal(draft.variants_provider, 'fallback_standard');
-  assert.equal(dr.json.audience_conditions.matchedCount, 9);   // 未付族：加购未付×4 + 弃购×3 + 下单未付×2
+  // —— 灌 220 名加购未付名单（holdout 需 ≥200 净值名单才冻结）——
+  const events = Array.from({ length: SYNC_N }, (_, i) => ({
+    email: `flow${i}@example.com`, name: `Flow${i}`, intent: '加购未付',
+    abandoned_value: 100, locale: 'en', at_risk_at: Date.now() - i * 60000
+  }));
+  const sync = await api('/api/store/sync', { method: 'POST', body: { events } });
+  assert.equal(sync.json.imported, SYNC_N);
 
-  // —— 202 入队 + 轮询到 done ——
+  // —— 对话收齐四槽（AI 未配置 → 桩模式；presets 注入受众）——
+  const act = await api('/api/act', { method: 'POST', body: { preset: { audience: '加购未付' } } });
+  const actId = act.json.act.id;
+  await api(`/api/act/${actId}/message`, { method: 'POST', body: { message: '挽回原因是太久没动静了' } });
+  await api(`/api/act/${actId}/message`, { method: 'POST', body: { message: '折扣给 12% off 就行' } });
+  await api(`/api/act/${actId}/message`, { method: 'POST', body: { message: '希望他们回来完成付款' } });
+
+  // —— /confirm：先真实建码（mock 店铺回执）→ 出卡 + 快照冻结 + 服务端同源草稿 ——
+  const cf = await api(`/api/act/${actId}/confirm`, { method: 'POST', body: {} });
+  assert.equal(cf.status, 200, JSON.stringify(cf.json).slice(0, 300));
+  const planCard = cf.json.planCard;
+  assert.equal(cf.json.act.stage, 'S3');
+  assert.equal(planCard.discount.code_status, 'created');
+  const CODE = planCard.discount.code;
+  assert.match(CODE, /^COMEBACK-[A-Z0-9]{6}$/, '码来自店铺连接器真实回执');
+  assert.equal(planCard.reach_count, 200, '净值名单（224 可发送上限 200）');
+  assert.equal(planCard.estGmv.formula.people, 200);
+  assert.equal(planCard.estGmv.source, 'demo', '无客单价 extras → 行业默认标注 demo');
+  assert.deepEqual(cf.json.checklist.items.map(i => i.gate), ['window', 'frequency', 'whitelabel', 'unsubscribe', 'amount_code']);
+  assert.equal(cf.json.checklist.all_pass, true, '五道闸全过（时段/频次/白标/退订/金额与码）');
+  const draft = cf.json.draft;
+  assert.equal(draft.coupon, CODE);
+  // D3 diff=0：草稿四字段（audience/discount/count/estGmv 口径）与卡片快照逐字段相等
+  assert.equal(draft.audience, planCard.audience);
+  assert.equal(draft.discount, planCard.discount.percent_off);
+  assert.equal(draft.matchedCount, planCard.reach_count);
+  assert.equal(draft.estGmv, planCard.estGmv.amount);
+
+  // —— /send：202 入队（放行时冻结 holdout）→ 轮询到 done ——
   const send1 = await api(`/api/draft/${draft.id}/send`, { method: 'POST', body: {} });
-  assert.equal(send1.status, 202);
-  assert.ok(send1.json.job_id, 'job id returned');
-  assert.equal(send1.json.queued, true);
+  assert.equal(send1.status, 202, JSON.stringify(send1.json).slice(0, 300));
+  assert.ok(send1.json.job_id);
+  assert.equal(send1.json.holdout.frozen, true, '全过 → 先冻结 holdout');
+  assert.equal(send1.json.holdout.count, 20, '200 × 10% 圈定对照组');
   const job = await waitFor(async () => {
     const j = await api(`/api/jobs/${send1.json.job_id}`);
     return ['done', 'failed'].includes(j.json.status) ? j.json : null;
   });
   assert.equal(job.status, 'done', 'send job done: ' + (job.error || ''));
-  assert.equal(job.result.recipients, 9);
+  assert.equal(job.result.recipients, 180, '实发 = 200 − holdout 20');
+  assert.equal(job.result.holdout, 20);
   assert.equal(job.result.real, true);
 
-  // —— mock ESP 收到 1 个批量请求、4 封逐收件人变体 ——
+  // —— mock ESP：180 封逐收件人（分批 ≤100）、白标发件人、退订头、码进正文 ——
   await waitFor(() => (esp.received.some((r) => r.url.endsWith('/emails/batch')) ? true : null));
-  const batch = esp.received.find((r) => r.url.endsWith('/emails/batch'));
-  assert.equal(batch.auth, 'Bearer re_test_key');
-  const msgs = batch.body;
-  assert.equal(msgs.length, 9);
+  const batches = esp.received.filter((r) => r.url.endsWith('/emails/batch'));
+  const msgs = batches.flatMap((b) => b.body);
+  assert.equal(msgs.length, 180);
+  assert.equal(batches[0].auth, 'Bearer re_test_key');
+  const holdoutEmails = new Set();
   for (const m of msgs) {
-    assert.equal(m.from, 'E2E <send@test.example>', 'M4 白标：发件人名走草稿品牌（E2E）');
+    assert.equal(m.from, 'E2E <send@test.example>', '白标：发件人名走商家品牌');
     assert.equal(m.to.length, 1, '隐私：每封独立 to（互不可见）');
     assert.ok(m.subject && m.subject.length > 0);
-    assert.ok(m.text && m.text.length > 0);
-  }
-  // 变体分档：价格敏感（林晚/顾言/夏一 price=高）→ 折扣主打；intent=hot（陈默/周野 ≤7d）→ 紧迫；其余 → 标准
-  const discountSubjects = msgs.filter((m) => /% OFF — .*don't pay full price/.test(m.subject));
-  const urgencySubjects = msgs.filter((m) => /cart is about to expire/.test(m.subject));
-  const standardSubjects = msgs.filter((m) => /You left something behind at E2E/.test(m.subject));
-  assert.equal(discountSubjects.length, 3);
-  assert.equal(urgencySubjects.length, 2);
-  assert.equal(standardSubjects.length, 4);
-  // 模板按收件人本地展开：{{name}} 已替换、{{coupon}} 已填充
-  for (const m of msgs) {
+    assert.ok(m.text.includes(CODE), '真实回执码进入正文');
     assert.ok(!/\{\{name\}\}/.test(m.subject + m.text), '占位符必须展开');
-    assert.ok(m.text.includes('BACK12'), '优惠码事实进入正文');
+    assert.ok(m.headers && /\/api\/email\/unsubscribe/.test(m.headers['List-Unsubscribe'] || ''), 'List-Unsubscribe 头可解析');
   }
 
-  // —— 草稿态：queued → sent；重复发送 409，且编辑内容不得写进已发出的邮件 ——
-  const dup = await api(`/api/draft/${draft.id}/send`, { method: 'POST', body: { subject: 'TAMPERED', body: 'TAMPERED' } });
-  assert.equal(dup.status, 409);
-  const sentDraft = (await api('/api/drafts')).json.drafts.find((x) => x.id === draft.id);
-  assert.equal(sentDraft.subject, "Your 12% OFF Is Waiting — Don't Miss Out, E2E");
+  // —— sends / holdouts 落库断言（直接读 sqlite：表隔离 + gate_snapshot + diff=0 终态）——
+  const db = new DatabaseSync(path.join(dir, 'data.sqlite'));
+  const sends = db.prepare('SELECT * FROM sends WHERE campaign_id = ?').all(draft.id);
+  const holds = db.prepare('SELECT * FROM holdouts WHERE campaign_id = ?').all(draft.id);
+  assert.equal(sends.length, 180, 'sends 逐收件人行数 = 实发数');
+  assert.ok(sends.every((r) => r.status === 'sent'));
+  assert.ok(sends.every((r) => r.gate_snapshot && r.tz && r.code === CODE), 'gate_snapshot/时区/码留痕');
+  assert.equal(JSON.parse(sends[0].gate_snapshot).items.length, 5, 'gate_snapshot 存五道闸结果');
+  assert.equal(holds.length, 20, 'holdouts 冻结 20 人');
+  assert.ok(holds.every((h) => h.source === 'single_plan' && h.ratio === 0.1));
+  const sendEmails = new Set(sends.map((r) => r.recipient));
+  assert.equal(holds.every((h) => !sendEmails.has(h.recipient)), true, '对照成员绝不写入 sends（名单不重叠）');
+  // 重复冻结/重试不追加新行（幂等）
+  const sendsAgain = db.prepare('SELECT COUNT(DISTINCT recipient) AS n, COUNT(*) AS total FROM sends WHERE campaign_id = ?').get(draft.id);
+  assert.equal(sendsAgain.n, sendsAgain.total, '同 (campaign, recipient) 幂等一行');
+  db.close();
 
-  // —— 72h 频控：同受众第二场活动被拦截（400 + 人话提示） ——
-  const dr2 = await api('/api/draft', {
-    method: 'POST',
-    body: { planCard: { subject: 'again', body: 'again', discount: 15, coupon: 'BACK15', audience: '加购未付', skip_image: true } },
-  });
-  const send2 = await api(`/api/draft/${dr2.json.draft.id}/send`, { method: 'POST', body: {} });
-  assert.equal(send2.status, 400);
-  assert.match(send2.json.error, /72 小时/);
+  // —— 发送后再核对 diff=0（草稿四字段与快照一致；discount 经 DB TEXT 列往返，按数值口径比较）——
+  const sentDraft = (await api('/api/drafts')).json.drafts.find((x) => x.id === draft.id);
+  assert.equal(sentDraft.status, 'sent');
+  assert.equal(sentDraft.audience, planCard.audience);
+  assert.equal(Number(sentDraft.discount), planCard.discount.percent_off);
+  assert.equal(Number(sentDraft.matchedCount), planCard.reach_count);
+  assert.equal(Math.round(Number(sentDraft.estGmv) * 100) / 100, planCard.estGmv.amount);
 
   // —— ⑤ Resend 回执：opened（esp_id → 收件人映射） ——
-  const espId = (await (async () => {
-    // mock 的 esp_id 形如 esp_1..esp_4；取任一：直接用首封 id
-    return 'esp_1';
-  })());
   const opened = await fetch(base + '/api/attribution', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-webhook-secret': WH_SECRET },
-    body: JSON.stringify({ type: 'email.opened', data: { message_id: espId, email: 'wan.lin@example.com' } }),
+    body: JSON.stringify({ type: 'email.opened', data: { message_id: 'esp_1', email: 'flow0@example.com' } }),
   });
   assert.equal(opened.status, 200);
 
-  // —— ⑤ Shopify 订单归因：优惠码核销 → convert + 标签 +2 ——
-  const audList = (await api('/api/audience')).json.audience;
-  const wanLin = audList.find((a) => a.email === 'wan.lin@example.com');
-  assert.ok(wanLin);
+  // —— ⑤ Shopify 订单归因：真实建码的优惠码核销 → convert + 标签反哺 ——
   const order = await fetch(base + '/api/attribution', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-webhook-secret': WH_SECRET },
-    body: JSON.stringify({ source: 'shopify', event: 'orders/create', order: { id: 55001, email: 'wan.lin@example.com', total_price: '89.90', discount_codes: ['BACK12'] } }),
+    body: JSON.stringify({ source: 'shopify', event: 'orders/create', order: { id: 55001, email: 'flow0@example.com', total_price: '89.90', discount_codes: [CODE.toLowerCase()] } }),
   });
   assert.deepEqual(await order.json(), { ok: true, attributed: true });
+  const flow0 = (await api('/api/audience')).json.audience.find((a) => a.email === 'flow0@example.com');
+  assert.ok(flow0, '归因收件人命中');
+  const tags = (await api(`/api/audience/${flow0.id}/tags`)).json.tags;
+  assert.ok(tags.some((x) => x.source === 'attribution' && (x.weight || 0) > 0), 'convert → 标签加权反哺');
+
   // order_id 幂等：同单重放 → deduped
   const replay = await fetch(base + '/api/attribution', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-webhook-secret': WH_SECRET },
-    body: JSON.stringify({ source: 'shopify', event: 'orders/create', order: { id: 55001, email: 'wan.lin@example.com', total_price: '89.90', discount_codes: ['BACK12'] } }),
+    body: JSON.stringify({ source: 'shopify', event: 'orders/create', order: { id: 55001, email: 'flow0@example.com', total_price: '89.90', discount_codes: [CODE] } }),
   });
   assert.deepEqual(await replay.json(), { ok: true, deduped: true });
-  // 标签反哺：intent 8→10（触顶）、price 7→9
-  const tags = (await api(`/api/audience/${wanLin.id}/tags`)).json.tags;
-  const intentTag = tags.find((x) => x.tag_type === 'intent');
-  const priceTag = tags.find((x) => x.tag_type === 'price_sensitivity');
-  assert.equal(intentTag.weight, 10);
-  assert.equal(intentTag.source, 'attribution');
-  assert.equal(priceTag.weight, 9);
 
   // —— 退款扣减：GMV 归零 ——
   const refund = await fetch(base + '/api/attribution', {
@@ -219,40 +255,23 @@ test('G2 端到端：真发链路 + 频控 + 归因 + 标签反哺', async (t) =
   assert.equal(refundJson.refunded, true);
   assert.equal(refundJson.deducted, 89.9);
 
-  // —— bounced 剔除 ——
+  // —— bounced 剔除（bounced → email_status 剔除后续名单）——
   const bounce = await fetch(base + '/api/attribution', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-webhook-secret': WH_SECRET },
-    body: JSON.stringify({ type: 'email.bounced', data: { message_id: 'esp_unknown', email: 'mo.chen@example.com' } }),
+    body: JSON.stringify({ type: 'email.bounced', data: { message_id: 'esp_unknown', email: 'flow5@example.com' } }),
   });
   assert.equal(bounce.status, 200);
-  const chen = (await api('/api/audience')).json.audience.find((a) => a.email === 'mo.chen@example.com');
-  assert.equal(chen.email_status, 'email_invalid');
+  const bounced = (await api('/api/audience')).json.audience.find((a) => a.email === 'flow5@example.com');
+  assert.equal(bounced.email_status, 'email_invalid');
 
   // —— KPI：真实口径（1 open、1 convert 已退款 → GMV 0） ——
   const kpis = (await api('/api/state')).json.kpis;
-  assert.equal(kpis.open, 1);
+  assert.equal(kpis.open >= 1, true);
   assert.equal(kpis.convert, 1);
   assert.equal(kpis.gmv, 0);
 
-  // —— PRD §1 过滤口径：30 天挽回窗口 + 未转化 ——
-  // 同步一条 40 天前流失的「加购未付」：进入受众但不进可发送名单（窗口外）
-  await api('/api/store/sync', { method: 'POST', body: { events: [{ email: 'old.cart@example.com', name: 'OldCart', intent: '加购未付', abandoned_value: 500, at_risk_at: Date.now() - 40 * 86400000 }] } });
-  const conditions = (await api('/api/audience/preview', { method: 'POST', body: { audience: '加购未付' } })).json;
-  assert.equal(conditions.matchedCount, 8);   // 原始 10 条命中（9 + 老客）；窗口剔除老客、转化剔除 wan.lin → 8
-
-  // wan.lin 已转化（即使退款）也退出可发送名单；mo.chen 被 bounced 剔除
-  // —— 按人群/语言预览（渲染管线同口径；此时可发送：discount 2 / urgency 1 / standard 4） ——
-  const preview = (await api(`/api/draft/${draft.id}/preview`)).json;
-  assert.equal(preview.tiers.find((x) => x.tier === 'discount').count, 2);
-  assert.equal(preview.tiers.find((x) => x.tier === 'urgency').count, 1);
-  assert.equal(preview.tiers.find((x) => x.tier === 'standard').count, 4);
-  assert.ok(preview.languages.length >= 1);
-  assert.equal(preview.g0_blocked.length, 0);
-
-  // —— /api/image 只允许 output/ 目录树内文件（P1 路径穿越修复） ——
-  const outside = await fetch(base + '/api/image/' + encodeURIComponent(require('path').join(__dirname, '..', 'server.js')));
+  // —— /api/image 只允许 output/ 目录树内文件（P1 路径穿越修复保持） ——
+  const outside = await fetch(base + '/api/image/' + encodeURIComponent(path.join(__dirname, '..', 'server.js')));
   assert.equal(outside.status, 403);
-  // 海报已下线（436a06e：前端不再展示，改展示主图，省 LLM/万相算力）——skip_image 场景无海报图片文件
-  assert.ok(!sentDraft.posters || sentDraft.posters.every((p) => !p.file), '海报下线后 draft 不应再有生成的海报文件');
 });

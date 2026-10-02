@@ -656,8 +656,17 @@ class IGDE {
     act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
     act.updated_at = nowMs;
 
-    // 静默采集：四要素齐即产出方案卡（前端弹确认标签）；不以 ready 回写 stage（避免把 deny→S1 顶回 S3）
-    const planCard = this.missingFields(act).length === 0 ? this.producePlanCard(act, { locale: opts.locale }) : null;
+    // 静默采集 → 方案卡（Wave 2 契约）：
+    //  - S3（confirm 已通过）→ 回权威卡 act.plan_card（含店铺真实回执码）；
+    //  - 四要素齐 + 本轮在线（真模型 envelope）→ 产出「无码预览卡」（code_status=pending，
+    //    真实出卡在 /confirm 建码成功之后 —— E2 红线：卡面绝不出现未真实存在的折扣码）；
+    //  - 降级轮（桩 / AI 失败）不出 planCard（剧本 #13：降级 4/4 时 stage=S2 且不出 planCard）。
+    let planCard = null;
+    if (act.stage === 'S3' && act.plan_card) {
+      planCard = act.plan_card;
+    } else if (usedAI && !aiDead && this.missingFields(act).length === 0) {
+      planCard = this.producePlanCard(act, { locale: opts.locale, code: null });
+    }
 
     // —— B3 记账（严格先落库后回复）：upsertAct 成功后才冲刷 token / 返回 ——
     await doPersist();
@@ -881,25 +890,34 @@ class IGDE {
     return primary;
   }
 
-  /** 单一 FSM 权威：依据「已收集字段 + 用户意图」推进阶段；桩/AI 两条路径共用（P2-1） */
+  /** 单一 FSM 权威：依据「已收集字段 + 用户意图」推进阶段；桩/AI 两条路径共用（P2-1）
+   *  Wave 2（E2/D2）：
+   *  - S2 不再因「确认话术」直跳 S3 —— S2→S3 唯一入口是 POST /api/act/:id/confirm
+   *    （先真实建码、后出卡；失败停留 S2）；聊天里的确认/否认都停留 S2（correction 由 B2 解冻更新）。
+   *  - S3 correction/改参 → 回 S2，并作废 execution_snapshot 与 plan_card（旧方案卡/草稿不再可用）。 */
   _advanceStage(act, userText) {
     const t = (userText || '').trim().toLowerCase();
-    const miss = this.missingFields(act);
-    const deny = /不对|错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
-    const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t);
-    const wantAdjust = /改|调(整|整下)?|再聊|不对|换|重(新|做)?|另一|别的|加一拨|换拨|再想想/.test(t);
+    // S3 改参信号（保守口径：避免「没错」误伤）；correction 语气词已在 B2 记账
+    const wantAdjust = /改|调(整|整下)?|再聊|不对|换|重(新|做)?|另一|别的|加一拨|换拨|再想想|纠正/.test(t);
 
     if (act.stage === 'closed') return;
-    if (act.stage === 'S3') { if (wantAdjust) act.stage = 'S1'; return; }
-    if (act.stage === 'S2') {
-      if (deny) { act.stage = 'S1'; return; }                       // 否认 → 回澄清
-      if (miss.length === 0 && confirm) { act.stage = 'S3'; return; } // 四要素齐 + 确认 → 执行
-      return;                                                       // 否则停留对齐
+    if (act.stage === 'S3') {
+      if (wantAdjust) {
+        act.stage = 'S2';
+        // D2 快照失效：S3 改参后旧执行快照/方案卡作废（闸门⑤将因快照缺失拦截发送），回 S2 等再次确认
+        act.execution_snapshot = null;
+        act.plan_card = null;
+      }
+      return;
     }
-    if (act.stage === 'S1') { if (miss.length === 0) act.stage = 'S2'; return; }
+    if (act.stage === 'S2') {
+      // correction → needs 已在 B2 解冻更新，停留 S2 重新出确认卡数据；确认动作走 /confirm 端点
+      return;
+    }
+    if (act.stage === 'S1') { if (this.missingFields(act).length === 0) act.stage = 'S2'; return; }
     if (act.stage === 'S0') {
       act.stage = 'S1';
-      if (miss.length === 0) act.stage = 'S2';
+      if (this.missingFields(act).length === 0) act.stage = 'S2';
       return;
     }
   }
@@ -923,12 +941,13 @@ class IGDE {
     }
     if (act.stage === 'S2') {
       // 对齐 / 确认 / 否认；对话里不暴露字段（字段只在确认标签出现）
+      // Wave 2：确认动作走 /confirm 端点（先建码后出卡），聊天里的「对/生成」只做引导
       const t = userText.trim();
       const deny = /不对|错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
       if (deny) return { reply: '好，哪点要改？告诉我，其它对的我留着。', asked: false };
       if (this.missingFields(act).length === 0) {
         const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
-        if (confirm) return { reply: '好，我按这个帮你把邮件配置生成好了，下面确认标签你可以看一眼再发。', asked: false };
+        if (confirm) return { reply: '好，四样都核对齐了。点下面的「确认」按钮，我去你的店铺创建折扣码并生成方案卡。', asked: false };
         return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
       }
       if (nonInfo) {
@@ -1227,19 +1246,26 @@ class IGDE {
     if (lang === 'en') {
       const pain = this._painEn(n);
       const verb = this._goalVerb(n.goal, lang);
+      // E2 红线：没有真实存在的码绝不写码行（确认后建码，预览卡/无钩子卡正文不出现假码）
+      const codeLine = coupon
+        ? `Use code ${coupon} at checkout to ${verb}.`
+        : `Your welcome-back offer is ready — ${verb} and it will be applied.`;
       return [
         `Hi, we noticed you ${pain} and wanted to reach out.`,
         `We've set aside ${offer} just for you — a little welcome-back gift.`,
-        `Use code ${coupon} at checkout to ${verb}.`,
+        codeLine,
         `Unsubscribe anytime — we respect your choice.`
       ].join('\n');
     }
     const pain = n.reason || n.pain || '太久没联系';
     const verb = this._goalVerb(n.goal, 'zh');
+    const codeLine = coupon
+      ? `优惠码 ${coupon}，点下面就能${verb}。`
+      : `点下面就能${verb}，你的专属优惠确认后发放。`;
     return [
       `Hi，注意到你${pain}，特地回来找你。`,
       `这次专门给你留了「${offer}」，就当老朋友见面礼。`,
-      `优惠码 ${coupon}，点下面就能${verb}。`,
+      codeLine,
       `退订点此，随时尊重你的选择。`
     ].join('\n');
   }
@@ -1250,6 +1276,8 @@ class IGDE {
   /** S3：生成方案卡（邮件配置建议，§5③）
    *  字段：受众 / 主题 / 正文 / 海报(3款) / 折扣 / 独立优惠码 / 发送时机
    *  PRD v2：inferred_slots 带出推断槽标记（C6），确认卡据此提示「这是我们的理解，可改」。
+   *  Wave 2（E2 红线）：本方法只产出「基础卡」（文案/海报/数值口径），**绝不本地生成折扣码**——
+   *    opts.code 必须来自店铺连接器真实回执（confirm 建码成功后传入）；缺省 = 无码（预览/无钩子卡）。
    *  ⚠️ 语种 lang 来自「收件人 locale」（opts.locale），绝不由商家聊天语言决定。
    *     opts.locale 缺省时回落 shopDefaultLocale（默认 en，跨境主客群）。
    *     发送时逐收件人本地化请用 renderForRecipient()，本卡只是「店铺默认语种」预览。 */
@@ -1267,13 +1295,13 @@ class IGDE {
     };
     const zheM = offerSrc.match(/(\d+(?:\.\d+)?)\s*折/);
     const pctM = offerSrc.match(/(\d+(?:\.\d+)?)\s*%/);
+    const isDiscountType = Boolean(zheM || pctM) || /(优惠码|折扣|coupon|promo|code)/i.test(offerSrc);
     const discountNum = zheM ? zheToOff(parseFloat(zheM[1]))
-      : (pctM ? +pctM[1] : 10);
+      : (pctM ? +pctM[1] : (isDiscountType ? 10 : 0));
     // 给商家看的文案（时机建议 / 海报方向）跟随商家对话语言，不跟店铺语种 —— 邮件正文才跟收件人（走查 P1-6）
     const merchantLang = this._collapseLang(this.detectLang(act));
-    // 用户指定过码名（needs.offer 含「优惠码KEYBOARD12」等）→ 用用户的码；否则生成随机码
-    const userCode = offerSrc.match(/优惠码([A-Za-z][A-Za-z0-9]{2,15})/i);
-    const coupon = userCode ? userCode[1].toUpperCase() : 'COMEBACK-' + Math.random().toString(36).slice(2, 8).toUpperCase();
+    // E2：码只能来自店铺真实回执（opts.code）；本地绝不拼码（旧 COMEBACK- 随机码已根除）
+    const coupon = String(opts.code || '').toUpperCase() || null;
     const subject = this._subject(n, lang);
     const body = this._body(n, coupon, lang);
     const posters = merchantLang === 'en'
@@ -1289,14 +1317,13 @@ class IGDE {
         ];
     return {
       audience: n.audience || '高意向流失人群',
-      pain: n.reason || '',          // 确认卡「为什么挽回」（旧键保留兼容）
-      reason: n.reason || '',        // PRD v2 新键：与 needs.reason 对齐
+      reason: n.reason || '',        // PRD v2：与 needs.reason 对齐（旧 pain 键已删除）
       goal: n.goal || '',
+      offer: offerSrc,               // offer 槽原文（E2 建码/无码分支判定用）
       subject,
       body,
       discount: offer,
       discountNum,
-      coupon,
       posters,
       sendTiming: this._sendTiming(n, merchantLang),
       inferred_slots: inferredSlots(act.needs), // C6：推断槽带标记（如 ["audience"]），确认卡提示可改
@@ -1325,7 +1352,8 @@ class IGDE {
   renderForRecipient(planCard, recipient, shopMeta) {
     const lang = this._collapseLang(this.recipientLang(recipient, shopMeta));
     const n = (planCard && planCard.needs) || {};
-    const coupon = (planCard && planCard.coupon) || 'COMEBACK-DEMO';
+    // E2 红线：无真实码就不渲染码（绝不回落假码占位）
+    const coupon = (planCard && planCard.coupon) || '';
     return {
       locale: lang,
       subject: this._subject(n, lang),

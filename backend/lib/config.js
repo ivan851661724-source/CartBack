@@ -180,7 +180,23 @@ function status(cfg) {
   };
 }
 
+// —— Wave 2 全局口径常量（单处权威，业务模块一律从这里引用，禁止再各自硬编码）——
+// 频控窗口：PRD 口径为 7 天，挂起裁决先不动 72h（PRD §3.4 72h 频控维持现状，待裁决后只改这里）
+const FREQUENCY_WINDOW_MS = 72 * 3600 * 1000;
+// holdout 对照组：按 10% 从闸门过滤后的净值名单圈定；名单 < 200 人不冻结（J3 前置子集）
+const HOLDOUT_RATIO = 0.1;
+const HOLDOUT_MIN_LIST = 200;
+// 发送时段闸门（D4①）：收件人时区 09:00–21:00 为合理时段，界外缓发
+const SEND_WINDOW_START_HOUR = 9;
+const SEND_WINDOW_END_HOUR = 21;
+// estGmv 公式（D3）：reach_count × 客单价 × 挽回率(12% 行业参考) − 折扣成本；客单价缺失用行业默认
+const RECOVERY_RATE_REFERENCE = 0.12;
+const INDUSTRY_DEFAULT_AOV = 45; // USD
+
 module.exports = {
   ROOT, PUBLIC_DIR, SERVER_DIR, CONFIG_FILE, DB_FILE,
+  FREQUENCY_WINDOW_MS, HOLDOUT_RATIO, HOLDOUT_MIN_LIST,
+  SEND_WINDOW_START_HOUR, SEND_WINDOW_END_HOUR,
+  RECOVERY_RATE_REFERENCE, INDUSTRY_DEFAULT_AOV,
   load, save, status, DEFAULTs: DEFAULTS
 };
