@@ -39,6 +39,8 @@ const {
 } = require('./needs');
 // 店后台连接器：收件人 locale 归一化（邮件语种唯一权威来源）
 const { normalizeLocale } = require('./storeConnector');
+// Wave 4 F2：算账口径与账本（estGmv 公式）同源——挽回率/折扣成本计算复用 execution 单处权威
+const execution = require('./execution');
 
 // 槽位优先级即数组顺序：B4 选问 audience > reason > offer > goal
 const NEEDED_FIELDS = SLOTS;
@@ -48,6 +50,12 @@ const MAX_CONFLICTS = 4;
 
 // 修正语气词（B2 冲突检测）：出现 → 新值视为明确纠正；不出现且与现值不同 → 冲突候选
 const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|改主意|应该是|说错|rather|instead|actually|correction)/i;
+
+// —— Wave 4 F2 算账意图（对话内问「这批人值多少钱 / 值不值」→ 确定性算账，与账本同口径）——
+const LEDGER_RE = /(值多少|值不值|划不划算|能赚多少|赚多少|能回多少|值几个钱|算.{0,4}账)/i;
+// —— Wave 4 A3 复用意图（新会话首条消息「照上次的来」→ prefs 预填）/ 否认复用（清预填）——
+const REUSE_RE = /(照上次的?来?|跟(上次|上回)一样|和(上次|上回)一样|上个月那套|上次那套|按上次的?|照旧)/i;
+const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别跟|不跟|别拿|不拿|不是照|不是跟).{0,3}(上次|上回|上个月|那套)/i;
 
 // —— D 类（私人生活/无关话题）重定向池：引擎级双保险的话术口径（与 lib/llm.js COACH_SYSTEM_PROMPT D 类一致）——
 // 首句先「接住」用户刚说的（哪怕只是"哈哈这个我帮不上~"），再拉回邮件营销主业；不追问字段、不复读同一句。
@@ -66,7 +74,8 @@ const FALLBACK_POOL = [
 
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
 // Wave 3：批次域动作词（批次/停发/全停/暂停/恢复/重发）也是业务词 —— 运维话术不得被离题路由劫持
-const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发)/i;
+// Wave 4：算账问句 / 复用意图（F2/A3）同为业务词，桩模式下不得被离题兜底吞掉
+const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发|值多少|值不值|划不划算|能赚|能回多少|算账|照上次|跟上次|和上次|上个月那套|上次那套|按上次|照旧)/i;
 
 // —— 离题/元问题/身份询问 的温和接住池（桩与模型降级共用，_rotateReply 轮换防复读；guardrailHits 记空，非边界拒绝）——
 const OFFTOPIC_POOL = [
@@ -436,9 +445,39 @@ class IGDE {
     return '请按照引导填充品牌基础信息，完成初始设置。';
   }
 
-  /** 会话创建时一次性下发 S0 开场白（不推进阶段） */
-  opening() {
-    return { reply: this.s0Open(), stage: 'S0' };
+  /** 会话创建时一次性下发 S0 开场白（不推进阶段）。
+   *  Wave 4 F1 零配置开场：
+   *  - opts.hasAnyAct=true（商家名下已存在任何 act，含 closed）→ 不拼欢迎语（欢迎语一生只在首次出现）；
+   *  - opts.storeBanner.connected 且有数据 → 数据先于提问：
+   *    「已连接{店名}。本周{N}个加购未付（客单¥X，弃购总额¥Y）」+ 数据式 chips（≤2 数据 chip +「我自己说」）；
+   *  - 未连接 / 无店铺数据 → 问一句话开场（不硬编数据），chips = ['加购未付','浏览未买','我自己说']。
+   *  返回 { reply, stage, chips, welcome }；welcome=是否拼了欢迎语（前端可据此高亮首屏）。 */
+  opening(opts = {}) {
+    const banner = (opts.storeBanner && typeof opts.storeBanner === 'object') ? opts.storeBanner : null;
+    const count = Math.max(0, Number(banner && banner.weekly_abandoned_count) || 0);
+    const aov = Math.max(0, Number(banner && banner.aov) || 0);
+    const total = Math.max(0, Number(banner && banner.abandoned_value) || 0);
+    const hasData = Boolean(banner && banner.connected && (banner.store_name || count > 0));
+    const cur = banner && String(banner.currency) === 'USD' ? '$' : '¥';
+    const parts = [];
+    if (!opts.hasAnyAct) parts.push('欢迎使用百客，我是你的专属智能邮件营销助手。');
+    let chips;
+    if (hasData) {
+      if (banner.store_name) parts.push(`已连接${banner.store_name}。`);
+      if (count > 0) {
+        const fmt = (n) => (Number.isInteger(n) ? String(n) : String(+n.toFixed(2)));
+        parts.push(`本周${count}个加购未付（客单${cur}${fmt(aov)}，弃购总额${cur}${fmt(total)}）。`);
+      }
+      parts.push('想先把这拨人捞回来吗？还是先聊别的客群？');
+      chips = [];
+      if (count > 0) chips.push(`加购未付 ${count} 人`);
+      if (chips.length < 2) chips.push('浏览未买');
+      chips.push('我自己说');
+    } else {
+      parts.push('想先把哪拨客人捞回来？加购没付的、逛了没买的，还是好久没来的老客？');
+      chips = ['加购未付', '浏览未买', '我自己说'];
+    }
+    return { reply: parts.join(''), stage: 'S0', chips, welcome: !opts.hasAnyAct };
   }
 
   /** 追问单点字段；与上一句重复则轮换说法（桩模型路径的防复读；真模型由提示词硬约束 + 交付层相似度检查兜底） */
@@ -667,6 +706,35 @@ class IGDE {
           agentMeta: this._agentMeta(runtime)
         };
       }
+    }
+
+    // —— Wave 4（F2 算账 / A3 复用）：确定性短路轮，在线与降级同口径（envelope 到了也优先用确定性回复）——
+    const w4 = this._wave4Turn(act, userText, { executors, reusePrefs: opts.reusePrefs });
+    if (w4) {
+      let reply4 = guardrailL1(w4.reply || '');
+      if (!guardrailL0(reply4) || reply4.trim().length < 2) { reply4 = this._pickFallback(act); guardrailHits.push('L0'); }
+      if (!guardrailL2(reply4)) { reply4 = this._pickFallback(act); guardrailHits.push('L2'); }
+      if (!guardrailL4(reply4, act.stage)) { reply4 = this._pickFallback(act); guardrailHits.push('L4'); }
+      if (w4.askedSlot) {
+        act.memory = ensureMemory(act.memory, nowMs);
+        act.memory.ask_count[w4.askedSlot] = (Number(act.memory.ask_count[w4.askedSlot]) || 0) + 1;
+      }
+      if (w4.advance) this._advanceStage(act, userText);   // 复用/否认轮推进 FSM；算账是查询，不推进
+      act.messages.push({ role: 'user', content: userText, ts: nowMs });
+      act.messages.push({ role: 'assistant', content: reply4, ts: nowMs });
+      act.updated_at = nowMs;
+      await doPersist();
+      if (opts.onReplyToken && tokenBuffer.length) {
+        for (const p of tokenBuffer) opts.onReplyToken(p);
+      }
+      return {
+        reply: reply4, stage: act.stage, needs: act.needs,
+        planCard: (act.stage === 'S3' && act.plan_card) ? act.plan_card : null,
+        guardrailHits,
+        engine: this._engineOf(usedAI && !aiDead),
+        chips: w4.chips || [], askedSlot: w4.askedSlot || null,
+        agentMeta: this._agentMeta(runtime)
+      };
     }
 
     // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
@@ -1032,6 +1100,120 @@ class IGDE {
     if (kind === 'resume_all') return executors.resumeAll();
     if (kind === 'blackout') return executors.addBlackout(params || {});
     return executors.campaignOp({ op: kind, target, campaign_id: campaignId || null, params: params || {} });
+  }
+
+  /* ------------------- Wave 4：F2 算账 / A3 复用（确定性短路轮）------------------- */
+
+  /** 返回 null = 本轮无算账/复用语义（回归常规 B4 流水线）；复用/否认优先于算账。 */
+  _wave4Turn(act, userText, { executors, reusePrefs } = {}) {
+    return this._reuseTurn(act, userText, reusePrefs) || this._ledgerTurn(act, userText, executors);
+  }
+
+  /** Wave 4 F2：算账问句 → 确定性算账回复（同账本口径：人数 × 客单 × 挽回率 − 折扣成本），chips=[]。
+   *  口径优先级：① confirm 冻结的执行快照 / 方案卡（estGmv.formula，逐字段同源）；
+   *  ② 运行时圈人 + 客单（executors.audienceStats，server 注入；未确认方案也能当场算）；
+   *  ③ 圈不到人 → 引导先选人群（不产数字 —— 无数据支撑不硬编）。 */
+  _ledgerTurn(act, userText, executors) {
+    if (!LEDGER_RE.test(String(userText || ''))) return null;
+    const audValue = (act.needs && act.needs.audience && act.needs.audience.value) || '';
+    const audLabel = audValue || '全部可捞人群';
+    const curOf = (c) => (String(c || '') === 'USD' ? '$' : '¥');
+    const compose = (f, amount, cur, src) =>
+      `给你算笔账（和账本同口径，预估）：「${audLabel}」${f.people} 人 × 客单 ${cur}${f.aov} × 挽回率 ${Math.round((Number(f.rate) || 0) * 100)}%（行业参考）− 折扣成本 ${cur}${f.discount_cost} ≈ 能回 ${cur}${amount}（约 ${+(f.people * f.rate).toFixed(1)} 单）。${src}。要按这个下手，说一声我就开始配。`;
+    // ① 权威口径：执行快照 / 方案卡的 estGmv（与账本逐字段同源）
+    const snap = act.execution_snapshot || (act.plan_card ? { discount: act.plan_card.discount, estGmv: act.plan_card.estGmv } : null);
+    if (snap && snap.estGmv && snap.estGmv.formula) {
+      const f = snap.estGmv.formula;
+      const src = snap.estGmv.source === 'store' ? '口径：客单按你店里的实数' : '口径：客单按行业默认，预估示意';
+      return { advance: false, reply: compose(f, snap.estGmv.amount, curOf(snap.estGmv.currency), src), chips: [], askedSlot: null };
+    }
+    // ② 运行时口径：圈人 + 客单
+    let stats = null;
+    try { stats = (executors && executors.audienceStats) ? executors.audienceStats(audValue) : null; } catch (e) { stats = null; }
+    if (!stats || !(stats.count > 0)) {
+      return {
+        advance: false,
+        reply: '先圈到人我才能给你算账：告诉我先捞哪拨客人（加购未付 / 浏览未买 / 老客都行），我马上按人数 × 客单 × 挽回率算给你看。',
+        chips: [], askedSlot: null
+      };
+    }
+    const pct = execution.parseOfferPercent((act.needs && act.needs.offer && act.needs.offer.value) || '') || 0;
+    const est = execution.computeEstGmv({ reachCount: stats.count, aov: stats.aov, aovSource: stats.aov_source, percentOff: pct });
+    const src = est.source === 'store' ? '口径：人数、客单按你店里的实数' : '口径：客单按行业默认，预估示意';
+    return { advance: false, reply: compose(est.formula, est.amount, curOf(stats.currency), src), chips: [], askedSlot: null };
+  }
+
+  /** Wave 4 A3：复用意图（仅新会话首条消息）→ prefs 预填（source=inferred）+ 逐项复述 + 差异项显式追问；
+   *  否认复用（「别用上次的」）→ 清空本次预填（只清 inferred 槽）回正常采集。 */
+  _reuseTurn(act, userText, reusePrefs) {
+    const text = String(userText || '').trim();
+    act.memory = ensureMemory(act.memory, Date.now());
+    const prefs = act.memory.prefs || {};
+    const reuseAt = Number(prefs.reuse_at) || 0;
+    // ① 否认复用：清预填回 S1 正常采集（保留商家偏好本身，只清本次复用标记）
+    if (reuseAt && REUSE_DENY_RE.test(text)) {
+      const slots = String(prefs.reuse_slots || '').split(',').filter(s => SLOTS.includes(s));
+      for (const s of slots) {
+        if (act.needs[s] && act.needs[s].source === 'inferred') act.needs[s] = null;
+      }
+      // 落库合并器（mergeMonotonicAct）默认拒绝槽位降级：显式打标本次清空，允许覆盖预填旧值
+      if (slots.length) prefs.reuse_cleared = slots.join(',');
+      delete prefs.reuse_at;
+      delete prefs.reuse_slots;
+      delete prefs.reused_from;
+      const miss = this.missingFields(act);
+      const probe = miss[0] || null;
+      return {
+        advance: true,
+        reply: '好，上次的先不用，咱们重新配一遍。' + (probe ? this.probeFor(probe) : '你说，这次想针对谁、给什么钩子？'),
+        chips: probe ? (SLOT_CHIPS[probe] || []) : [],
+        askedSlot: probe
+      };
+    }
+    if (!REUSE_RE.test(text)) return null;
+    if (reuseAt) return null;                                        // 已预填过：不再重复接手
+    if (act.messages.some(m => m.role === 'user')) return null;      // 仅新会话首条消息命中
+    const last = (reusePrefs && typeof reusePrefs === 'object') ? reusePrefs : null;
+    if (!last || !String(last.audience || '').trim()) {
+      // 没有可复用的历史方案：如实说，不硬编
+      return {
+        advance: true,
+        reply: '我这边没翻到你上次确认过的方案，咱们直接配新的：先说最想挽回哪拨人？',
+        chips: SLOT_CHIPS.audience,
+        askedSlot: 'audience'
+      };
+    }
+    // ② prefs 预填（inferred；回复必须带「不对请纠正」语义；缺失项 = 差异项，显式追问不静默沿用）
+    const now = Date.now();
+    const filledText = [];
+    const slots = [];
+    const put = (slot, raw) => {
+      const v = clampNeedValue(raw);
+      if (!v) return;
+      act.needs[slot] = { value: v, source: 'inferred', at: now };
+      filledText.push(`${FIELD_LABEL[slot]}「${v}」`);
+      slots.push(slot);
+    };
+    put('audience', last.audience);
+    put('reason', last.reason);
+    put('offer', last.offer_text || last.offer);
+    put('goal', last.goal);
+    act.memory.prefs.reuse_at = String(now);
+    act.memory.prefs.reuse_slots = slots.join(',');
+    if (last.act_id) act.memory.prefs.reused_from = String(last.act_id);
+    const miss = this.missingFields(act);
+    let reply = `我理解为${filledText.join('、')}——照上次的来，不对请纠正。`;
+    if (miss.length) {
+      reply += `有 ${miss.length} 样跟上次没对齐的，我逐个问：${this.probeFor(miss[0])}`;
+    } else {
+      reply += '四样都和上次对齐了，你在下面确认卡里核对一遍，没问题就点确认。';
+    }
+    return {
+      advance: true,
+      reply,
+      chips: miss.length ? (SLOT_CHIPS[miss[0]] || []) : [],
+      askedSlot: miss.length ? miss[0] : null
+    };
   }
 
 

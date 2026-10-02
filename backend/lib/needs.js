@@ -154,7 +154,9 @@ function migrateAct(act, now = Date.now()) {
   return act;
 }
 
-/** filled_count 单调不减合并：返回落库用的 act（就地修改） */
+/** filled_count 单调不减合并：返回落库用的 act（就地修改）。
+ *  例外（Wave 4 A3③）：商家否认复用（「别用上次的」）对预填槽的显式清空不是降级——
+ *  memory.prefs.reuse_cleared 列出的槽允许清空（引擎清空同轮打标，落库后旧值被覆盖为空）。 */
 function mergeMonotonicAct(act, old, now = Date.now()) {
   migrateAct(act, now);
   if (!old || typeof old !== 'object') {
@@ -162,13 +164,17 @@ function mergeMonotonicAct(act, old, now = Date.now()) {
     return act;
   }
   migrateAct(old, now);
+  const cleared = act.memory && act.memory.prefs && typeof act.memory.prefs.reuse_cleared === 'string'
+    ? act.memory.prefs.reuse_cleared.split(',').filter(Boolean)
+    : [];
   for (const slot of SLOTS) {
     const cur = act.needs[slot];
     const prev = old.needs[slot];
     const curFilled = cur && String(cur.value || '').trim();
     const prevFilled = prev && String(prev.value || '').trim();
-    if (!curFilled && prevFilled) act.needs[slot] = prev; // 拒绝降级：保留旧值
+    if (!curFilled && prevFilled && !cleared.includes(slot)) act.needs[slot] = prev; // 拒绝降级：保留旧值
   }
+  if (cleared.length && act.memory && act.memory.prefs) delete act.memory.prefs.reuse_cleared;   // 一次性标记：合并即消费
   act.filled_count = Math.max(countFilled(act.needs), Number(old.filled_count) || 0);
   return act;
 }

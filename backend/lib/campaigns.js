@@ -17,6 +17,7 @@
 const { uid } = require('./store');
 const execution = require('./execution');
 const exclusion = require('./exclusion');
+const notify = require('./notify');   // Wave 4 F3：批次 stats（打开/点击/回流/net）从 sends+events 派生
 const { FREQUENCY_WINDOW_MS, HOLDOUT_RATIO } = require('./config');
 
 const LETTERS = 'ABCDEFGHIJ';
@@ -118,7 +119,8 @@ function publicCampaign(store, camp) {
     pending_count: c.pending,
     holdout_count: c.holdout,
     excluded: Array.isArray(camp.excluded) ? camp.excluded : [],
-    stats: { opened: 0, clicked: 0, recovered: 0, net: 0 },   // 本波占位（Wave 4 F3 回执读 sends 后回填）
+    // Wave 4 F3：stats 从 sends+events 实时派生（sends 唯一口径；net = 订单金额 − 折扣成本估算，退款单不计）
+    stats: notify.campaignStats(store, camp),
     created_at: camp.created_at
   };
   if (camp.scheduled_at) out.scheduled_at = camp.scheduled_at;

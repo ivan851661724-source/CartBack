@@ -579,7 +579,9 @@ test('C 契约：POST /api/campaigns 两批独立码 + GET /api/state 顶层 cam
     for (const k of ['id', 'act_id', 'name', 'audience_desc', 'status', 'discount', 'reach_count', 'sent_count', 'pending_count', 'holdout_count', 'excluded', 'stats', 'created_at']) {
       assert.ok(k in c, `campaign.${k} 在契约形状内`);
     }
-    assert.deepEqual(Object.keys(c.stats), ['opened', 'clicked', 'recovered', 'net'], 'stats 本波 0 占位');
+    // Wave 4 F3：stats 从 sends+events 实时派生（不再是 0 占位）；新批次无实发 → 全 0
+    assert.deepEqual(Object.keys(c.stats), ['opened', 'clicked', 'recovered', 'gmv', 'net'], 'stats 契约形状（Wave 4 派生）');
+    assert.equal(c.stats.opened + c.stats.clicked + c.stats.recovered + c.stats.net, 0, '新批次无实发 stats 全 0');
     assert.equal(c.discount.code_status, 'created');
   }
   assert.notEqual(a.discount.code, b.discount.code, '逐批独立码');

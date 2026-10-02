@@ -129,6 +129,17 @@ const SCHEMA = {
     to: 'INTEGER',           // 结束日次日 00:00 UTC（epoch ms，不含）—— 闭开区间，重叠日历取并集
     label: 'TEXT', created_at: 'INTEGER'
   },
+  // —— Wave 4 F3 主动回执：notifications（通知中心持久化；前端从通知拉取渲染，不写 act.messages）——
+  notifications: {
+    id: 'TEXT', user_id: 'TEXT',      // 归属商家（本地模式 null = 共享历史数据）
+    type: 'TEXT',                     // 't0'（发送结果）| 't24'（24h 回执汇总）| 'recover'（回流报喜）| 'system'
+    title: 'TEXT', body: 'TEXT',
+    campaign_id: 'TEXT',              // 批次域：批次发送相关通知指向 campaign.id
+    draft_id: 'TEXT',                 // 单方案域：草稿发送相关通知指向 draft id
+    act_id: 'TEXT',                   // 关联会话（前端跳转用，可空）
+    chips: 'JSON',                    // 建议动作快捷项（如 ['再打一轮','换主题行','先不动']）
+    created_at: 'INTEGER', read: 'INTEGER'   // read: 0|1（缺省 0 未读）
+  },
   // —— 用户账号体系（架构方案 v4 D7/D8）——
   // users/sessions 为全局表，行级语义；当前单进程下「读全表→过滤→写回」安全（读写间无 await），
   // 多实例部署必须改行级 SQL（insertRow/updateRow/deleteRow），否则并发互相覆盖丢数据（整改 6）。
@@ -634,6 +645,16 @@ class Store {
       .filter(c => !c.user_id || c.user_id === userId)
       .sort((a, b) => (a.created_at || 0) - (b.created_at || 0));   // 建批顺序（A/B/C 序与重叠归属依据）
   }
+  /** 按 act 取批次（Wave 4 F3：actActual 翻转数据聚合用） */
+  getCampaignsByAct(actId) {
+    return this._read('campaigns').filter(c => c.act_id === actId);
+  }
+  /** 按折扣码反查批次（Wave 4 F3③：Shopify 订单核销归因到批次 scope；码为店铺级全局，不按用户过滤） */
+  findCampaignByCoupon(code) {
+    const want = String(code || '').toLowerCase();
+    if (!want) return null;
+    return this._read('campaigns').find(c => c.discount && c.discount.code && String(c.discount.code).toLowerCase() === want) || null;
+  }
   upsertCampaign(c) {
     const rows = this._read('campaigns').filter(x => x.id !== c.id);
     rows.push(c); this._write('campaigns', rows); return c;
@@ -652,6 +673,46 @@ class Store {
     const next = rows.filter(x => x.id !== id);
     if (next.length === rows.length) return false;
     this._write('blackouts', next); return true;
+  }
+
+  // —— Wave 4 F3：notifications（主动回执通知中心；created_at 倒序，表上限 200 防膨胀）——
+  addNotification(n) {
+    n.id = n.id || uid('ntf_');
+    n.created_at = n.created_at || Date.now();
+    n.read = n.read ? 1 : 0;
+    const rows = this._read('notifications');
+    rows.push(n);
+    // 只保留最近 200 条（按 created_at 降序），过期通知静默丢弃
+    if (rows.length > 200) {
+      const keep = rows.sort((a, b) => (b.created_at || 0) - (a.created_at || 0)).slice(0, 200);
+      this._write('notifications', keep);
+    } else {
+      this._write('notifications', rows);
+    }
+    return n;
+  }
+  /** 某商家的通知列表（created_at 倒序；limit 缺省 50，与 GET /api/notifications 契约一致） */
+  getNotifications(userId, limit = 50) {
+    return this._read('notifications')
+      .filter(n => !n.user_id || n.user_id === userId)   // 归属口径与 getActsByUser 一致（历史 null 共享）
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+      .slice(0, Math.max(1, limit));
+  }
+  unreadNotificationCount(userId) {
+    return this.getNotifications(userId, Infinity).filter(n => !n.read).length;
+  }
+  /** 标记已读：ids 缺省 = 全部标已读；返回本次标记数 */
+  markNotificationsRead(userId, ids) {
+    const rows = this._read('notifications');
+    const want = Array.isArray(ids) && ids.length ? new Set(ids.map(String)) : null;
+    let n = 0;
+    for (const r of rows) {
+      if (r.user_id && userId && r.user_id !== userId) continue;
+      if (want && !want.has(String(r.id))) continue;
+      if (!r.read) { r.read = 1; n++; }
+    }
+    if (n) this._write('notifications', rows);
+    return n;
   }
 
   // —— meta ——

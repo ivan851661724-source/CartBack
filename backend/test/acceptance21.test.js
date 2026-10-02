@@ -589,3 +589,63 @@ test('剧本 #13 降级补测：断开 LLM 重放 #1-#10 输入 —— 状态机
   assert.ok(acc.slotText(act.needs.reason), 'reason 已采集');
   assert.equal(acc.slotText(act.needs.offer), '10% off', 'offer 已采集（数值+单位）');
 });
+
+/* ---------------- Wave 4（F1 零配置开场 / A3 商家记忆）追加用例 ---------------- */
+
+test('Wave 4 #1 零配置开场：欢迎语只在首个 act 拼一次；数据开场句先于提问（F1）', () => {
+  const { IGDE } = require('../lib/igde');
+  const igde = new IGDE({ aiEnabled: false, criticMode: 'off' });
+  // 场景一：商家名下无任何 act（含 closed）→ 首条 agent 气泡开头拼接欢迎语
+  const first = igde.opening({ hasAnyAct: false, storeBanner: { connected: false } });
+  assert.ok(first.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '#1 欢迎语开头一次性拼接');
+  assert.equal(first.welcome, true, 'welcome 标识（前端 eligible=false 时不显示）');
+  assert.deepEqual(first.chips, ['加购未付', '浏览未买', '我自己说'], '开场 chips ≤3 且含自由输入出口');
+  // 场景二：老用户恢复会话 / 新会话（名下已有 act）→ 不再出现欢迎语
+  const second = igde.opening({ hasAnyAct: true, storeBanner: { connected: false } });
+  assert.ok(!second.reply.includes('欢迎使用百客'), '第二个 act 起不再拼欢迎语');
+  // 场景三：已连接店铺 → 店铺真实数据先于提问 + 数据式 chips
+  const data = igde.opening({
+    hasAnyAct: false,
+    storeBanner: { connected: true, store_name: 'LunaGlow', weekly_abandoned_count: 214, aov: 45, abandoned_value: 9630, currency: 'USD' }
+  });
+  const iW = data.reply.indexOf('欢迎使用百客');
+  const iD = data.reply.indexOf('已连接LunaGlow');
+  const iQ = data.reply.indexOf('想先把这拨人捞回来吗');
+  assert.ok(iW < iD && iD < iQ, '数据先于提问');
+  assert.ok(data.reply.includes('本周214个加购未付'), '数据开场句');
+  assert.ok(data.chips.length <= 3 && data.chips.includes('我自己说'), 'chips ≤3 且含「我自己说」');
+});
+
+test('Wave 4 A3 商家记忆：方案沉淀 prefs → 新 act「照上次的来」预填 inferred + 复述；否认清空', async () => {
+  const { IGDE } = require('../lib/igde');
+  const igde = acc.makeScriptedEngine([]);   // 复用意图为确定性短路轮，不消耗 envelope 脚本
+  // ① 上一会话四要素齐（模拟 confirm 成功后的 prefs 沉淀 —— 服务端确认写入见 wave4 HTTP e2e）
+  const prev = acc.makeAcceptanceAct('act_prev');
+  prev.needs.audience = { value: '加购未付客户', source: 'explicit', at: 1 };
+  prev.needs.reason = { value: '太久没动静', source: 'explicit', at: 1 };
+  prev.needs.offer = { value: '15% off', source: 'explicit', at: 1 };
+  prev.needs.goal = { value: '促成复购', source: 'explicit', at: 1 };
+  const prefs = {
+    audience: prev.needs.audience.value, reason: prev.needs.reason.value,
+    offer_text: prev.needs.offer.value, goal: prev.needs.goal.value,
+    discount_percent: '15', brand: 'LunaGlow', signature: 'LunaGlow',
+    act_id: prev.id, confirmed_at: String(Date.now()), source: 'confirm'
+  };
+  // ② 新会话首条消息命中复用意图 → 预填 inferred + 逐项复述 + 「不对请纠正」
+  const act = acc.makeAcceptanceAct('act_reuse');
+  act.messages.push({ role: 'assistant', content: igde.opening({ hasAnyAct: true }).reply, ts: 0 });
+  const r = await igde.handle(act, '照上次的来', { reusePrefs: prefs });
+  assert.ok(r.reply.includes('我理解为') && r.reply.includes('不对请纠正'), '预填回复必带「我理解为…不对请纠正」语义');
+  assert.ok(r.reply.includes('加购未付客户') && r.reply.includes('15% off') && r.reply.includes('促成复购'), '逐项复述 prefs');
+  for (const s of ['audience', 'reason', 'offer', 'goal']) {
+    assert.equal(act.needs[s].source, 'inferred', `预填槽 ${s} source=inferred`);
+  }
+  assert.equal(require('../lib/needs').countFilled(act.needs), 4, '四要素预填齐（filled_count 落库时重算，此处现算 needs）');
+  assert.equal(r.stage, 'S2', '预填齐 → S2 等确认');
+  assert.equal(act.memory.prefs.reuse_slots, 'audience,reason,offer,goal', '复用标记挂 prefs');
+  // ③ 否认复用 → 清空预填回采集
+  const r2 = await igde.handle(act, '别用上次的', {});
+  assert.ok(/上次的先不用/.test(r2.reply), '否认被接住');
+  assert.equal(act.needs.audience, null, '预填清空');
+  assert.equal(r2.askedSlot, 'audience', '回 S1 正常采集');
+});

@@ -30,6 +30,8 @@ const postersMod = require('./lib/posters');
 // —— Wave 3 批次域（I1 并列批次 / I2 全局停发 / I3 未发部分操作 / I4 自动排除）——
 const campaignsMod = require('./lib/campaigns');
 const exclusionMod = require('./lib/exclusion');
+// —— Wave 4 体验与记忆（F1 零配置开场 / F3 主动回执 / A3 商家记忆 / F2 对话内算账）——
+const notify = require('./lib/notify');
 
 let config = cfg.load();
 const store = new Store();
@@ -80,7 +82,150 @@ queue.register('send_campaign', (j) => processCampaignSendJob(j));   // Wave 3 I
 queue.register('posters', (j) => processPosterJob(j));
 queue.register('g6_purge', () => competitorsMod.g6Purge(store));
 queue.register('tag_expiry', () => applyTagExpiryWeights());
+queue.register('receipt_24h', (j) => processReceiptJob(j));          // Wave 4 F3②：T+24h 打开/点击/回流汇总
 queue.recover();
+
+/* ===================== Wave 4 体验与记忆（F1 / F3 / A3）===================== */
+
+const RECEIPT_T24_MS = 24 * 3600 * 1000;   // F3②：发送完成 → 24h 后出回执汇总
+
+// —— F1 store_banner：audience 表聚合的店铺数据开场句数据源（无数据字段缺省）——
+async function buildStoreBanner() {
+  if (!connectors) return { connected: false };
+  let storeName = null;
+  let currency = 'USD';
+  try {
+    const meta = await connectors.getShopMeta();
+    storeName = (meta && (meta.name || meta.shop)) || null;
+    if (meta && meta.currency) currency = String(meta.currency);
+  } catch (e) { /* 元数据失败不阻塞开场：仅 connected */ }
+  const weekAgo = Date.now() - 7 * 86400000;
+  const carts = store.getAudience().filter(a => /加购/.test(a.intent || ''));
+  const weekly = carts.filter(a => (a.at_risk_at || a.created_at || 0) >= weekAgo);
+  const vals = weekly.map(a => Number(a.abandoned_value) || 0).filter(v => v > 0);
+  const total = +vals.reduce((s, v) => s + v, 0).toFixed(2);
+  const banner = { connected: true };
+  if (storeName) banner.store_name = String(storeName).slice(0, 40);
+  if (weekly.length > 0 && total > 0) {
+    banner.weekly_abandoned_count = weekly.length;
+    banner.aov = +(total / vals.length).toFixed(2);
+    banner.abandoned_value = total;
+    banner.currency = currency;
+  }
+  return banner;   // 无数据 → 仅 connected：引擎改问一句话开场，不硬编数据
+}
+
+// —— F3①/②：发送完成的 T+0 一句话回执 + T+24h 汇总 job 入队（sendDraft 与批次 send 共同路径调用）——
+// 数字口径：只算实发（sends 表）；无 sends 支撑的通知不产数字（agg=null → 跳过 T+0，仅排队 T+24h 兜底聚合）。
+function enqueueReceipts({ userId, actId, draftId, campaignId, name, code }) {
+  const agg = notify.aggregateReceipt(store, { draftId, campaignId, actId });
+  if (agg) {
+    store.addNotification({ user_id: userId || null, ...notify.buildT0Notification({ name, agg, code }) });
+  }
+  queue.enqueue({
+    type: 'receipt_24h',
+    payload: { draftId: draftId || null, campaignId: campaignId || null, actId: actId || null, name: String(name || ''), userId: userId || null },
+    dedupeKey: 'receipt_24h:' + (campaignId || draftId),
+    runAfter: Date.now() + RECEIPT_T24_MS
+  });
+}
+
+// F3② job 执行体：sends+events 聚合该批次/草稿的打开点击与转化 → notifications（幂等：同 scope 已发 t24 不重复）
+async function processReceiptJob({ payload }) {
+  const scopeId = payload.campaignId || payload.draftId;
+  const agg = notify.aggregateReceipt(store, { draftId: payload.draftId, campaignId: payload.campaignId, actId: payload.actId });
+  if (!agg) return { skipped: 'no sends（无实发不产数字）' };
+  const already = store.getNotifications(payload.userId || null, 500)
+    .some(n => n.type === 't24' && (n.draft_id === scopeId || n.campaign_id === scopeId));
+  if (already) return { skipped: 't24 already emitted', scope_id: scopeId };
+  store.addNotification({ user_id: payload.userId || null, ...notify.buildT24Notification({ name: payload.name, agg }) });
+  return { notified: true, ...agg };
+}
+
+// —— F3③ 回流报喜 + estGmv 预估→实际翻转（attribution conversion 到达时即时调用）——
+// campaign.stats 回填：publicCampaign 按 sends+events 实时派生（notify.campaignStats 单一口径），此处不重复记账。
+function emitRecoverReceipt({ draftId, campaignId, audience, audienceId, coupon, value }) {
+  const scopeId = campaignId || draftId;
+  if (!scopeId) return null;
+  const camp = campaignId ? store.getCampaign(campaignId) : null;
+  const draft = !camp && draftId ? store.getDraft(draftId) : null;
+  if (!camp && !draft) return null;
+  const actId = camp ? camp.act_id : draft.act_id;
+  const audRow = audience || (audienceId ? store.getAudience().find(a => a.id === audienceId) : null);
+  const agg = notify.aggregateReceipt(store, {
+    draftId: camp ? null : draftId, campaignId: camp ? camp.id : null, actId
+  });
+  const n = notify.buildRecoverNotification({
+    name: audRow && audRow.name, email: audRow && audRow.email, coupon,
+    value: Number(value) || 0,
+    campaignName: camp ? camp.name : null,
+    draftName: draft ? (draft.audience || '挽回邮件') : null,
+    agg
+  });
+  store.addNotification({ user_id: (camp && camp.user_id) || (draft && draft.user_id) || null, ...n });
+  // 翻转数据写回 act.plan_card.actual（方案卡仍存在时；前端据此把「预估」翻成「实际」）
+  if (actId) {
+    const act = store.getAct(actId);
+    if (act && act.plan_card) {
+      act.plan_card.actual = notify.actActual(store, actId);
+      store.upsertAct(act);
+    }
+  }
+  return n;
+}
+
+// —— A3②：新会话复用意图的 prefs 数据源（该商家最近一个确认沉淀过 prefs 的 act，排除当前会话）——
+function latestPrefsFor(userId, excludeActId) {
+  const acts = store.getActsByUser(userId).filter(a => a.id !== excludeActId);
+  for (const a of acts) {   // getActsByUser 已按 updated_at 降序
+    const p = a.memory && a.memory.prefs;
+    if (p && typeof p === 'object' && String(p.audience || '').trim()) return p;
+  }
+  return null;
+}
+
+// —— A3④ / 接口契约①：GET /api/state 顶层 welcome / prefs / last_plan ——
+function buildStateExtras(userId) {
+  const acts = store.getActsByUser(userId);
+  // F1：欢迎语资格 = 该商家名下不存在任何 act（含 closed）
+  const welcome = { eligible: acts.length === 0 };
+  // A3：prefs = 最近 act 的 memory.prefs（确认沉淀 / 复用标记），否则 agent profile
+  let prefs = null;
+  for (const a of acts) {
+    const p = a.memory && a.memory.prefs;
+    if (p && typeof p === 'object') {
+      const keys = Object.keys(p).filter(k => p[k] != null && p[k] !== '' && k !== 'reuse');
+      if (keys.length) { prefs = p; break; }
+    }
+  }
+  if (!prefs) {
+    const prof = normalizeAgentProfile(store.getAgentProfile(userId));
+    if (prof && Object.keys(prof).length) prefs = prof;
+  }
+  // A3④：last_plan = 最近一个确认过的 act（有 plan_card/execution_snapshot 或名下 campaign）
+  let last_plan = null;
+  for (const a of acts) {
+    const pc = a.plan_card;
+    const snap = a.execution_snapshot;
+    const camps = store.getCampaignsByAct(a.id);
+    if (!pc && !snap && !camps.length) continue;
+    last_plan = {
+      act_id: a.id,
+      audience: (pc && pc.audience) || (snap && snap.audience) || (camps[0] && camps[0].audience_desc) || '',
+      offer_text: (pc && pc.offer) || (camps[0] && camps[0].offer_text) || '',
+      discount_text: (pc && pc.discount && pc.discount.text) || (camps[0] && camps[0].discount && camps[0].discount.text) || '',
+      est_gmv_amount: (pc && pc.estGmv && pc.estGmv.amount) != null ? (pc && pc.estGmv && pc.estGmv.amount)
+        : (snap && snap.estGmv && snap.estGmv.amount) != null ? (snap && snap.estGmv && snap.estGmv.amount) : null,
+      currency: (pc && pc.estGmv && pc.estGmv.currency) || 'USD',
+      actual: (pc && pc.actual) || null,
+      confirmed_at: (pc && pc.generatedAt) || (snap && snap.frozen_at) || (camps[0] && camps[0].created_at) || null,
+      ...(a.stage === 'closed' ? { closed_at: a.updated_at } : {}),
+      ...(camps.length ? { campaign_name: camps[camps.length - 1].name } : {})
+    };
+    break;
+  }
+  return { welcome, prefs, last_plan };
+}
 
 function agentContextOptions() {
   return {
@@ -912,6 +1057,10 @@ async function processSendJob({ job, payload }) {
     logEvent('send_deferred', { draft_id: draft.id, retry_at: retryAt, next_job_id: next.id });
     return { rescheduled: true, next_job_id: next.id, retry_at: retryAt, checklist: r.checklist };
   }
+  // —— Wave 4 F3①/②：发送成功 → T+0 一句话回执 + T+24h 汇总 job 入队（sends 实发口径）——
+  if (r && !r.error && (r.recipients > 0)) {
+    enqueueReceipts({ userId: draft.user_id, actId: draft.act_id, draftId: draft.id, name: draft.audience || '挽回邮件', code: draft.coupon || null });
+  }
   return r;
 }
 
@@ -941,6 +1090,16 @@ function blackoutContract() {
 // 返回结构化结果，人话组装在引擎侧（确定性边界声明/逐批复述不进模型话术层）。
 function makeCampaignExecutor(userId) {
   return {
+    // —— Wave 4 F2：算账口径的人数/客单（audience 表聚合；客单缺省行业默认并标注 demo）——
+    audienceStats(desc) {
+      const list = campaignMatcher(desc || '');
+      const vals = list.map(a => Number(a.abandoned_value) || 0).filter(v => v > 0);
+      if (vals.length) {
+        const total = vals.reduce((s, v) => s + v, 0);
+        return { count: list.length, aov: +(total / vals.length).toFixed(2), aov_source: 'store', currency: 'USD' };
+      }
+      return { count: list.length, aov: cfg.INDUSTRY_DEFAULT_AOV, aov_source: 'demo', currency: 'USD' };
+    },
     previewBatches(batches) {
       const { plans } = campaignsMod.planBatches(store, batches, { matcher: campaignMatcher, userId });
       return plans.map(p => ({
@@ -1111,6 +1270,15 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
     };
     const r = await breakers.get('esp').exec(() => sendViaEsp(config));
     recordRows(sendable.map(m => ({ ...m, email: m.email })), 'sent');
+    // Wave 4 F3：落 emailed 事件（esp_id → Resend 回执反查），打开/点击才能归因到批次（demo 路径无 ESP 回执）
+    const espIds = Array.isArray(r.ids) ? r.ids : [];
+    for (let i = 0; i < sendable.length; i++) {
+      store.addEvent({
+        type: 'emailed', draft_id: camp.id,
+        audience_id: (sendable[i].recipient || {}).id || null,
+        esp_id: espIds[i] || null, ts: Date.now()
+      });
+    }
     const c2 = campaignsMod.deriveCounts(store, camp);
     camp.status = c2.pending === 0 ? 'done' : 'running';
     camp.scheduled_at = camp.status === 'done' ? 0 : camp.scheduled_at;
@@ -1159,6 +1327,10 @@ async function processCampaignSendJob({ job, payload }) {
     store.upsertCampaign(camp);
     logEvent('campaign_send_deferred', { campaign_id: camp.id, retry_at: retryAt });
     return { rescheduled: true, retry_at: retryAt };
+  }
+  // —— Wave 4 F3①/②：批次发送成功 → T+0 一句话回执 + T+24h 汇总 job 入队（sends 实发口径）——
+  if (r && !r.error && (r.recipients > 0)) {
+    enqueueReceipts({ userId: camp.user_id, actId: camp.act_id, campaignId: camp.id, name: camp.name, code: (camp.discount && camp.discount.code) || null });
   }
   return r;
 }
@@ -1370,6 +1542,24 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   act.plan_card = planCard;
   act.stage = 'S3';
   act.code_status = codeStatus;
+  // —— Wave 4 A3①：S2 确认通过 → 方案关键参数沉淀进 act.memory.prefs（下次「照上次的来」可复用）——
+  // 值一律字符串化（memory.prefs 经 normalizeMemory 收口为字符串 map；数值读取侧 Number() 还原）
+  act.memory = needsMod.ensureMemory(act.memory);
+  act.memory.prefs = {
+    audience: String(planCard.audience || ''),
+    reason: String(planCard.reason || ''),
+    goal: String(planCard.goal || ''),
+    // offer 原文取方案卡 needs 纯字符串视图（planCard 顶层无 offer 键；needs.offer = 用户原话钩子，可复用预填）
+    offer_text: String((planCard.needs && planCard.needs.offer) || planCard.offer || ''),
+    discount_percent: String((planCard.discount && planCard.discount.percent_off) || 0),
+    discount_text: String((planCard.discount && planCard.discount.text) || ''),
+    code_status: String(codeStatus || 'none'),
+    brand: String(brand || ''),
+    signature: String(brand || ''),      // 署名习惯（A3①；与 brand 同值，前端署名卡直读）
+    act_id: act.id,
+    confirmed_at: String(Date.now()),
+    source: 'confirm'
+  };
   store.upsertAct(act);
 
   const created = await createDraftFromCard(planCard, { actId: act.id, userId, authoritative: true, draftId });
@@ -1572,6 +1762,9 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/state' && method === 'GET') {
       // Wave 3 I2：读点对账停发日历（窗口已过 → 日历冻结批次自动顺延恢复 + resume_note 提示）
       campaignsMod.reconcileBlackout(store);
+      // Wave 4（契约①）：welcome（F1 欢迎语资格）/ prefs（A3）/ last_plan（A3④）/ store_banner（F1 数据开场句）
+      const extras = buildStateExtras(req.userId);
+      const storeBanner = await buildStoreBanner();
       return sendJson(res, 200, {
         status: cfg.status(config),
         engine: engineOnline() ? 'online' : 'degraded',   // PRD v2：llm 熔断 closed→online，open/half-open→degraded
@@ -1586,7 +1779,12 @@ const server = http.createServer(async (req, res) => {
         // —— Wave 3 批次域契约③ ——
         campaigns: store.getCampaignsByUser(req.userId).map(c => campaignsMod.publicCampaign(store, c)),
         blackout: blackoutContract(),
-        global_paused: campaignsMod.getGlobalPaused(store)
+        global_paused: campaignsMod.getGlobalPaused(store),
+        // —— Wave 4 契约① ——
+        welcome: extras.welcome,
+        prefs: extras.prefs,
+        last_plan: extras.last_plan,
+        store_banner: storeBanner
       });
     }
 
@@ -1598,10 +1796,29 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, profile: {} });
     }
 
+    // —— Wave 4 F3④：通知中心（回执气泡由前端从通知拉取渲染，不写 act.messages，无需改 SSE）——
+    if (pathname === '/api/notifications' && method === 'GET') {
+      return sendJson(res, 200, {
+        ok: true,
+        items: store.getNotifications(req.userId, 50),   // created_at 倒序，≤50
+        unread: store.unreadNotificationCount(req.userId)
+      });
+    }
+    if (pathname === '/api/notifications/read' && method === 'POST') {
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;   // 缺省全标已读
+      const marked = store.markNotificationsRead(req.userId, ids);
+      return sendJson(res, 200, { ok: true, marked, unread: store.unreadNotificationCount(req.userId) });
+    }
+
     // —— 创建引导会话（支持 preset 预选受众：受众模块「点开画像跳配置」）——
     if (pathname === '/api/act' && method === 'POST') {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
+      // Wave 4 F1：欢迎语资格在新建前判定（该商家名下不存在任何 act，含 closed）——一生只出现一次
+      const hasAnyAct = store.getActsByUser(req.userId).length > 0;
+      const storeBanner = await buildStoreBanner();
       const act = {
         id: uid('act_'), stage: 'S0', needs: needsMod.emptyNeeds(), messages: [],
         memory: { facts: [], decisions: [], corrections: [], extras: [], prefs: {}, ask_count: needsMod.emptyAskCount() },
@@ -1611,7 +1828,7 @@ const server = http.createServer(async (req, res) => {
         status: 'active', created_at: Date.now(), updated_at: Date.now(),
         user_id: req.userId || null   // 整改 1c：打归属
       };
-      const op = igde.opening();
+      const op = igde.opening({ hasAnyAct, storeBanner });
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
       // Wave 2 closed 触发点（Wave 1 遗留补齐）：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）
       store.closeOpenActs(req.userId || null, act.id);
@@ -1626,7 +1843,8 @@ const server = http.createServer(async (req, res) => {
         }
       }
       store.upsertAct(act);
-      return sendJson(res, 200, { act });
+      // Wave 4 契约④：chips 随开场下发；welcome 标识本条是否拼了欢迎语（前端eligible=false时不显示）
+      return sendJson(res, 200, { act, chips: op.chips || [], welcome: Boolean(op.welcome), store_banner: storeBanner });
     }
 
     // —— 新流失主动提醒（环节⑥：监控新弃购/高意向，主动冒给 agent；整改 1c：按当前用户 drafts 判定已覆盖）——
@@ -1666,6 +1884,7 @@ const server = http.createServer(async (req, res) => {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
           executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
+          reusePrefs: latestPrefsFor(req.userId, act.id),   // Wave 4 A3②：复用意图的 prefs 数据源
           persist: () => store.upsertAct(act)
         });
         persistAgentProfile(r, req.userId);
@@ -1715,6 +1934,7 @@ const server = http.createServer(async (req, res) => {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
           executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
+          reusePrefs: latestPrefsFor(req.userId, act.id),   // Wave 4 A3②：复用意图的 prefs 数据源
           onReplyToken,
           persist: () => store.upsertAct(act)
         });
@@ -2460,20 +2680,27 @@ const server = http.createServer(async (req, res) => {
         }
 
         // 优惠码核销 → convert（不限窗口；order_id 幂等，宁漏勿错不跨码归因）
+        // Wave 4 F3③：码匹配扩展到批次（campaign.discount.code）；批次 scope 事件的 draft_id = campaign.id（与 sends 同口径）
         if (!codes.length) return sendJson(res, 200, { ok: true, ignored: 'no discount codes' });
         const drafts = store.getDrafts();
         const hitDraft = drafts.find(d => d.coupon && codes.includes(String(d.coupon).toLowerCase()));
-        if (!hitDraft) return sendJson(res, 200, { ok: true, ignored: 'code not ours' });
+        const hitCamp = !hitDraft ? store.findCampaignByCoupon(codes[0]) : null;
+        if (!hitDraft && !hitCamp) return sendJson(res, 200, { ok: true, ignored: 'code not ours' });
         if (orderId && store.findEventByOrderId(orderId)) {
           return sendJson(res, 200, { ok: true, deduped: true });   // 同单只归因一次
         }
         const aud = resolveAudienceByEmail(order.email);
         const value = parseFloat(order.total_price) || 0;
-        store.addEvent({ type: 'convert', draft_id: hitDraft.id, audience_id: (aud || {}).id || null, value, order_id: orderId || null });
+        const couponHit = hitDraft ? hitDraft.coupon : hitCamp.discount.code;
+        store.addEvent({ type: 'convert', draft_id: hitDraft ? hitDraft.id : hitCamp.id, audience_id: (aud || {}).id || null, value, order_id: orderId || null });
         if (aud) tagsMod.weightForConversion(store, aud.id);   // ⑤ 标签加权：convert → w += 2
         benchmarkMod.rebuildBenchmark(store);
+        emitRecoverReceipt({
+          draftId: hitDraft ? hitDraft.id : null, campaignId: hitCamp ? hitCamp.id : null,
+          audience: aud, coupon: couponHit, value
+        });
         metricsInc('attr_convert');
-        logEvent('attribution', { source: 'shopify', type: 'convert', draft_id: hitDraft.id, order_id: orderId, value, audience_id: (aud || {}).id || null });
+        logEvent('attribution', { source: 'shopify', type: 'convert', draft_id: hitDraft ? hitDraft.id : hitCamp.id, order_id: orderId, value, audience_id: (aud || {}).id || null });
         return sendJson(res, 200, { ok: true, attributed: true });
       }
 
@@ -2481,16 +2708,28 @@ const server = http.createServer(async (req, res) => {
       let draftId = body.draft_id || (body.data && body.data.draft_id);
       const type = ['open', 'click', 'convert', 'delivered', 'bounced'].includes(body.type) ? body.type
         : (body.event === 'open' ? 'open' : body.event === 'click' ? 'click' : body.event === 'convert' ? 'convert' : 'open');
-      // 优惠码核销归因：按 coupon 反查 draft（订单回传）
+      // 优惠码核销归因：按 coupon 反查 draft（订单回传）；Wave 4：批次码同样可核销（scope = campaign.id）
       if (!draftId && body.coupon) {
         const d = store.getDrafts().find(x => x.coupon === body.coupon);
         if (d) draftId = d.id;
+        else {
+          const c = store.findCampaignByCoupon(body.coupon);
+          if (c) draftId = c.id;
+        }
       }
       if (type === 'convert' && body.order_id && store.findEventByOrderId(String(body.order_id))) {
         return sendJson(res, 200, { ok: true, deduped: true });
       }
       const ev = store.addEvent({ type, draft_id: draftId, audience_id: body.audience_id || null, value: body.value || 0, order_id: body.order_id ? String(body.order_id) : null });
       if (type === 'convert' && body.audience_id) tagsMod.weightForConversion(store, body.audience_id);
+      if (type === 'convert' && draftId) {
+        // Wave 4 F3③：conversion 到达 → 回流报喜 + estGmv 翻转写回（draft_id 也可能是批次 scope id）
+        const scopeCamp = store.getCampaign(draftId);
+        emitRecoverReceipt({
+          draftId: scopeCamp ? null : draftId, campaignId: scopeCamp ? scopeCamp.id : null,
+          audienceId: body.audience_id || null, coupon: body.coupon || null, value: body.value || 0
+        });
+      }
       if (type === 'bounced' && body.audience_id) store.suppressAudienceEmail(body.audience_id);
       metricsInc(type === 'convert' ? 'attr_convert' : 'attr_' + type);
       logEvent('attribution', { source: 'legacy', type, draft_id: draftId, value: body.value || 0 });
