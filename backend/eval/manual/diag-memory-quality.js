@@ -3,9 +3,9 @@
  * 诊断脚本（不入 CI）：多轮对话记忆质量 + 回复丰满度观察。
  * 事实散布在多轮中（商品→市场→长期规矩→受众→痛点→目标钩子），最后测 recall。
  */
-const config = require('../lib/config');
-const { LLMClient } = require('../lib/llm');
-const { IGDE } = require('../lib/igde');
+const config = require('../../lib/config');
+const { LLMClient } = require('../../lib/llm');
+const { IGDE } = require('../../lib/igde');
 
 const cfg = config.load();
 const client = new LLMClient({

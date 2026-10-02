@@ -1,0 +1,21 @@
+{"id": "p01", "input": "我的品牌叫 LunaGlow，做手工香薰蜡烛，客单价 28 美元", "expect": {"assert": "品牌名/品类/客单价进 extras（3 条）；audience 仍空；下一问问 audience；chips=[加购未付,浏览未买,老客]；filled_count 不回退", "chips": ["加购未付", "浏览未买", "老客"], "filled_max": 0}, "deferred": false}
+{"id": "p02", "input": "主要客户是 25 到 40 岁的美国女性，喜欢居家氛围和天然成分", "expect": {"assert": "audience.value 含 25 与 美国女性；兴趣描述进 extras；下一问问 reason；chips=[忘记结账,在对比价格,我来说原因]", "chips": ["忘记结账", "在对比价格", "我来说原因"], "filled": 1}, "deferred": false}
+{"id": "p03", "input": "客单价改成 35 美元", "expect": {"assert": "corrections 追加一条（slot=客单价，old=28美元，new=35美元）；extras 客单价更新为 35；回复含 35；conflict 不触发", "filled": 1}, "deferred": false}
+{"id": "p04", "input": "客户主要是年轻人", "expect": {"assert": "与已填 audience 冲突 → audience 不被覆盖；本轮问句为冲突澄清；chips=[18-24,25-34,维持当前年龄定位]", "chips": ["18-24", "25-34", "维持当前年龄定位"], "filled": 1}, "deferred": false}
+{"id": "p05", "input": "挽回原因就盯加购未付款的", "expect": {"assert": "reason.value 含 加购未付（此前 pain 槽漏接的回归样本）；C6 兜底：上一轮 audience 冲突未回应 → 接受候选值 inferred", "filled": 2}, "deferred": false}
+{"id": "p06", "input": "折扣力度给 10% off 就行", "expect": {"assert": "offer.value = 10% off（含数值与单位）", "filled": 3}, "deferred": false}
+{"id": "p07", "input": "发送时段选晚上 8 点", "expect": {"assert": "extras 增加 发送时段；offer/goal 不动；仍问缺失项（goal）", "filled": 3}, "deferred": false}
+{"id": "p08", "input": "产品特色是天然大豆蜡、48 小时长烧", "expect": {"assert": "extras 增加 产品特色；仍问缺失项（goal）", "filled": 3}, "deferred": false}
+{"id": "p09", "input": "营销目标是本月挽回 100 单", "expect": {"assert": "goal.value 含 100；filled_count=4；stage=S2；chips=[]；产出 planCard", "filled": 4, "chips": []}, "deferred": false}
+{"id": "p10", "input": "发送频率每周不超过 2 封", "expect": {"assert": "offer 不动（错切回归样本：发送 的 送 不得触发钩子抽取）；extras 增加 发送频率；stage 保持 S2", "filled": 4, "chips": []}, "deferred": false}
+{"id": "p11", "input": "我希望拿到的结果是：本月挽回 100 单", "expect": {"assert": "goal 已填 → 同值忽略不清零：filled_count 保持 4、act.id 不变、stage 保持 S2、corrections 不新增", "filled": 4, "chips": []}, "deferred": false}
+{"id": "p12", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #12（确认卡查看/摘要类，原文待 PRD v2 文档归库后回填）"}
+{"id": "p13", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #13（方案卡/邮件预览类，原文待回填）"}
+{"id": "p14", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #14（草稿生成/编辑类，原文待回填）"}
+{"id": "p15", "input": "受众改成老客，折扣换 15%", "expect": {"assert": "同轮两条 correction 生效：audience.value 含 老客、offer.value 含 15%；corrections 追加 2 条；回复复述两个新值；filled_count 保持 4", "filled": 4, "chips": []}, "deferred": false}
+{"id": "p16", "input": "嗯，我知道了", "expect": {"assert": "4/4 且 S2 后任意输入 → 回复为引导确认（含 确认 或 核对 字样），不继续问四槽、不产出新追问 chips（chips=[]），stage 保持 S2", "filled": 4, "chips": []}, "deferred": false}
+{"id": "p17", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #17（确认发送/草稿落库类，原文待回填）"}
+{"id": "p18", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #18（发送执行/回执类，原文待回填）"}
+{"id": "p19", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #19（看板回流/GMV 叙事类，原文待回填）"}
+{"id": "p20", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #20（二次挽回/换人群重聊类，原文待回填）"}
+{"id": "p21", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #21（会话收口/closed 类，原文待回填）"}

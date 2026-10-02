@@ -1,7 +1,7 @@
 'use strict';
 /**
  * 综合评测台（真实 token / 真实 HTTP，不入 CI）
- * 用法：node test/eval-battery.js <轮次标签>
+ * 用法：node eval/manual/eval-battery.js <轮次标签>
  * 6 套件并发（短记忆 / 长记忆 / 对话效果 / 多轮 / 单轮 / 跳转），每套件 ≥20 单元。
  * 打真实 HTTP 到 localhost:4173（需服务已启动），结果落盘 output/battery-<标签>.json
  */
@@ -294,7 +294,7 @@ async function suiteJump() {
   }
   console.log(`\n===== 轮次 ${LABEL} 总记分: ${pass}/${total} =====`);
   console.log(JSON.stringify(bySuite));
-  const outDir = path.join(__dirname, '..', 'output');
+  const outDir = path.join(__dirname, '..', '..', 'output');
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, `battery-${LABEL}.json`), JSON.stringify({ label: LABEL, bySuite, pass, total, results }, null, 2));
 })().catch(e => { console.error('BATTERY FAIL:', e.message); process.exit(1); });

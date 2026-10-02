@@ -1,14 +1,14 @@
 'use strict';
 /**
  * Token Plan 模型横评（真实 token，不入 CI）
- * 用法：node test/model-bakeoff.js [模型名过滤]
+ * 用法：node eval/manual/model-bakeoff.js [模型名过滤]
  * 每个模型跑同一套 5 轮 agent 场景（走生产同款 streamChatStructured 链路），
  * 按：JSON解析成功率 / 探针命中 / 时延 / 非流式兜底重试率 打分。
  */
 const fs = require('fs');
 const path = require('path');
-const config = require('../lib/config');
-const { LLMClient, buildCoachContext } = require('../lib/llm');
+const config = require('../../lib/config');
+const { LLMClient, buildCoachContext } = require('../../lib/llm');
 
 const cfg = config.load();
 
@@ -125,7 +125,7 @@ async function testModel(model) {
   for (const s of score) {
     console.log(`${s.model.padEnd(18)} ${String(s.calls).padEnd(5)} ${s.parseRate.toFixed(2).padEnd(7)} ${s.probeRate.toFixed(2).padEnd(7)} ${s.retryRate.toFixed(2).padEnd(7)} ${s.leakRate.toFixed(2).padEnd(7)} ${String(s.avgMs + 'ms').padEnd(8)} ${s.score}`);
   }
-  const outDir = path.join(__dirname, '..', 'output');
+  const outDir = path.join(__dirname, '..', '..', 'output');
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, 'model-bakeoff.json'), JSON.stringify({ rounds: ROUNDS, score, acc }, null, 2));
   console.log('详情已落盘 output/model-bakeoff.json');

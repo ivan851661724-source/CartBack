@@ -3,9 +3,9 @@
  * 诊断脚本（不入 CI）：用真实模型走 IGDE 引擎全链路，观察 prompt 效果问题。
  * 场景：渐进收集 / 一次说全 / 授权兜底 / 闲聊情绪 / 注入攻击 / 越界请求。
  */
-const config = require('../lib/config');
-const { LLMClient, buildCoachContext } = require('../lib/llm');
-const { IGDE } = require('../lib/igde');
+const config = require('../../lib/config');
+const { LLMClient, buildCoachContext } = require('../../lib/llm');
+const { IGDE } = require('../../lib/igde');
 
 const cfg = config.load();
 const client = new LLMClient({

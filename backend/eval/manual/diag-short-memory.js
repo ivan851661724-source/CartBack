@@ -1,14 +1,14 @@
 'use strict';
 /**
  * 短时记忆压测（真实 token，不入 CI）：多轮对话中细节的保持/绑定/纠错/否定/指代。
- * 用法：node test/diag-short-memory.js [轮次过滤如 M1,M8]
+ * 用法：node eval/manual/diag-short-memory.js [轮次过滤如 M1,M8]
  * 每个剧本末尾有 recall 探针，自动判分（期望子串命中）；完整转写落盘 output/diag-short-memory.json
  */
 const fs = require('fs');
 const path = require('path');
-const config = require('../lib/config');
-const { LLMClient } = require('../lib/llm');
-const { IGDE } = require('../lib/igde');
+const config = require('../../lib/config');
+const { LLMClient } = require('../../lib/llm');
+const { IGDE } = require('../../lib/igde');
 
 const cfg = config.load();
 const client = new LLMClient({
@@ -179,7 +179,7 @@ async function runScript(s) {
   const total = all.flatMap(r => r.results).length;
   console.log(`\n===== 短时记忆记分卡 =====`);
   console.log(`探针通过: ${pass}/${total} · jsonOk: ${stats.jsonOk}/${stats.calls}`);
-  const outDir = path.join(__dirname, '..', 'output');
+  const outDir = path.join(__dirname, '..', '..', 'output');
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, 'diag-short-memory.json'), JSON.stringify(all, null, 2));
   console.log('转写已落盘 output/diag-short-memory.json');

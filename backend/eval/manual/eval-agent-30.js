@@ -1,15 +1,15 @@
 'use strict';
 /**
  * 教师评测（不入 CI）：30 场对话质量校验 = 10 场多轮剧本 + 20 场单轮探针。
- * 用法：node test/eval-agent-30.js multi|single|all
+ * 用法：node eval/manual/eval-agent-30.js multi|single|all
  * 每轮经教师 rubric 自动评分：结构合规 / 追问纪律 / 编造 / 边界安全 / 复读 / 字段泄露 / 丰满度。
  * 完整转写落盘 output/eval-transcripts.json 供人工复核。
  */
 const fs = require('fs');
 const path = require('path');
-const config = require('../lib/config');
-const { LLMClient } = require('../lib/llm');
-const { IGDE } = require('../lib/igde');
+const config = require('../../lib/config');
+const { LLMClient } = require('../../lib/llm');
+const { IGDE } = require('../../lib/igde');
 
 const cfg = config.load();
 const client = new LLMClient({
@@ -322,7 +322,7 @@ async function pool(items, worker, size = 4) {
   console.log(`平均回复长度: ${avgLen} 字 · 平均时延: ${avgMs}ms`);
   console.log(`问题轮次: ${flagTurns}/${allTurns.length}`);
   console.log(`分类计数: ${JSON.stringify(flagCount)}`);
-  const outDir = path.join(__dirname, '..', 'output');
+  const outDir = path.join(__dirname, '..', '..', 'output');
   fs.mkdirSync(outDir, { recursive: true });
   fs.writeFileSync(path.join(outDir, 'eval-transcripts.json'), JSON.stringify(out, null, 2));
   console.log('转写已落盘 output/eval-transcripts.json');
