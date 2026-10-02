@@ -5,6 +5,7 @@ import { useApp } from '@/state/AppProvider';
 import { TAB_LABELS } from '@/lib/constants';
 import { filledCount, progressText, progressTail } from '@/lib/needs';
 import { initial } from '@/lib/format';
+import NotificationBell from './NotificationBell';
 
 /** 顶栏：logo / 面包屑 / needs 进度提示 / 停发徽标 / 引擎徽标 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
@@ -106,6 +107,8 @@ export default function Topbar() {
           停发日历{boLabel ? ` · ${boLabel}` : ''}
         </span>
       )}
+      {/* Z7 通知铃铛：未读角标 + 下拉列表（打开即全部已读；60s 轮询 + loadState 顺带刷新） */}
+      <NotificationBell />
       {/* 引擎徽标：在线（绿）/ 降级模式（橙，title 引导去设置页检查模型 Key） */}
       <span
         className={`engine-pill${degraded ? ' degraded' : ''}`}

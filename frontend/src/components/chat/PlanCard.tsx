@@ -116,7 +116,7 @@ function HoldoutRow({ h }: { h: Holdout }) {
 }
 
 export default function PlanCardView() {
-  const { confirmState, sendConfirmedPlan, drafts } = useApp();
+  const { confirmState, sendConfirmedPlan, drafts, notifications } = useApp();
   const [gmvOpen, setGmvOpen] = useState(false);
   const [sending, setSending] = useState(false);
   if (!confirmState) return null;
@@ -132,6 +132,12 @@ export default function PlanCardView() {
   // 本卡对应草稿是否已在发送生命周期（防双击重发；发送成功后沿用现有状态流）
   const mine = drafts.find((d) => d.id === card.draft_id);
   const alreadySent = Boolean(mine && ['queued', 'sending', 'sent', 'recovering'].includes(mine.status));
+  // estGmv 预估→实际翻转（Wave4）：本方案（draft_id 或所属 act 匹配）已有 recover 报喜通知 →
+  // 「预估」角标翻转为「实际」。不做 body 数字解析（各通知文案不稳定），存在报喜即翻转并提示。
+  const hasRecover = (notifications || []).some((n) => n.type === 'recover' && (
+    Boolean(card.draft_id && n.draft_id === card.draft_id) ||
+    Boolean(confirmState.actId && n.act_id === confirmState.actId)
+  ));
 
   const onSend = async () => {
     if (sending || alreadySent) return;
@@ -155,18 +161,28 @@ export default function PlanCardView() {
       {/* 折扣码徽标 */}
       <DiscountBadge dis={card.discount} />
 
-      {/* estGmv：大字 + 角标 + 可展开算式 */}
+      {/* estGmv：大字 + 角标（报喜通知到达后「预估」翻转为「实际」）+ 可展开算式 */}
       {est && (
         <div style={{ marginTop: 12, padding: '12px 14px', borderRadius: 12, background: 'var(--bg-input)' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 12, color: 'var(--muted)' }}>预估回流</span>
+            <span style={{ fontSize: 12, color: 'var(--muted)' }}>{hasRecover ? '实际回流' : '预估回流'}</span>
             <span style={{ fontSize: 24, fontWeight: 800, fontFamily: 'var(--font-disp)', color: 'var(--text)', letterSpacing: '.2px' }}>
               {money(est.amount)}
             </span>
-            <span style={{
-              fontSize: 10.5, fontWeight: 700, color: 'var(--muted)', background: '#fff',
-              border: '.5px solid var(--line)', borderRadius: 999, padding: '2px 8px',
-            }}>预估</span>
+            {hasRecover ? (
+              <>
+                <span style={{
+                  fontSize: 10.5, fontWeight: 700, color: 'var(--ok2)', background: 'var(--ok-bg)',
+                  border: '.5px solid var(--ok-line)', borderRadius: 999, padding: '2px 8px',
+                }}>实际</span>
+                <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--ok2)' }}>有顾客用码回来了</span>
+              </>
+            ) : (
+              <span style={{
+                fontSize: 10.5, fontWeight: 700, color: 'var(--muted)', background: '#fff',
+                border: '.5px solid var(--line)', borderRadius: 999, padding: '2px 8px',
+              }}>预估</span>
+            )}
             {est.source === 'demo' ? (
               <span style={{
                 fontSize: 10.5, fontWeight: 700, color: 'var(--warn2)', background: 'var(--warn-bg)',

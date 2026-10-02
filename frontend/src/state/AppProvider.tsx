@@ -10,7 +10,8 @@ import React, { createContext, useContext, useCallback, useEffect, useRef, useSt
 import { api, setToken, streamMessage, createAct, confirmAct, ApiAuthError } from '@/lib/api';
 import type {
   Act, Audience, Blackout, BatchPreview, Campaign, Checklist, Chips, Draft, Engine, Holdout,
-  Kpis, Me, Metrics, Mode, Opportunities, PlanCard, SendResult, Status, TrendPoint,
+  Kpis, LastPlan, Me, Metrics, Mode, NotificationItem, NotificationsResp, Opportunities, Prefs,
+  PlanCard, SendResult, Status, StoreBanner, TrendPoint, WelcomeState,
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
 import { filledCount } from '@/lib/needs';
@@ -53,6 +54,56 @@ function parseBatchDomain(s: any): { campaigns: Campaign[]; blackout: Blackout; 
       ? { active: Boolean(b.active), ranges: Array.isArray(b.ranges) ? b.ranges : [] }
       : EMPTY_BLACKOUT,
     global_paused: Boolean(s?.global_paused),
+  };
+}
+
+// —— Wave4 /api/state 顶层新域安全解析（均可缺省：旧后端无这些键时按空缺省处理，UI 不误报） ——
+
+/** Z4 欢迎态：{eligible} 布尔域；缺省 null */
+function parseWelcome(raw: unknown): WelcomeState | null {
+  if (!raw || typeof raw !== 'object') return null;
+  return { eligible: Boolean((raw as WelcomeState).eligible) };
+}
+
+/** F1 店铺横幅数据（数据开场句数据源）：connected 必转布尔，数值字段非法时丢弃 */
+function parseStoreBanner(raw: unknown): StoreBanner | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const b = raw as StoreBanner;
+  const num = (v: unknown) => (Number.isFinite(Number(v)) && Number(v) > 0 ? Number(v) : undefined);
+  return {
+    connected: Boolean(b.connected),
+    store_name: typeof b.store_name === 'string' && b.store_name ? b.store_name : undefined,
+    weekly_abandoned_count: num(b.weekly_abandoned_count),
+    aov: num(b.aov),
+    abandoned_value: num(b.abandoned_value),
+    currency: typeof b.currency === 'string' && b.currency ? b.currency : undefined,
+  };
+}
+
+/** Z6 偏好：只挑已知字符串键（多余键丢弃，避免把后端内部结构灌进 UI） */
+function parsePrefs(raw: unknown): Prefs {
+  const out: Prefs = {};
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return out;
+  const p = raw as Record<string, unknown>;
+  for (const k of ['brand', 'tone', 'discount_habit', 'signature'] as const) {
+    if (typeof p[k] === 'string' && (p[k] as string)) out[k] = p[k] as string;
+  }
+  return out;
+}
+
+/** Z4 上次方案：audience 缺失/为空则整体视为无（摘要卡不渲染半残数据） */
+function parseLastPlan(raw: unknown): LastPlan | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const p = raw as LastPlan;
+  if (typeof p.audience !== 'string' || !p.audience) return null;
+  return {
+    audience: p.audience,
+    offer_text: typeof p.offer_text === 'string' ? p.offer_text : '',
+    discount_text: typeof p.discount_text === 'string' ? p.discount_text : '',
+    est_gmv_amount: Number(p.est_gmv_amount) || 0,
+    currency: typeof p.currency === 'string' ? p.currency : '',
+    confirmed_at: p.confirmed_at as number | string,
+    campaign_name: typeof p.campaign_name === 'string' && p.campaign_name ? p.campaign_name : undefined,
   };
 }
 
@@ -101,6 +152,14 @@ interface AppState {
   global_paused: boolean;
   // done 帧 batches：agent 提出待确认的建批方案（与 chips 同生命周期：新消息/切会话清空）
   pendingBatches: BatchPreview[];
+  // Wave4 Z4/C5/Z6：/api/state 顶层新域（均可缺省，旧后端安全降级为空值）
+  welcome: WelcomeState | null;      // 首屏欢迎态（eligible=名下无任何 act；欢迎语文案由后端 opening 下发）
+  storeBanner: StoreBanner | null;   // F1 数据开场句数据源（连接状态/周弃购数/客单价…）
+  prefs: Prefs;                      // 商家偏好（语气/折扣习惯/署名）
+  lastPlan: LastPlan | null;         // 上次方案摘要（对话空态复用入口）
+  // Wave4 Z7 通知域：GET /api/notifications（倒序 ≤50）+ 未读数
+  notifications: NotificationItem[];
+  unread: number;
   // UI 状态
   booted: boolean;
   activeTab: Tab;
@@ -146,6 +205,8 @@ interface AppContextValue extends AppState {
   sendEditedDraft: (subject: string, body: string) => Promise<boolean>;
   sendDraft: (d: Draft) => Promise<boolean>;        // 卡片操作行「发送」：按存储原稿直接发送（Figma 406:2955）
   deleteDraft: (d: Draft) => Promise<boolean>;      // 卡片操作行「删除」
+  refreshNotifications: () => Promise<void>;        // Z7：拉取通知列表与未读数（60s 轮询 + loadState 后顺带）
+  markNotificationsRead: (ids?: string[]) => Promise<void>;  // Z7：标记已读（缺省全部；本地先行置灰不阻塞）
   // setters
   setChatInput: (v: string) => void;
   setChatPlaceholder: (v: string) => void;
@@ -183,6 +244,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     engine: 'online', chips: [],
     confirmState: null, confirmFailed: null, confirmBusy: false,
     campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],
+    welcome: null, storeBanner: null, prefs: {}, lastPlan: null,
+    notifications: [], unread: 0,
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
     importOpen: false, historyOpen: false, editOpen: false, draftGenerating: false, authOpen: false, authMode: 'register',
@@ -210,6 +273,34 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     toastTimer.current = setTimeout(() => setState(s => ({ ...s, toast: { ...s.toast, shown: false } })), 3000);
   }, []);
 
+  // —— Z7 通知：拉取（60s 轮询 + loadState 后顺带）——
+  // 接口缺失/旧后端 404 / 网络失败时静默保持现值（列表空、角标不出现），不 toast 不阻塞。
+  const refreshNotifications = useCallback(async () => {
+    try {
+      const r = await api<NotificationsResp>('/api/notifications');
+      if (r && Array.isArray(r.items)) {
+        patch({
+          notifications: (r.items as NotificationItem[]).filter((n) => n && typeof n === 'object' && n.id != null),
+          unread: Number(r.unread) || 0,
+        });
+      }
+    } catch { /* 旧后端无此接口：保持现值 */ }
+  }, [patch]);
+
+  // —— Z7 通知：标记已读（缺省 ids = 全部）。本地先行置灰（打开铃铛即视为已读），POST 失败不回滚 UI ——
+  const markNotificationsRead = useCallback(async (ids?: string[]) => {
+    setState(prev => ({
+      ...prev,
+      unread: 0,
+      notifications: prev.notifications.map(n => (!ids || ids.includes(n.id)) ? { ...n, read: true } : n),
+    }));
+    try {
+      await api('/api/notifications/read', {
+        method: 'POST', body: JSON.stringify(ids ? { ids } : {}),
+      });
+    } catch { /* 接口缺失不阻塞 UI；下次轮询以服务端为准 */ }
+  }, []);
+
   // —— 数据加载 ——
   const loadState = useCallback(async () => {
     const s = await api<any>('/api/state');
@@ -225,12 +316,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       acts,
       // Wave3 批次域：campaigns/blackout/global_paused（缺省安全值；pendingBatches 是 done 帧专属，不在此触碰）
       ...parseBatchDomain(s),
+      // Wave4 Z4/C5/Z6：welcome/store_banner/prefs/last_plan（均可缺省，安全降级）
+      welcome: parseWelcome(s.welcome),
+      storeBanner: parseStoreBanner(s.store_banner),
+      prefs: parsePrefs(s.prefs),
+      lastPlan: parseLastPlan(s.last_plan),
       // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
       ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
       act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
         ? { ...nextAct, planCard: state.act.planCard }
         : nextAct,
     });
+    // Z7 顺带刷新通知（内部已吞错，不阻塞 loadState 主流程）
+    refreshNotifications();
     // 会话重建后若消息为空，复位 planPushed
     setState(prev => {
       let next = prev;
@@ -246,7 +344,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       return next;
     });
-  }, [patch, state.act, buildActIndex]);
+  }, [patch, state.act, buildActIndex, refreshNotifications]);
 
   const ensureAct = useCallback(async (): Promise<Act | null> => {
     if (state.act) return state.act;
@@ -509,6 +607,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       planPushed: false, planShown: null, lastSent: null, chips: [],
       confirmState: null, confirmFailed: null,
       campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],   // 批次域属账号数据，登出一并清空
+      welcome: null, storeBanner: null, prefs: {}, lastPlan: null,   // Wave4 新域同属账号数据
+      notifications: [], unread: 0,   // Z7 通知亦然
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER, drawerAud: null, historyOpen: false,
     });
     refreshMe();
@@ -765,6 +865,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     ...state,
     switchTab, switchAct, loadState, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
     authSubmit, authLogout, jumpToConfig, confirmPlan, sendConfirmedPlan, createCardDraft, sendEditedDraft, sendDraft, deleteDraft,
+    refreshNotifications, markNotificationsRead,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
     setPlanShown: (p) => patch({ planShown: p }),

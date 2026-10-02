@@ -31,3 +31,15 @@ export function fmtInt(n: number): string {
 export function initial(s: string | undefined | null): string {
   return (String(s || '?').trim().slice(0, 1)) || '?';
 }
+
+/**
+ * 通知/回执时间展示（Wave4 Z7）：epoch 秒/毫秒数值或 ISO 字符串 → 'MM-DD HH:mm'；
+ * 无法解析返回 ''（调用方按空值兜底展示 '—'）。
+ */
+export function fmtTime(t: number | string | undefined | null): string {
+  if (t === undefined || t === null || t === '') return '';
+  const d = typeof t === 'number' ? new Date(t < 1e12 ? t * 1000 : t) : new Date(t);
+  if (isNaN(d.getTime())) return '';
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}

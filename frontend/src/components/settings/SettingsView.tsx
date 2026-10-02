@@ -4,9 +4,9 @@ import { useEffect, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import Tag from '@/components/ui/Tag';
 
-/** 设置四步向导（AI / ESP / 店铺 / 模式）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
+/** 设置四步向导（AI / ESP / 店铺 / 模式 / 偏好）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
 export default function SettingsView() {
-  const { status, setMode, saveConfig, resetData, guideStyle, setGuideStyle } = useApp();
+  const { status, setMode, saveConfig, resetData, guideStyle, setGuideStyle, prefs } = useApp();
   const s = status || ({} as any);
   const [aiKey, setAiKey] = useState('');
   const [espKey, setEspKey] = useState('');
@@ -18,6 +18,12 @@ export default function SettingsView() {
   // G0 白名单（品牌名/专有名词，含中文品牌名；白名单内不拦截）
   const [g0Terms, setG0Terms] = useState<string[]>([]);
   const [g0Input, setG0Input] = useState('');
+  // —— Z6 AI 助手偏好（读 /api/state 顶层 prefs；本波后端无偏好写入端点，保存走 /api/config 并回读验证） ——
+  const [prefTone, setPrefTone] = useState('');
+  const [prefDiscount, setPrefDiscount] = useState('');
+  const [prefSignature, setPrefSignature] = useState('');
+  const [prefsMsg, setPrefsMsg] = useState('');
+  const [prefsBusy, setPrefsBusy] = useState(false);
 
   useEffect(() => {
     setAiKey(s.aiConfigured ? '••••••••' : '');
@@ -28,6 +34,12 @@ export default function SettingsView() {
     setShopBrand(s.shopBrand || '');
     setG0Terms(Array.isArray(s.g0Whitelist) ? s.g0Whitelist : []);
   }, [status]);
+
+  useEffect(() => {
+    setPrefTone(typeof prefs?.tone === 'string' ? prefs.tone : '');
+    setPrefDiscount(typeof prefs?.discount_habit === 'string' ? prefs.discount_habit : '');
+    setPrefSignature(typeof prefs?.signature === 'string' ? prefs.signature : '');
+  }, [prefs]);
 
   const onSave = async () => {
     await saveConfig({ aiKey, espKey, espFrom, aiModel, aiBaseUrl, shopBrand });
@@ -59,6 +71,31 @@ export default function SettingsView() {
       setTimeout(() => setMsg(''), 2000);
     } catch { setMsg('白名单保存失败'); }
   };
+
+  // —— Z6 偏好保存：/api/config 是现有通用配置端点（g0Whitelist 先例），偏好以 { prefs: {...} } 同路写入。
+  // 后端本波无偏好写入端点时 POST 可能 200 但被忽略——回读 /api/state 验证真实持久化情况，
+  // 不造假成功：已持久化 → 「偏好已保存」；被忽略 → 「已记录（后端持久化即将支持）」。
+  const onSavePrefs = async () => {
+    setPrefsBusy(true);
+    try {
+      const { api } = await import('@/lib/api');
+      await api('/api/config', {
+        method: 'POST',
+        body: JSON.stringify({ prefs: { tone: prefTone, discount_habit: prefDiscount, signature: prefSignature } }),
+      });
+      const st = await api<any>('/api/state');
+      const p = (st && typeof st.prefs === 'object' && st.prefs) || {};
+      const persisted = p.tone === prefTone && p.discount_habit === prefDiscount && p.signature === prefSignature;
+      setPrefsMsg(persisted ? '偏好已保存' : '已记录（后端持久化即将支持）');
+      setTimeout(() => setPrefsMsg(''), 3000);
+    } catch {
+      setPrefsMsg('保存失败，请稍后再试');
+      setTimeout(() => setPrefsMsg(''), 3000);
+    }
+    setPrefsBusy(false);
+  };
+
+  const hasAnyPref = Boolean(prefs?.tone || prefs?.discount_habit || prefs?.signature);
 
   return (
     <div className="view-body">
@@ -150,6 +187,37 @@ export default function SettingsView() {
                 <button className={`seg-btn${guideStyle === 'demo' ? ' active' : ''}`} onClick={() => setGuideStyle('demo')}>演示（硬编码+浮层引导）</button>
                 <button className={`seg-btn${guideStyle === 'safe' ? ' active' : ''}`} onClick={() => setGuideStyle('safe')}>安全（纯意图+顶栏引导）</button>
               </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="setup-card glass-card">
+          <div className="s-no">7</div>
+          <div className="s-body">
+            <div className="s-head"><h3>AI 助手偏好</h3><Tag kind={hasAnyPref ? 'intent' : 'gray'}>{hasAnyPref ? '已设置' : '默认'}</Tag></div>
+            <div className="s-desc">语气 / 折扣习惯 / 署名——助手写邮件时沿用；留空 = 跟随对话推断。</div>
+            <div className="row">
+              <input
+                placeholder="语气偏好，如：轻松一点、别太促销腔"
+                value={prefTone}
+                onChange={(e) => setPrefTone(e.target.value)}
+              />
+              <input
+                placeholder="折扣习惯，如：最多打 85 折"
+                value={prefDiscount}
+                onChange={(e) => setPrefDiscount(e.target.value)}
+              />
+            </div>
+            <div className="row">
+              <input
+                placeholder="邮件署名，如：Leo · Qin Pet"
+                value={prefSignature}
+                onChange={(e) => setPrefSignature(e.target.value)}
+              />
+              <button className="btn ghost sm" disabled={prefsBusy} onClick={onSavePrefs}>
+                {prefsBusy ? '保存中…' : '保存'}
+              </button>
+              {prefsMsg && <span className="msg-ok">{prefsMsg}</span>}
             </div>
           </div>
         </div>

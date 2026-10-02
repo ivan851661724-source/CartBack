@@ -321,3 +321,64 @@ export interface Me {
 export interface ApiError {
   error: string;
 }
+
+// ============================ Wave4 新契约 ============================
+
+/** Z4 首屏欢迎态（GET /api/state 顶层 welcome；缺省 = null）：eligible=商家名下无任何 act */
+export interface WelcomeState {
+  eligible: boolean;
+}
+
+/** F1 数据开场句数据源（GET /api/state 顶层 store_banner；缺省 = null）：connected=店铺已连接 */
+export interface StoreBanner {
+  connected: boolean;
+  store_name?: string;
+  weekly_abandoned_count?: number;
+  aov?: number;
+  abandoned_value?: number;
+  currency?: string;
+}
+
+/** Z6 商家偏好（GET /api/state 顶层 prefs）：语气 / 折扣习惯 / 署名等（本波只读展示 + 经 /api/config 尝试写入） */
+export interface Prefs {
+  brand?: string;
+  tone?: string;             // 语气偏好
+  discount_habit?: string;   // 折扣习惯
+  signature?: string;        // 邮件署名
+  [k: string]: unknown;
+}
+
+/** Z4「上次方案」摘要（GET /api/state 顶层 last_plan；null=无）：记忆复用入口（点击 = 发「照上次的来」） */
+export interface LastPlan {
+  audience: string;
+  offer_text: string;
+  discount_text: string;
+  est_gmv_amount: number;
+  currency: string;
+  confirmed_at: number | string;
+  campaign_name?: string;
+}
+
+/** 通知类型：t0=发送回执 / t24=回流汇报 / recover=报喜 / system=系统（前端对话流不展示 system） */
+export type NotificationType = 't0' | 't24' | 'recover' | 'system';
+
+/** 单条通知（GET /api/notifications 的 items，倒序 ≤50） */
+export interface NotificationItem {
+  id: string;
+  type: NotificationType | string;
+  title: string;
+  body: string;
+  campaign_id?: string;
+  draft_id?: string;
+  act_id?: string;
+  chips?: string[];
+  created_at: number | string;
+  read: boolean;
+}
+
+/** GET /api/notifications 响应 */
+export interface NotificationsResp {
+  ok: boolean;
+  items: NotificationItem[];
+  unread: number;
+}

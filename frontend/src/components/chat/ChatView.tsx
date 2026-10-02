@@ -5,8 +5,9 @@ import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
 import { BRAND_POINTS, INTENT_POINTS } from '@/lib/constants';
 import { filledCount, needsValue, needsSource } from '@/lib/needs';
+import { fmtTime } from '@/lib/format';
 import { api } from '@/lib/api';
-import type { Draft } from '@/lib/types';
+import type { Draft, LastPlan, NotificationItem } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
@@ -15,6 +16,9 @@ import BatchCard from './BatchCard';
 import type { BatchPreview } from '@/lib/types';
 
 const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时机…';
+
+/** 回执气泡 type 角标文案（Z7）：t0=发送回执 / t24=回流汇报 / recover=报喜（system 不进对话流） */
+const RECEIPT_TYPE_LABEL: Record<string, string> = { t0: '发送回执', t24: '回流汇报', recover: '报喜' };
 
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
@@ -26,6 +30,7 @@ export default function ChatView() {
     confirmState, confirmFailed, confirmBusy, confirmPlan,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
     campaigns, pendingBatches,
+    lastPlan, notifications,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -49,6 +54,12 @@ export default function ChatView() {
   );
   // Wave3 批次域：本会话关联的正式批次（campaign.act_id === act.id）→ 对话流内并列批次状态卡
   const actCampaigns = campaigns.filter((c) => c.act_id === act?.id);
+  // Wave4 Z7 回执：通知里属于当前会话且非 system 的条目（接口倒序 → 翻转为时间正序），
+  // 在消息流末尾渲染为 agent 风格回执气泡；随 loadState/轮询刷新而出现。
+  const actReceipts = (notifications || [])
+    .filter((nt) => nt.act_id === act?.id && nt.type !== 'system')
+    .slice()
+    .reverse();
 
   // ② 受众圈选条件预览（确认卡核对用；与发送端 /api/draft 同口径）
   const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
@@ -62,11 +73,11 @@ export default function ChatView() {
     return () => { alive = false; };
   }, [planShown, planAudience]);
 
-  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现 / 待确认批次与批次卡出现）
+  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现 / 待确认批次、批次卡、回执气泡出现）
   useEffect(() => {
     const el = areaRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed, pendingBatches.length, actCampaigns.length]);
+  }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed, pendingBatches.length, actCampaigns.length, actReceipts.length]);
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
@@ -145,13 +156,19 @@ export default function ChatView() {
           </div>
 
           <div className="chat-area" ref={areaRef} aria-live="polite" aria-label="对话消息区">
+            {/* Z4 中性空态：不写死欢迎语——opening（欢迎语/数据开场句）由后端在首条消息后持久化为
+                act.messages[0]，前端只引导发首条消息；上方按需渲染「上次方案」复用卡。 */}
             {messages.length === 0 && !streaming && (
-              <div className="msg agent">
-                <div className="avatar agent"><NavChat /></div>
-                <div className="bubble">
-                  {!onboardingSkipped && onboardingStep < 4
-                    ? '点击左侧快捷描述，告诉助手你的品牌信息'
-                    : '你好，我是你的挽回邮件教练。\n告诉我你想挽回哪类人、为什么、希望拿到什么结果，我帮你一步步生成方案卡。'}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
+                {lastPlan && <LastPlanCard plan={lastPlan} onUse={() => sendMsg('照上次的来')} />}
+                <div style={{
+                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                  gap: 12, padding: '56px 16px', color: 'var(--muted)',
+                }}>
+                  <div className="chat-empty-ic"><NavChat /></div>
+                  <div style={{ fontSize: '13.5px', color: 'var(--muted)', textAlign: 'center', lineHeight: 1.7 }}>
+                    把你的想法说给我，比如想挽回哪拨客人
+                  </div>
                 </div>
               </div>
             )}
@@ -237,6 +254,20 @@ export default function ChatView() {
                     </div>
                   ))}
                 </div>
+                {/* C5 随信素材：商家在对话里补充的素材（act.memory.extras）随信附上——发送前在此回显核对。
+                    value 兼容新契约三态对象（needsValue 读取）；key=brand 显示为「品牌名」，中文 key 直接展示。 */}
+                {(act?.memory?.extras?.length ?? 0) > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 14, paddingTop: 10, borderTop: '.5px dashed #DDE2E8', fontSize: '12.5px' }}>
+                    <div style={{ fontWeight: 600, color: '#1E293B', marginBottom: 2 }}>随信素材</div>
+                    <div style={{ color: 'var(--muted)' }}>你说的素材都收好了：</div>
+                    {(act!.memory!.extras || []).map((ex, i) => (
+                      <div key={`${ex.key}-${i}`} style={{ display: 'flex', justifyContent: 'space-between', gap: 12 }}>
+                        <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{ex.key === 'brand' ? '品牌名' : ex.key}</span>
+                        <span style={{ textAlign: 'right', color: 'var(--text)' }}>{needsValue((ex as { value: unknown }).value) || '—'}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
                 {audConditions && (
                   <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px',paddingTop:'10px',borderTop:'.5px dashed #DDE2E8',fontSize:'12.5px'}}>
                     <div style={{fontWeight:600,color:'#1E293B',marginBottom:'2px'}}>受众圈选条件（发送前请核对）</div>
@@ -302,6 +333,13 @@ export default function ChatView() {
             {/* 批次状态卡（Wave3 Z3）：本会话关联批次（campaign.act_id === act.id）在对话流内并列展示，
                 暂停/恢复等管理动作走卡上快捷按钮（发对应对话消息），后端处理完由回合末 loadState 刷新六态。 */}
             {actCampaigns.map((c) => <BatchCard key={c.id} c={c} />)}
+
+            {/* Z7 回执气泡：本会话的发送回执/回流汇报/报喜通知在消息流末尾以 agent 风格呈现
+                （灰色左边框 + type 角标区分普通回复）；其 chips 与常驻 chips 同机制（点击即 sendMsg），
+                仅在常驻 chips 置空时渲染，避免与后端 done 帧 chips 冲突。 */}
+            {actReceipts.map((nt) => (
+              <ReceiptBubble key={nt.id} nt={nt} chipsEnabled={chips.length === 0 && !streaming} />
+            ))}
           </div>
 
           <div data-guide-target="guide-compose" style={{display:'flex',flexDirection:'column',flexShrink:0}}>
@@ -411,6 +449,115 @@ export default function ChatView() {
             )}
           </aside>
         ) : null}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Z4「上次方案」摘要卡：last_plan 非空且当前对话为空时显示在空态上方（记忆复用入口）。
+ * 整卡可点 = 发送「照上次的来」（走 sendMsg，由后端按记忆重建方案）。
+ */
+function LastPlanCard({ plan, onUse }: { plan: LastPlan; onUse: () => void }) {
+  const hook = plan.offer_text || plan.discount_text || '';
+  const symbol = plan.currency === 'USD' ? '$' : plan.currency ? plan.currency + ' ' : '¥';
+  const rows: [string, string][] = [
+    ['受众', plan.audience],
+    ['钩子', hook || '—'],
+    ['预估金额', symbol + (Number(plan.est_gmv_amount) || 0)],
+    ['确认时间', fmtTime(plan.confirmed_at) || '—'],
+  ];
+  return (
+    <button
+      type="button"
+      onClick={onUse}
+      title="点击发送「照上次的来」，按上次方案再来一轮"
+      style={{
+        background: '#fff', border: '.5px solid var(--line-2)', borderRadius: 16, padding: '14px 18px',
+        boxShadow: 'var(--shadow-card)', cursor: 'pointer', textAlign: 'left', width: '100%',
+        fontFamily: 'inherit', transition: 'border-color .15s',
+      }}
+      onMouseEnter={(e) => { e.currentTarget.style.borderColor = 'var(--brand)'; }}
+      onMouseLeave={(e) => { e.currentTarget.style.borderColor = 'var(--line-2)'; }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>🗂 上次方案</span>
+        {plan.campaign_name && <span style={{ fontSize: 11.5, color: 'var(--muted)' }}>{plan.campaign_name}</span>}
+        <span style={{ marginLeft: 'auto', fontSize: 11.5, fontWeight: 600, color: 'var(--brand)', whiteSpace: 'nowrap' }}>
+          点击复用：照上次的来 →
+        </span>
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+        {rows.map(([k, v]) => (
+          <div key={k} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, fontSize: 12.5 }}>
+            <span style={{ color: 'var(--muted)', flexShrink: 0 }}>{k}</span>
+            <span style={{ color: 'var(--text)', textAlign: 'right', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{v}</span>
+          </div>
+        ))}
+      </div>
+    </button>
+  );
+}
+
+/**
+ * Z7 回执气泡：本会话的 t0/t24/recover 通知渲染为 agent 风格气泡，灰色左边框 + type 角标区分
+ * 普通回复（「发送回执 / 回流汇报 / 报喜」）。气泡下按需渲染通知自带 chips（chipsEnabled =
+ * 常驻 chips 置空且非流式），点击 chip 即以该文案作为用户消息发送（与常驻 chips 同机制）。
+ */
+function ReceiptBubble({ nt, chipsEnabled }: { nt: NotificationItem; chipsEnabled: boolean }) {
+  const { sendMsg, streaming } = useApp();
+  const label = RECEIPT_TYPE_LABEL[nt.type] || '通知';
+  const chips = chipsEnabled && Array.isArray(nt.chips)
+    ? nt.chips.filter((c): c is string => typeof c === 'string' && c.length > 0)
+    : [];
+  return (
+    <div className="msg agent">
+      <div className="avatar agent"><NavChat /></div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0, maxWidth: '100%' }}>
+        <div className="bubble" style={{ borderLeft: '3px solid var(--line)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: nt.body ? 4 : 0, flexWrap: 'wrap' }}>
+            <span style={{
+              fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: '1px 8px', flexShrink: 0,
+              ...(nt.type === 'recover'
+                ? { color: 'var(--ok2)', background: 'var(--ok-bg)', border: '.5px solid var(--ok-line)' }
+                : { color: 'var(--muted)', background: 'var(--bg-input)', border: '.5px solid var(--line)' }),
+            }}>{label}</span>
+            <span style={{ fontSize: 13.5, fontWeight: 700, color: '#1E293B' }}>{nt.title}</span>
+            <span style={{ fontSize: 10.5, color: 'var(--soft)', marginLeft: 'auto', whiteSpace: 'nowrap' }}>
+              {fmtTime(nt.created_at)}
+            </span>
+          </div>
+          {nt.body && <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.7, whiteSpace: 'pre-wrap' }}>{nt.body}</div>}
+        </div>
+        {chips.length > 0 && (
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            {chips.slice(0, 3).map((c, i) => (
+              <button
+                key={`${i}-${c}`}
+                type="button"
+                disabled={streaming}
+                onClick={() => sendMsg(c)}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: '6px',
+                  padding: '7px 13px', borderRadius: '9px',
+                  border: '0.5px solid #DDE2E8', background: '#fff', color: 'var(--text)',
+                  fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
+                  whiteSpace: 'nowrap', transition: 'all .15s',
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = '#FF7F4D';
+                  e.currentTarget.style.background = 'var(--brand-soft)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = '#DDE2E8';
+                  e.currentTarget.style.background = '#fff';
+                }}
+              >
+                {c}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

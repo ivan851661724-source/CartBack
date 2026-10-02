@@ -132,6 +132,26 @@ input,textarea{font-family:inherit}
   color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;font-family:var(--font-disp);
   box-shadow:inset 0 1px 0 rgba(255,255,255,.15),0 2px 8px rgba(0,0,0,.14);flex-shrink:0;cursor:pointer}
 
+/* —— Wave4 Z7 通知铃铛（Topbar） —— */
+.ntf-btn{position:relative;display:inline-flex;align-items:center;gap:5px}
+.ntf-btn svg{width:14px;height:14px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.ntf-badge{position:absolute;top:-7px;right:-9px;min-width:16px;height:16px;padding:0 4px;border-radius:999px;
+  background:var(--danger);color:#fff;font-size:10px;font-weight:700;font-family:var(--font-disp);
+  display:flex;align-items:center;justify-content:center;line-height:1}
+.ntf-panel{position:absolute;right:0;top:calc(100% + 8px);width:330px;max-width:86vw;max-height:430px;overflow-y:auto;
+  background:var(--card);border:.5px solid var(--line-2);border-radius:14px;box-shadow:var(--shadow-card);
+  z-index:70;animation:msgIn .18s var(--ease)}
+.ntf-head{position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:8px;padding:11px 14px;
+  border-bottom:.5px solid var(--line-2);background:var(--card);font-size:12.5px;font-weight:700;color:var(--text)}
+.ntf-item{padding:10px 14px;border-bottom:.5px solid var(--line-2);display:flex;flex-direction:column;gap:3px}
+.ntf-item:last-child{border-bottom:0}
+.ntf-item:hover{background:var(--bg-hover)}
+
+/* —— Wave4 Z4 对话空态图标（ChatView） —— */
+.chat-empty-ic{width:46px;height:46px;border-radius:13px;background:var(--bg-input);border:.5px solid var(--line-2);
+  display:flex;align-items:center;justify-content:center;color:var(--soft)}
+.chat-empty-ic svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+
 /* ============================ 外壳 ============================ */
 .shell{display:flex;height:calc(100vh - var(--topbar-h));position:relative;z-index:1}
 
