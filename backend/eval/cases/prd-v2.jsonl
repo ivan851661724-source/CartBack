@@ -14,8 +14,8 @@
 {"id": "p14", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #14（草稿生成/编辑类，原文待回填）"}
 {"id": "p15", "input": "受众改成老客，折扣换 15%", "expect": {"assert": "同轮两条 correction 生效：audience.value 含 老客、offer.value 含 15%；corrections 追加 2 条；回复复述两个新值；filled_count 保持 4", "filled": 4, "chips": []}, "deferred": false}
 {"id": "p16", "input": "嗯，我知道了", "expect": {"assert": "4/4 且 S2 后任意输入 → 回复为引导确认（含 确认 或 核对 字样），不继续问四槽、不产出新追问 chips（chips=[]），stage 保持 S2", "filled": 4, "chips": []}, "deferred": false}
-{"id": "p17", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #17（确认发送/草稿落库类，原文待回填）"}
-{"id": "p18", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #18（发送执行/回执类，原文待回填）"}
-{"id": "p19", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #19（看板回流/GMV 叙事类，原文待回填）"}
-{"id": "p20", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #20（二次挽回/换人群重聊类，原文待回填）"}
+{"id": "p17", "input": "把加购未付和下单未付分别做成两个批次", "expect": {"assert": "Wave 3 I1 启用：batch_plan 待确认 —— 引擎逐批复述（批次 A 加购未付 / 批次 B 下单未付 + 净值人数 + 钩子）并以「对吗」收口，chips=[确认建批,改一下]；act.pending_ops 挂计划而 campaigns 0 静默（previewBatches 调用、createBatches 未调用），确认轮才真正建批（见 acceptance21 主重放 perTurn p17）", "filled": 4, "chips": ["确认建批", "改一下"]}, "deferred": false, "note": "PRD 21 句剧本 #17（Wave 3 启用）：并列批次拆批逐批复述确认"}
+{"id": "p18", "input": "黑五（11/27–11/28）都停发，先全停", "expect": {"assert": "Wave 3 I2 启用：campaign_ops 黑五日历挂上（2026-11-27~2026-11-28）+ 紧急全停立即执行；回复含「停发日历已挂上」「窗口内冻结不删」「恢复必须明说恢复吧」；p17 计划仍未被静默建批。恢复吧恢复流与窗口过后自动顺延（HTTP 两阶段）见 test/wave3-campaigns.test.js", "filled": 4, "chips": []}, "deferred": false, "note": "PRD 21 句剧本 #18（Wave 3 启用）：全局停发日历 + 紧急全停"}
+{"id": "p19", "input": "没发完的那些折扣改成 15%", "expect": {"assert": "Wave 3 I3 启用：改折扣只改未发 —— 回复含边界声明「已发 18 封不受影响，改的是未发的 5 封」（I3 灵魂句）+ 新码 NEW15 只对未发生效 + 旧码 OLD10 对已发邮件继续有效；campaignOp discount percent_off=15", "filled": 4, "chips": []}, "deferred": false, "note": "PRD 21 句剧本 #19（Wave 3 启用）：未发部分改折扣（建新码）"}
+{"id": "p20", "input": "再建一批加购未付的，把已经下单的和最近发过邮件的都排除掉", "expect": {"assert": "Wave 3 I4 启用：建批圈人默认排除已下单/已触达 —— 批次计划回复逐条列排除明细（已购买（店铺已下单）2 人、频控窗口内已触达 1 人），净值=圈定−排除；「别排除」风险提示 + 覆盖留痕流见 test/wave3-campaigns.test.js", "filled": 4, "chips": ["确认建批", "改一下"]}, "deferred": false, "note": "PRD 21 句剧本 #20（Wave 3 启用）：自动排除净值核对单"}
 {"id": "p21", "input": "", "expect": {}, "deferred": true, "note": "PRD 21 句剧本 #21（会话收口/closed 类，原文待回填）"}

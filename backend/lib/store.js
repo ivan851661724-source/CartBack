@@ -19,7 +19,8 @@ const SCHEMA = {
     memory: 'JSON', context_summary: 'JSON',
     summary_cursor: 'INTEGER', context_version: 'INTEGER',
     plan_card: 'JSON',            // Wave 2 D3：confirm 产出的服务端权威 planCard（S3 可回读；S2 改参后作废）
-    execution_snapshot: 'JSON'    // Wave 2 D3：confirm 冻结的四字段快照（audience/reach_count/discount/estGmv），闸门⑤ diff 依据
+    execution_snapshot: 'JSON',   // Wave 2 D3：confirm 冻结的四字段快照（audience/reach_count/discount/estGmv），闸门⑤ diff 依据
+    pending_ops: 'JSON'           // Wave 3 I1/I3：待确认的批次计划 {batches:[...]} / 重发确认 {resend:{...}}（batch_plan 阶段不建 campaigns 行，确认才建）
   },
   drafts: {
     id: 'TEXT', act_id: 'TEXT', subject: 'TEXT', body: 'TEXT', audience: 'JSON',
@@ -84,7 +85,8 @@ const SCHEMA = {
   meta: { key: 'TEXT', value: 'TEXT' },
   // —— Wave 2：sends 实发流水（逐收件人逐封，最终态一行，重试幂等更新）——
   sends: {
-    id: 'TEXT', act_id: 'TEXT', campaign_id: 'TEXT',   // campaign_id = draft id（无草稿为 NULL）
+    id: 'TEXT', act_id: 'TEXT', campaign_id: 'TEXT',
+    // campaign_id 语义（Wave 3 I1 起）：批次发送 = campaign.id；单方案草稿 = draft id（无草稿为 NULL）。
     recipient: 'TEXT', template: 'TEXT', tag: 'TEXT', code: 'TEXT',
     tz: 'TEXT', gate_snapshot: 'JSON', at: 'INTEGER', status: 'TEXT'
     // 幂等键 = (campaign_id, recipient)：重试不追加新行，只更新 status/at（PRD Wave 2 契约⑤）
@@ -93,7 +95,39 @@ const SCHEMA = {
   holdouts: {
     id: 'TEXT', act_id: 'TEXT', campaign_id: 'TEXT',
     recipient: 'TEXT', frozen_at: 'INTEGER', ratio: 'REAL', source: 'TEXT'
-    // source 本波恒 "single_plan"；幂等键 = (campaign_id, recipient)
+    // source：单方案发送恒 "single_plan"；批次发送 = "campaign"。
+    // campaign_id 语义（Wave 3 I1）：批次发送 = campaign.id；单方案草稿维持 draft id。
+    // 幂等键 = (campaign_id, recipient)
+  },
+  // —— Wave 3 I1 并列批次：campaign = 批次（生命周期长于对话，act closed 后批次照跑）——
+  campaigns: {
+    id: 'TEXT', act_id: 'TEXT', user_id: 'TEXT',
+    name: 'TEXT',            // 人话名（「A 加购未付」），agent 引用它定位批次
+    audience_desc: 'TEXT',   // 受众描述（圈人依据，同 matchAudienceByDesc 口径）
+    status: 'TEXT',          // draft | scheduled | running | paused | frozen | done
+    offer_text: 'TEXT',      // 钩子文案（快照自建批时的 offer）
+    percent_off: 'REAL',     // 折扣数值（% off；0 = 无码方案）
+    discount: 'JSON',        // { text, code|null, code_status }（契约①形状；改折扣 → 新码覆盖，旧码仅对已发邮件继续有效）
+    recipients: 'JSON',      // 净值名单 JSON 列（I4 排除 + 重叠排除之后；sent/pending 一律从 sends/holdouts 派生，不做双记账）
+    excluded: 'JSON',        // 排除明细 [{reason, count, at?, emails?}]（核对单逐条展示 + 操作留痕）
+    scheduled_at: 'INTEGER', // 排程发送时间（epoch ms；0/空 = 未排程）
+    prev_status: 'TEXT',     // 冻结/暂停前的状态（恢复时回滚目标）
+    resume_note: 'TEXT',     // 恢复/顺延提示（「黑五过了，B 批次恢复排程…」）
+    pause_scope: 'TEXT',     // paused 来源：user（用户手动）| global（紧急全停）| system
+    freeze_scope: 'TEXT',    // frozen 来源：calendar（停发日历）| global（紧急全停）
+    frozen_reason: 'TEXT',   // 冻结原因（人话）
+    brand: 'TEXT',           // 白标品牌快照（闸门③）
+    subject: 'TEXT',         // 主题行（重发新批次可换）
+    exclusion_override: 'INTEGER', // I4 用户覆盖：1 = 「别排除，就要发」（照发 + 审计留痕）
+    gate_note: 'TEXT',       // 最近一次闸门/发送异常备注
+    created_at: 'INTEGER', updated_at: 'INTEGER'
+  },
+  // —— Wave 3 I2 全局停发日历（日期区间；命中停发日的排程发送冻结不删，结束后自动顺延）——
+  blackouts: {
+    id: 'TEXT', user_id: 'TEXT',
+    from: 'INTEGER',         // 起始日 00:00 UTC（epoch ms，含）
+    to: 'INTEGER',           // 结束日次日 00:00 UTC（epoch ms，不含）—— 闭开区间，重叠日历取并集
+    label: 'TEXT', created_at: 'INTEGER'
   },
   // —— 用户账号体系（架构方案 v4 D7/D8）——
   // users/sessions 为全局表，行级语义；当前单进程下「读全表→过滤→写回」安全（读写间无 await），
@@ -225,6 +259,8 @@ class Store {
   // —— 通用表读写 ——
   _read(t) { return this.b.readTable(t); }
   _write(t, rows) { this.b.writeTable(t, rows); }
+  /** 关闭底层句柄（测试/优雅退出用；JSON 后端 = flush 落盘） */
+  close() { if (this.b && typeof this.b.close === 'function') this.b.close(); }
 
   // —— acts ——
   // 读取即惰性迁移（PRD v2 契约）：旧 act（needs 纯字符串 / pain 槽名 / memory 缺 extras）
@@ -588,6 +624,34 @@ class Store {
     if (filter.campaign_id) rows = rows.filter(r => r.campaign_id === filter.campaign_id);
     if (filter.act_id) rows = rows.filter(r => r.act_id === filter.act_id);
     return rows;
+  }
+
+  // —— Wave 3 I1：campaigns（批次；生命周期长于对话 —— act closed 后批次照跑）——
+  getCampaign(id) { return this._read('campaigns').find(c => c.id === id) || null; }
+  getCampaignsByUser(userId) {
+    // 归属口径与 getDraftsByUser 一致：本用户的批次 + 无归属的历史批次（本地模式共享语义）
+    return this._read('campaigns')
+      .filter(c => !c.user_id || c.user_id === userId)
+      .sort((a, b) => (a.created_at || 0) - (b.created_at || 0));   // 建批顺序（A/B/C 序与重叠归属依据）
+  }
+  upsertCampaign(c) {
+    const rows = this._read('campaigns').filter(x => x.id !== c.id);
+    rows.push(c); this._write('campaigns', rows); return c;
+  }
+
+  // —— Wave 3 I2：blackouts（停发日历；重叠区间由 campaigns 层取并集判定）——
+  getBlackouts() { return this._read('blackouts').sort((a, b) => (a.from || 0) - (b.from || 0)); }
+  addBlackout(b) {
+    b.id = b.id || uid('blk_');
+    b.created_at = b.created_at || Date.now();
+    const rows = this._read('blackouts').filter(x => x.id !== b.id);
+    rows.push(b); this._write('blackouts', rows); return b;
+  }
+  deleteBlackout(id) {
+    const rows = this._read('blackouts');
+    const next = rows.filter(x => x.id !== id);
+    if (next.length === rows.length) return false;
+    this._write('blackouts', next); return true;
   }
 
   // —— meta ——

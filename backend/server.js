@@ -27,6 +27,9 @@ const { JobQueue } = require('./lib/queue');
 const { sendSmtp } = require('./lib/smtp');
 const { BreakerRegistry } = require('./lib/breaker');
 const postersMod = require('./lib/posters');
+// —— Wave 3 批次域（I1 并列批次 / I2 全局停发 / I3 未发部分操作 / I4 自动排除）——
+const campaignsMod = require('./lib/campaigns');
+const exclusionMod = require('./lib/exclusion');
 
 let config = cfg.load();
 const store = new Store();
@@ -73,6 +76,7 @@ async function translateText(text, targetLocale) {
 // —— 异步任务队列（PRD §0.5 jobs / §0.6 /api/jobs/:id）——
 const queue = new JobQueue({ store, concurrency: 2, baseDelayMs: 2000, maxRetries: 3, logger: logEvent });
 queue.register('send_draft', (j) => processSendJob(j));
+queue.register('send_campaign', (j) => processCampaignSendJob(j));   // Wave 3 I1：批次发送（复用 run_after 定时；勿绕过 _tick due 过滤）
 queue.register('posters', (j) => processPosterJob(j));
 queue.register('g6_purge', () => competitorsMod.g6Purge(store));
 queue.register('tag_expiry', () => applyTagExpiryWeights());
@@ -576,20 +580,10 @@ function resolveMerchantBrand(act) {
 }
 
 // PRD §1 过滤口径：真实邮箱 且 未转化 且 挽回窗口 30 天（与确认卡展示的圈选条件同源，说到做到）
-const RECOVERY_WINDOW_MS = 30 * 86400000;
+// Wave 3 I4 重构：实现收敛到 lib/exclusion.baseTargetable（单方案与批次共用同一口径，语义不变）
+const RECOVERY_WINDOW_MS = exclusionMod.RECOVERY_WINDOW_MS;
 function filterTargetable(list) {
-  const byId = new Map(store.getAudience().map(a => [a.id, a]));
-  const converted = new Set();
-  for (const e of store.getEvents()) {
-    if (e.type !== 'convert' || !e.audience_id) continue;
-    const a = byId.get(e.audience_id);
-    if (a && a.email) converted.add(String(a.email).toLowerCase());
-  }
-  const cutoff = Date.now() - RECOVERY_WINDOW_MS;
-  return (list || [])
-    .filter(a => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.email || ''))
-    .filter(a => (a.at_risk_at || a.created_at || 0) >= cutoff)
-    .filter(a => !converted.has(String(a.email).toLowerCase()));
+  return exclusionMod.baseTargetable(store, list, { now: Date.now(), recoveryWindowMs: RECOVERY_WINDOW_MS });
 }
 
 // —— ② 受众圈选条件（确认卡展示用）：需求关键词 → 结构化过滤条件 + 命中概览 ——
@@ -883,6 +877,25 @@ async function processSendJob({ job, payload }) {
   const draft = store.getDraft(payload.draftId);
   if (!draft) return { skipped: 'draft not found' };
   if (['sent', 'sending'].includes(draft.status)) return { skipped: 'already ' + draft.status };
+  // —— Wave 3 I2：发送执行点统一停发检查（高于一切单批操作）——
+  //   停发日历命中 → 顺延重排（复用 run_after，非永久拒绝）；紧急全停 → 跳过（job done，草稿保持 queued，
+  //   商家明说「恢复吧」解除全停后需重新触发发送 —— 全停绝不自动恢复，也没有已知的恢复时刻可排）。
+  const blocker = campaignsMod.sendBlocker(store);
+  if (blocker) {
+    if (blocker.kind === 'calendar') {
+      const retryAt = blocker.retryAt || (Date.now() + 3600 * 1000);
+      queue.enqueue({
+        type: 'send_draft', payload: { draftId: draft.id },
+        dedupeKey: 'send:sched:' + draft.id + ':' + retryAt, runAfter: retryAt
+      });
+      draft.status = 'queued';
+      draft.scheduled_at = retryAt;
+      upsertDraftPreservingAsync(draft);
+      logEvent('send_deferred_blackout', { draft_id: draft.id, retry_at: retryAt, reason: blocker.reason });
+      return { deferred: 'blackout', retry_at: retryAt, reason: blocker.reason };
+    }
+    return { skipped: 'global_paused', reason: blocker.reason };
+  }
   const r = await sendDraft(draft);
   if (r && r.deferred) {
     // D4① 时段闸缓发：重新入队到下一个合理时段（复用 jobs 机制 run_after），非永久拒绝
@@ -898,6 +911,254 @@ async function processSendJob({ job, payload }) {
     upsertDraftPreservingAsync(draft);
     logEvent('send_deferred', { draft_id: draft.id, retry_at: retryAt, next_job_id: next.id });
     return { rescheduled: true, next_job_id: next.id, retry_at: retryAt, checklist: r.checklist };
+  }
+  return r;
+}
+
+/* ===================== Wave 3 批次域（I1/I2/I3/I4）===================== */
+
+// 批次圈人口径：与单方案同源（matchAudienceByDesc + filterTargetable），但拆批语义要求更细的意图切分——
+// 「加购未付」「下单未付」必须拆成两批不同人群（I1），故先按最具体意图匹配，再回落 matchAudienceByDesc。
+function campaignMatcher(desc) {
+  const all = store.getAudience();
+  const d = (desc || '').toLowerCase();
+  let list;
+  if (/加购/.test(d)) list = all.filter(a => /加购/.test(a.intent));                       // 加购未付（不含弃购/下单未付）
+  else if (/下单未付|弃购/.test(d)) list = all.filter(a => /弃购|下单未付/.test(a.intent)); // 下单未付/弃购
+  else list = matchAudienceByDesc(desc);                                                    // 其余回落单方案口径
+  return filterTargetable(list).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
+}
+
+// I2 日历契约（GET /api/state / GET /api/blackout 共用）：active + 区间列表（并集判定在 sendBlocker 内）
+function blackoutContract() {
+  const ranges = store.getBlackouts().map(r => ({
+    id: r.id, from: campaignsMod.isoDay(r.from), to: campaignsMod.isoDay(r.to - 1), label: r.label
+  }));
+  return { active: campaignsMod.activeBlackoutRange(store) != null, ranges };
+}
+
+// —— I3/I1 对话执行器（IGDE 注入缝；userId 按请求作用域）——
+// 返回结构化结果，人话组装在引擎侧（确定性边界声明/逐批复述不进模型话术层）。
+function makeCampaignExecutor(userId) {
+  return {
+    previewBatches(batches) {
+      const { plans } = campaignsMod.planBatches(store, batches, { matcher: campaignMatcher, userId });
+      return plans.map(p => ({
+        name: p.name, audience_desc: p.audience_desc, offer_text: p.offer_text,
+        percent_off: p.percent_off, reach_count: p.reach_count, excluded: p.excluded
+      }));
+    },
+    async createBatches(batches, { exclusionOverride } = {}) {
+      const r = await campaignsMod.createCampaigns(store, {
+        batches, userId, matcher: campaignMatcher, connector: connectors,
+        brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack',
+        exclusionOverride: Boolean(exclusionOverride)
+      });
+      return {
+        campaigns: r.campaigns.map(c => campaignsMod.publicCampaign(store, c)),
+        failures: r.failures, advice: r.advice
+      };
+    },
+    resolveTarget(ref) {
+      // 降级词表单批操作的目标预检：能解析到真实批次才让引擎接手（null = 回归正常对话）
+      const camp = ref == null
+        ? (store.getCampaignsByUser(userId).length === 1 ? store.getCampaignsByUser(userId)[0] : null)
+        : campaignsMod.resolveCampaignRef(store, ref, userId);
+      return camp ? { campaign_id: camp.id, name: camp.name } : null;
+    },
+    async campaignOp({ op, target, campaign_id, params }) {
+      const camp = campaign_id
+        ? store.getCampaign(campaign_id)
+        : campaignsMod.resolveCampaignRef(store, target, userId);
+      if (!camp || (camp.user_id && userId && camp.user_id !== userId)) return { ok: false, reason: '没有找到这个批次（用「批次 A」或人话名指一下）', reason_not_found: true };
+      if (op === 'pause') {
+        const r = campaignsMod.pauseCampaign(store, camp, { scope: 'user' });
+        if (!r.ok) return r;
+        return { ok: true, name: camp.name, status: camp.status, boundary: campaignsMod.boundaryOf(camp, store) };
+      }
+      if (op === 'resume') {
+        const r = campaignsMod.resumeCampaign(store, camp);
+        if (!r.ok) return r;
+        return { ok: true, name: camp.name, status: camp.status, boundary: campaignsMod.boundaryOf(camp, store) };
+      }
+      if (op === 'discount') {
+        const r = await campaignsMod.changeDiscount(store, camp, { percentOff: params && params.percent_off, connector: connectors });
+        if (!r.ok) return r;
+        return {
+          ok: true, name: camp.name, code: r.code, oldCode: r.oldCode, changed: r.changed,
+          boundary: campaignsMod.boundaryOf(camp, store)
+        };
+      }
+      if (op === 'exclude') {
+        const r = campaignsMod.excludeFromCampaign(store, camp, { emails: params && params.emails, allOpened: Boolean(params && params.all_opened) });
+        if (!r.ok) return r;
+        return {
+          ok: true, name: camp.name, excluded_count: r.excluded_count, rejected: r.rejected,
+          boundary: campaignsMod.boundaryOf(camp, store)
+        };
+      }
+      if (op === 'resend') {
+        const r = await campaignsMod.resendCampaign(store, camp, {
+          subject: (params && params.subject) || '', confirmFrequency: Boolean(params && params.confirm_frequency),
+          connector: connectors, userId, brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack'
+        });
+        if (!r.ok && r.needs_confirm) return { ...r, campaign_id: camp.id, name: camp.name };
+        if (!r.ok) return r;
+        return { ok: true, camp: campaignsMod.publicCampaign(store, r.camp) };
+      }
+      return { ok: false, reason: '未知操作：' + op };
+    },
+    pauseAll() { return campaignsMod.pauseAll(store); },
+    resumeAll() { return campaignsMod.resumeAll(store); },
+    addBlackout(params) {
+      const parsed = campaignsMod.parseBlackoutRange(params || {});
+      if (!parsed.ok) return parsed;
+      const row = store.addBlackout({ user_id: userId || null, from: parsed.range.from, to: parsed.range.to, label: parsed.range.label });
+      logEvent('blackout_added', { blackout_id: row.id, label: row.label });
+      return { ok: true, range: { from: campaignsMod.isoDay(row.from), to: campaignsMod.isoDay(row.to - 1), label: row.label } };
+    }
+  };
+}
+
+// —— 批次五道闸门 / 发送执行（复用 execution 原语 + renderCampaign + ESP 适配器；sends 落 campaign_id=campaign.id）——
+async function sendCampaignBatch(camp, { viaJob = false } = {}) {
+  const gates = await campaignsMod.evaluateCampaignGates(store, camp, {
+    connector: connectors, publicBaseUrl: config.publicBaseUrl
+  });
+  if (!gates.all_pass) {
+    const failing = gates.items.filter(i => !i.pass);
+    if (failing.length === 1 && failing[0].gate === 'window') {
+      return { deferred: true, retryAt: gates.windowRetryAt, checklist: gates.items };
+    }
+    camp.status = camp.status === 'running' ? 'draft' : camp.status;
+    camp.gate_note = '发送闸门未通过：' + failing.map(f => f.reason || f.label).join('；');
+    store.upsertCampaign(camp);
+    metricsInc('send_fail');
+    logEvent('campaign_gate_fail', { campaign_id: camp.id, gates: failing.map(f => f.gate) });
+    return { error: camp.gate_note, checklist: gates.items };
+  }
+  // holdout 冻结晚于排除（净值 pending 圈定；对照成员绝不写入 sends）
+  const holdoutPlan = campaignsMod.freezeCampaignHoldouts(store, camp, gates.allow);
+  const holdSet = new Set(store.getHoldouts({ campaign_id: camp.id }).map(h => String(h.recipient).toLowerCase()));
+  const allow = gates.allow.filter(r => !holdSet.has(String(r.email).toLowerCase()));
+  if (!allow.length) {
+    camp.status = 'done';
+    camp.gate_note = null;
+    store.upsertCampaign(camp);
+    return { recipients: 0, holdout: holdoutPlan.count, note: '没有可发送的未发收件人' };
+  }
+  const gateSnapshot = { items: gates.items, all_pass: true, at: Date.now(), timezone: gates.timezone };
+  const real = (config.mode === 'real' && espReady());
+  camp.status = 'running';
+  store.upsertCampaign(camp);
+  metricsInc('send_volume', allow.length);
+
+  const recordRows = (recipients, status) => {
+    for (const r of recipients) {
+      store.recordSendRow({
+        act_id: camp.act_id, campaign_id: camp.id, recipient: r.email,
+        template: 'standard', tag: r.intent || null, code: (camp.discount && camp.discount.code) || null,
+        tz: execution.tzForRecipient(r), gate_snapshot: gateSnapshot, status
+      });
+    }
+  };
+
+  if (!real) {
+    // demo 仿真：与单方案同口径逐收件人落 sends（幂等键 campaign_id+recipient）
+    recordRows(allow, 'sent');
+    const c = campaignsMod.deriveCounts(store, camp);
+    camp.status = c.pending === 0 ? 'done' : (gates.skippedByFrequency > 0 ? 'paused' : 'done');
+    if (camp.status === 'paused') {
+      camp.pause_scope = 'system';
+      camp.resume_note = `频控窗口内 ${gates.skippedByFrequency} 人已触达，剩余未发明早再试`;
+      camp.frozen_reason = null;
+    }
+    camp.scheduled_at = camp.status === 'done' ? 0 : camp.scheduled_at;
+    camp.gate_note = null;
+    store.upsertCampaign(camp);
+    metricsInc('send_sim');
+    logEvent('campaign_send', { campaign_id: camp.id, real: false, recipients: allow.length, skipped_by_frequency: gates.skippedByFrequency, holdout: holdoutPlan.count });
+    return { real: false, recipients: allow.length, skippedByFrequency: gates.skippedByFrequency, holdout: holdoutPlan.count };
+  }
+
+  // 真实模式：渲染管线（变体→语种→模板→G0）+ ESP（复用 sendDraft 的适配器链）
+  const percent = Number(camp.percent_off) || execution.resolveDiscountNum({ discount: camp.discount });
+  const pseudoDraft = {
+    id: camp.id, brand: camp.brand || resolveBrand({}), coupon: (camp.discount && camp.discount.code) || null,
+    discount: percent, product: '', offer: camp.offer_text || '', audience: camp.audience_desc,
+    html: '', locale: null
+  };
+  const variants = variantsMod.standardVariants({ brand: pseudoDraft.brand, discount: percent, coupon: pseudoDraft.coupon, product: '' });
+  const rendered = await render.renderCampaign({
+    draft: pseudoDraft, variants, recipients: allow,
+    tagsOf: (r) => store.getAudienceTags(r.id),
+    whitelist: g0Whitelist(), translateFn: translateText, cache: translationCache
+  });
+  const sendable = rendered.messages.filter(m => !m.blocked);
+  const blockedList = rendered.messages.filter(m => m.blocked);
+  if (blockedList.length) { metricsInc('g0_blocked', blockedList.length); logEvent('g0_intercept', { campaign_id: camp.id, blocked: blockedList.length }); }
+  if (!sendable.length) {
+    camp.status = 'draft';
+    camp.gate_note = 'G0 语种护栏拦截了全部邮件（检出非白名单中文）';
+    store.upsertCampaign(camp);
+    return { error: camp.gate_note, g0Blocked: blockedList.length };
+  }
+  try {
+    const sendViaEsp = (c) => {
+      if (c.espProvider === 'brevo') return fetchBrevo(pseudoDraft, sendable, c);
+      if (c.espProvider === 'smtp') return fetchSmtp(pseudoDraft, sendable, c);
+      return fetchResend(pseudoDraft, sendable, c);
+    };
+    const r = await breakers.get('esp').exec(() => sendViaEsp(config));
+    recordRows(sendable.map(m => ({ ...m, email: m.email })), 'sent');
+    const c2 = campaignsMod.deriveCounts(store, camp);
+    camp.status = c2.pending === 0 ? 'done' : 'running';
+    camp.scheduled_at = camp.status === 'done' ? 0 : camp.scheduled_at;
+    camp.gate_note = null;
+    store.upsertCampaign(camp);
+    metricsInc('send_real');
+    logEvent('campaign_send', { campaign_id: camp.id, real: true, recipients: sendable.length, g0_blocked: blockedList.length });
+    return { real: true, recipients: sendable.length, g0Blocked: blockedList.length, esp_id: r.id };
+  } catch (e) {
+    // 失败不落 sends（重试只补未发者；recordSendRow 幂等键防重）
+    camp.status = 'running';
+    camp.gate_note = '发送失败：' + String(e && e.message || e).slice(0, 160);
+    store.upsertCampaign(camp);
+    return { error: camp.gate_note, retryable: true };
+  }
+}
+
+// —— 队列 handler：send_campaign（批次发送 job；暂停批次不执行；停发命中 → 冻结不删）——
+async function processCampaignSendJob({ job, payload }) {
+  const camp = store.getCampaign(payload.campaignId);
+  if (!camp) return { skipped: 'campaign not found' };
+  if (camp.status === 'paused') return { skipped: 'paused', reason: '暂停批次的 job 不执行' };
+  if (camp.status === 'done') return { skipped: 'done' };
+  // I2：发送执行点统一停发检查（高于一切单批操作）
+  const blocker = campaignsMod.sendBlocker(store);
+  if (blocker) {
+    if (camp.status !== 'frozen') camp.prev_status = camp.status === 'running' ? 'scheduled' : camp.status;
+    camp.status = 'frozen';
+    camp.freeze_scope = blocker.kind === 'global' ? 'global' : 'calendar';
+    camp.frozen_reason = blocker.reason;
+    camp.updated_at = Date.now();
+    store.upsertCampaign(camp);
+    logEvent('campaign_frozen', { campaign_id: camp.id, kind: blocker.kind });
+    return { frozen: true, kind: blocker.kind, reason: blocker.reason };
+  }
+  const r = await sendCampaignBatch(camp, { viaJob: true });
+  if (r && r.deferred) {
+    // 时段闸缓发：run_after 重新入队（复用 queue 定时，勿绕过）
+    const retryAt = r.retryAt || (Date.now() + 3600 * 1000);
+    queue.enqueue({
+      type: 'send_campaign', payload: { campaignId: camp.id },
+      dedupeKey: 'send_campaign:' + camp.id + ':' + retryAt, runAfter: retryAt
+    });
+    camp.status = 'scheduled';
+    camp.scheduled_at = retryAt;
+    store.upsertCampaign(camp);
+    logEvent('campaign_send_deferred', { campaign_id: camp.id, retry_at: retryAt });
+    return { rescheduled: true, retry_at: retryAt };
   }
   return r;
 }
@@ -1309,6 +1570,8 @@ const server = http.createServer(async (req, res) => {
 
     // —— state：首屏数据（整改 1c：acts/drafts/KPI/趋势按当前用户过滤；audience 店铺级共享）——
     if (pathname === '/api/state' && method === 'GET') {
+      // Wave 3 I2：读点对账停发日历（窗口已过 → 日历冻结批次自动顺延恢复 + resume_note 提示）
+      campaignsMod.reconcileBlackout(store);
       return sendJson(res, 200, {
         status: cfg.status(config),
         engine: engineOnline() ? 'online' : 'degraded',   // PRD v2：llm 熔断 closed→online，open/half-open→degraded
@@ -1319,7 +1582,11 @@ const server = http.createServer(async (req, res) => {
         week: store.getKpisWeek(config.mode, req.userId),   // UI v4 整改 2：叙事条本周口径
         trend: store.getTrend(req.userId),
         metrics: loadMetrics(),
-        demoAnchorRoi: 24.9
+        demoAnchorRoi: 24.9,
+        // —— Wave 3 批次域契约③ ——
+        campaigns: store.getCampaignsByUser(req.userId).map(c => campaignsMod.publicCampaign(store, c)),
+        blackout: blackoutContract(),
+        global_paused: campaignsMod.getGlobalPaused(store)
       });
     }
 
@@ -1398,6 +1665,7 @@ const server = http.createServer(async (req, res) => {
         const r = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
+          executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
           persist: () => store.upsertAct(act)
         });
         persistAgentProfile(r, req.userId);
@@ -1446,6 +1714,7 @@ const server = http.createServer(async (req, res) => {
         result = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
+          executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
           onReplyToken,
           persist: () => store.upsertAct(act)
         });
@@ -1489,7 +1758,9 @@ const server = http.createServer(async (req, res) => {
         stage: persistedAct.stage,
         act: persistedAct,
         engine: result.engine || (engineOnline() ? 'online' : 'degraded'),
-        chips: result.chips || []
+        chips: result.chips || [],
+        // Wave 3 I1：batch_plan 待确认时下发待确认批次卡（前端据 result.batches 渲染）
+        ...(result.batches ? { batches: result.batches } : {})
       });
       res.end();
       return;
@@ -1636,6 +1907,25 @@ const server = http.createServer(async (req, res) => {
       if (['sent', 'sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
       }
+      // —— Wave 3 I2：发送入口统一停发检查（高于一切单批操作）——
+      //   日历命中 → 顺延重排（202，复用 run_after；不删除不丢弃）；紧急全停 → 409（无已知恢复时刻，
+      //   绝不自动恢复，商家明说「恢复吧」解除全停后重新发送）。
+      const blocker0 = campaignsMod.sendBlocker(store);
+      if (blocker0) {
+        if (blocker0.kind === 'calendar') {
+          const retryAt = blocker0.retryAt || (Date.now() + 3600 * 1000);
+          const { job } = queue.enqueue({
+            type: 'send_draft', payload: { draftId: draft.id },
+            dedupeKey: 'send:sched:' + draft.id + ':' + retryAt, runAfter: retryAt
+          });
+          draft.status = 'queued';
+          draft.scheduled_at = retryAt;
+          store.upsertDraft(draft);
+          logEvent('send_deferred_blackout', { draft_id: draft.id, retry_at: retryAt, reason: blocker0.reason });
+          return sendJson(res, 202, { job_id: job.id, queued: true, scheduled_at: retryAt, deferred: 'blackout', reason: blocker0.reason, draft });
+        }
+        return sendJson(res, 409, { ok: false, error: blocker0.reason + '。解除全停（明说「恢复吧」）后再发送' });
+      }
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
       // 注：主题/正文不在 D3 四字段 diff 口径内（audience/discount/count/estGmv），不破坏快照同源
       try {
@@ -1712,6 +2002,244 @@ const server = http.createServer(async (req, res) => {
         holdout: holdoutContract,
         draft
       });
+    }
+
+    /* ================= Wave 3 批次域端点（I1/I2/I3/I4；前端并行开发契约②） ================= */
+
+    // —— 建批（I1）：逐批建（逐批独立 E2 建码；某批失败该批 draft+code_status=failed，其余照建）
+    //    人群重叠自动 I4 排除（重叠者归先发批）；建批 ≠ 发送（无 scheduled_at → draft）。
+    //    body: {batches:[{name?, audience_desc, offer_text, percent_off?, scheduled_at?}], exclusion_override?:bool}
+    if (pathname === '/api/campaigns' && method === 'POST') {
+      const body = await readBody(req);
+      const batches = Array.isArray(body.batches) ? body.batches : [];
+      if (!batches.length || !batches.every(b => b && String(b.audience_desc || b.audience || '').trim())) {
+        return sendJson(res, 400, { error: 'batches 不能为空，每批要带 audience_desc（针对谁）' });
+      }
+      const r = await campaignsMod.createCampaigns(store, {
+        batches: batches.map(b => ({
+          name: b.name, audience_desc: String(b.audience_desc || b.audience || '').slice(0, 60),
+          offer_text: String(b.offer_text || b.offer || '').slice(0, 120),
+          percent_off: Number(b.percent_off) || undefined,
+          scheduled_at: Number(b.scheduled_at) || 0
+        })),
+        userId: req.userId, matcher: campaignMatcher, connector: connectors,
+        brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack',
+        exclusionOverride: Boolean(body.exclusion_override)
+      });
+      logEvent('campaigns_created', { count: r.campaigns.length, failures: r.failures.length, override: Boolean(body.exclusion_override) });
+      return sendJson(res, 200, {
+        ok: true,
+        campaigns: r.campaigns.map(c => campaignsMod.publicCampaign(store, c)),
+        failures: r.failures,
+        ...(r.advice ? { advice: r.advice } : {})
+      });
+    }
+
+    // —— 批次列表（含派生计数：sent/pending 一律从 sends/holdouts 派生）
+    if (pathname === '/api/campaigns' && method === 'GET') {
+      campaignsMod.reconcileBlackout(store);
+      return sendJson(res, 200, {
+        ok: true,
+        campaigns: store.getCampaignsByUser(req.userId).map(c => campaignsMod.publicCampaign(store, c)),
+        blackout: blackoutContract(),
+        global_paused: campaignsMod.getGlobalPaused(store)
+      });
+    }
+
+    // 批次归属校验 + 加载（404 语义与 drafts 一致）
+    function loadCampaignForRequest(id) {
+      const camp = store.getCampaign(id);
+      if (!camp) return { error: [404, 'campaign not found'] };
+      if (camp.user_id && req.userId && camp.user_id !== req.userId) return { error: [404, 'campaign not found'] };
+      return { camp };
+    }
+
+    // —— 批次发送（建批 ≠ 发送；可指定 scheduled_at 错时发；复用 queue run_after）——
+    //    停发命中 → 该批 frozen（不删不发送）；时段闸不过 → 202 缓发；其余闸门不过 → 409 checklist。
+    const csid = pathname.match(/^\/api\/campaigns\/([\w-]+)\/send$/);
+    if (csid && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(csid[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      let body = {};
+      try { body = await readBody(req); } catch (e) { body = {}; }
+      // I2：发送入口统一停发检查（高于一切单批操作）
+      const blocker = campaignsMod.sendBlocker(store);
+      if (blocker) {
+        if (camp.status !== 'frozen') camp.prev_status = camp.status;
+        camp.status = 'frozen';
+        camp.freeze_scope = blocker.kind === 'global' ? 'global' : 'calendar';
+        camp.frozen_reason = blocker.reason;
+        camp.updated_at = Date.now();
+        store.upsertCampaign(camp);
+        logEvent('campaign_frozen', { campaign_id: camp.id, kind: blocker.kind });
+        return sendJson(res, 202, {
+          ok: true, frozen: true, kind: blocker.kind, reason: blocker.reason,
+          campaign: campaignsMod.publicCampaign(store, camp)
+        });
+      }
+      const scheduledAt = Number(body.scheduled_at) || 0;
+      if (scheduledAt > Date.now()) {
+        camp.status = 'scheduled';
+        camp.scheduled_at = scheduledAt;
+        store.upsertCampaign(camp);
+        const { job } = queue.enqueue({
+          type: 'send_campaign', payload: { campaignId: camp.id },
+          dedupeKey: 'send_campaign:' + camp.id + ':' + scheduledAt, runAfter: scheduledAt
+        });
+        logEvent('campaign_scheduled', { campaign_id: camp.id, scheduled_at: scheduledAt, job_id: job.id });
+        return sendJson(res, 202, { ok: true, job_id: job.id, queued: true, campaign: campaignsMod.publicCampaign(store, camp) });
+      }
+      const gates = await campaignsMod.evaluateCampaignGates(store, camp, { connector: connectors, publicBaseUrl: config.publicBaseUrl });
+      const failing = gates.items.filter(i => !i.pass);
+      if (failing.length === 1 && failing[0].gate === 'window') {
+        const retryAt = gates.windowRetryAt || (Date.now() + 3600 * 1000);
+        camp.status = 'scheduled';
+        camp.scheduled_at = retryAt;
+        store.upsertCampaign(camp);
+        const { job } = queue.enqueue({
+          type: 'send_campaign', payload: { campaignId: camp.id },
+          dedupeKey: 'send_campaign:' + camp.id + ':' + retryAt, runAfter: retryAt
+        });
+        return sendJson(res, 202, {
+          ok: true, job_id: job.id, queued: true, deferred: 'window', scheduled_at: retryAt,
+          checklist: { items: gates.items, all_pass: false },
+          campaign: campaignsMod.publicCampaign(store, camp)
+        });
+      }
+      if (failing.length) {
+        logEvent('campaign_gate_fail', { campaign_id: camp.id, gates: failing.map(f => f.gate) });
+        return sendJson(res, 409, { ok: false, checklist: { items: gates.items, all_pass: false } });
+      }
+      if (!rateLimitOk()) {
+        return sendJson(res, 429, { error: '发送频率超限（每分钟上限 ' + (config.sendRateLimitPerMin || 20) + '），请稍后再试' });
+      }
+      const { job } = queue.enqueue({ type: 'send_campaign', payload: { campaignId: camp.id }, dedupeKey: 'send_campaign:' + (req.userId || 'anon') + ':' + camp.id });
+      logEvent('campaign_send_queued', { campaign_id: camp.id, job_id: job.id, sendable: gates.allow.length, skipped_by_frequency: gates.skippedByFrequency });
+      return sendJson(res, 202, { ok: true, job_id: job.id, queued: true, campaign: campaignsMod.publicCampaign(store, camp) });
+    }
+
+    // —— I3 暂停（恢复必须用户明说；空批边界照给）
+    const cpm = pathname.match(/^\/api\/campaigns\/([\w-]+)\/pause$/);
+    if (cpm && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(cpm[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      const r = campaignsMod.pauseCampaign(store, camp, { scope: 'user' });
+      if (!r.ok) return sendJson(res, 409, { ok: false, error: r.reason });
+      return sendJson(res, 200, { ok: true, campaign: campaignsMod.publicCampaign(store, camp), boundary: campaignsMod.boundaryOf(camp, store) });
+    }
+
+    // —— I3 恢复（global_paused 期间拒绝；恢复须用户明说 —— 本端点即用户显式动作）
+    const crm = pathname.match(/^\/api\/campaigns\/([\w-]+)\/resume$/);
+    if (crm && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(crm[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      const r = campaignsMod.resumeCampaign(store, camp);
+      if (!r.ok) return sendJson(res, 409, { ok: false, error: r.reason });
+      return sendJson(res, 200, { ok: true, campaign: campaignsMod.publicCampaign(store, camp), boundary: campaignsMod.boundaryOf(camp, store) });
+    }
+
+    // —— I3 改折扣：只改未发部分；力度变化 → 建新码（E2），旧码仅对已发邮件继续有效
+    const cdm2 = pathname.match(/^\/api\/campaigns\/([\w-]+)\/discount$/);
+    if (cdm2 && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(cdm2[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      const body = await readBody(req);
+      const r = await campaignsMod.changeDiscount(store, camp, { percentOff: body.percent_off, connector: connectors });
+      if (!r.ok) return sendJson(res, 409, { ok: false, error: r.reason });
+      logEvent('campaign_discount_changed', { campaign_id: camp.id, code: r.code, old_code: r.oldCode });
+      return sendJson(res, 200, {
+        ok: true, campaign: campaignsMod.publicCampaign(store, camp),
+        boundary: campaignsMod.boundaryOf(camp, store), changed: r.changed
+      });
+    }
+
+    // —— I3 排除：从未发名单即时移除、逐条留痕；操作对象是已发部分 → 拒绝并解释
+    const cem = pathname.match(/^\/api\/campaigns\/([\w-]+)\/exclude$/);
+    if (cem && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(cem[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      const body = await readBody(req);
+      const r = campaignsMod.excludeFromCampaign(store, camp, { emails: body.emails, allOpened: Boolean(body.all_opened) });
+      if (!r.ok) return sendJson(res, 409, { ok: false, error: r.reason, rejected: r.rejected || [] });
+      return sendJson(res, 200, {
+        ok: true, campaign: campaignsMod.publicCampaign(store, camp),
+        boundary: campaignsMod.boundaryOf(camp, store), excluded_count: r.excluded_count,
+        rejected: r.rejected || []
+      });
+    }
+
+    // —— I3 重发：生成新批次（新码、可换主题行）；频次护栏未确认 → 409 needs_confirm + 风险数字
+    const crm2 = pathname.match(/^\/api\/campaigns\/([\w-]+)\/resend$/);
+    if (crm2 && method === 'POST') {
+      const { camp, error } = loadCampaignForRequest(crm2[1]);
+      if (error) return sendJson(res, error[0], { error: error[1] });
+      const body = await readBody(req);
+      const r = await campaignsMod.resendCampaign(store, camp, {
+        subject: String(body.subject || '').slice(0, 120),
+        confirmFrequency: Boolean(body.confirm_frequency),
+        connector: connectors, userId: req.userId,
+        brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack'
+      });
+      if (!r.ok && r.needs_confirm) {
+        return sendJson(res, 409, { ok: false, needs_confirm: true, risk: r.risk, hint: r.hint });
+      }
+      if (!r.ok) return sendJson(res, 409, { ok: false, error: r.reason });
+      logEvent('campaign_resend', { source_id: camp.id, new_id: r.camp.id });
+      return sendJson(res, 200, {
+        ok: true, campaign: campaignsMod.publicCampaign(store, r.camp),
+        boundary: campaignsMod.boundaryOf(camp, store)
+      });
+    }
+
+    // —— I2 停发日历：挂 / 撤 / 查（日期区间如黑五；可提前挂）
+    if (pathname === '/api/blackout' && method === 'POST') {
+      const body = await readBody(req);
+      const parsed = campaignsMod.parseBlackoutRange({ from: body.from, to: body.to, label: body.label });
+      if (!parsed.ok) return sendJson(res, 400, { ok: false, error: parsed.error });
+      const row = store.addBlackout({ user_id: req.userId || null, from: parsed.range.from, to: parsed.range.to, label: parsed.range.label });
+      logEvent('blackout_added', { blackout_id: row.id, label: row.label, from: row.from, to: row.to });
+      return sendJson(res, 200, { ok: true, blackout: { id: row.id, from: campaignsMod.isoDay(row.from), to: campaignsMod.isoDay(row.to - 1), label: row.label }, active: campaignsMod.activeBlackoutRange(store) != null });
+    }
+    if (pathname === '/api/blackout' && method === 'GET') {
+      return sendJson(res, 200, blackoutContract());
+    }
+    const bdm = pathname.match(/^\/api\/blackout\/([\w-]+)$/);
+    if (bdm && method === 'DELETE') {
+      const removed = store.deleteBlackout(bdm[1]);
+      if (!removed) return sendJson(res, 404, { error: 'blackout not found' });
+      // 撤日历 → 已结束的窗口立刻对账（日历冻结批次顺延恢复 + 重排 job）
+      const restored = campaignsMod.reconcileBlackout(store);
+      for (const camp of restored) {
+        if (camp.scheduled_at) {
+          queue.enqueue({
+            type: 'send_campaign', payload: { campaignId: camp.id },
+            dedupeKey: 'send_campaign:' + camp.id + ':' + camp.scheduled_at, runAfter: camp.scheduled_at
+          });
+        }
+      }
+      logEvent('blackout_removed', { blackout_id: bdm[1], restored: restored.length });
+      return sendJson(res, 200, { ok: true, restored: restored.map(c => campaignsMod.publicCampaign(store, c)) });
+    }
+
+    // —— I2 紧急全停 / 解除（解除必须用户明说「恢复吧」触发本端点，绝无自动路径）
+    if (pathname === '/api/pause-all' && method === 'POST') {
+      const r = campaignsMod.pauseAll(store);
+      logEvent('pause_all', { paused: r.paused, frozen: r.frozen });
+      return sendJson(res, 200, { ok: true, global_paused: true, paused: r.paused, frozen: r.frozen });
+    }
+    if (pathname === '/api/resume-all' && method === 'POST') {
+      const r = campaignsMod.resumeAll(store);
+      // 解除后重排因全停冻结、有排程时刻的批次 job
+      for (const camp of campaignsMod.allCampaigns(store)) {
+        if (camp.status === 'scheduled' && camp.scheduled_at) {
+          queue.enqueue({
+            type: 'send_campaign', payload: { campaignId: camp.id },
+            dedupeKey: 'send_campaign:' + camp.id + ':' + camp.scheduled_at, runAfter: camp.scheduled_at
+          });
+        }
+      }
+      logEvent('resume_all', { resumed: r.resumed_count });
+      return sendJson(res, 200, { ok: true, global_paused: false, resumed: r.resumed, resumed_count: r.resumed_count });
     }
 
     // —— 受众 ——
@@ -2283,4 +2811,15 @@ server.listen(PORT, () => {
   setInterval(() => queue.enqueue({ type: 'g6_purge', payload: {} }), 3600 * 1000);
   // ⑤ 窗口期满未转化 → 标签 −0.5（每 6 小时检查一次）
   setInterval(() => queue.enqueue({ type: 'tag_expiry', payload: {} }), 6 * 3600 * 1000);
+  // —— Wave 3 I2：启动对账停发日历（窗口已过 → 日历冻结批次自动顺延恢复）并重排其发送 job ——
+  const restoredBoot = campaignsMod.reconcileBlackout(store);
+  for (const camp of restoredBoot) {
+    if (camp.scheduled_at) {
+      queue.enqueue({
+        type: 'send_campaign', payload: { campaignId: camp.id },
+        dedupeKey: 'send_campaign:' + camp.id + ':' + camp.scheduled_at, runAfter: camp.scheduled_at
+      });
+    }
+  }
+  if (restoredBoot.length) logEvent('blackout_reconcile_boot', { restored: restoredBoot.length });
 });

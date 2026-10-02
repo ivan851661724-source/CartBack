@@ -41,8 +41,9 @@ function extrasMap(memory) {
  * 模拟真模型流式：opts.onReplyToken 存在时先逐段推预览，再返回结构化 envelope。
  * events 记录本轮事件序列（llm / persist / token），供 B3「先落库后回复」断言。
  * scriptExhausted 时抛错（模拟模型失联 → 引擎离线降级）。
+ * extraOpts：附加引擎注入缝（Wave 3 批次域 executors 等），向后兼容。
  */
-function makeScriptedEngine(envelopes, events) {
+function makeScriptedEngine(envelopes, events, extraOpts = {}) {
   const script = envelopes.slice();
   const ev = events || [];
   return new IGDE({
@@ -56,7 +57,8 @@ function makeScriptedEngine(envelopes, events) {
         for (let i = 0; i < env.reply.length; i += 4) opts.onReplyToken(env.reply.slice(i, i + 4));
       }
       return env;
-    }
+    },
+    ...extraOpts
   });
 }
 

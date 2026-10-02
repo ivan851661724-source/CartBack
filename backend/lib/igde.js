@@ -65,7 +65,8 @@ const FALLBACK_POOL = [
 ];
 
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
-const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后)/i;
+// Wave 3：批次域动作词（批次/停发/全停/暂停/恢复/重发）也是业务词 —— 运维话术不得被离题路由劫持
+const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发)/i;
 
 // —— 离题/元问题/身份询问 的温和接住池（桩与模型降级共用，_rotateReply 轮换防复读；guardrailHits 记空，非边界拒绝）——
 const OFFTOPIC_POOL = [
@@ -156,6 +157,91 @@ function extractNeeds(text) {
     out.offer = m ? '送' + m[1].replace(/[吧呢啦哦呀了]+$/, '') : '赠送礼品';
   }
   return out;
+}
+
+// —— Wave 3 批次/运维短语（I1/I2/I3 降级词表；整短语匹配，禁碎片切片）——
+// 返回 null = 本句无运维意图；否则 {kind, ...}：
+//   batch_plan / pause_all / resume_all / blackout{params:{from,to,label}} / resend{target,subject} / op{op,target,params}
+function parseDateRangeZh(t) {
+  const pad = (n) => String(n).padStart(2, '0');
+  const y = new Date().getFullYear();
+  const iso = (m, d) => `${y}-${pad(m)}-${pad(d)}`;
+  let m = t.match(/(\d{4})[-/年]\s*(\d{1,2})[-/月]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|–|—|~|,|，|-)\s*(\d{4})[-/年]\s*(\d{1,2})[-/月]\s*(\d{1,2})/);
+  if (m) return { from: `${m[1]}-${pad(m[2])}-${pad(m[3])}`, to: `${m[4]}-${pad(m[5])}-${pad(m[6])}` };
+  m = t.match(/(\d{1,2})\s*[月/]\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|–|—|~|,|，|-)\s*(\d{1,2})\s*[月/]\s*(\d{1,2})/);
+  if (m) return { from: iso(+m[1], +m[2]), to: iso(+m[3], +m[4]) };
+  m = t.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*(?:日|号)?\s*(?:到|至|–|—|~|-)\s*(\d{1,2})\s*(?:日|号)?/);
+  if (m) return { from: iso(+m[1], +m[2]), to: iso(+m[1], +m[3]) };
+  return null;
+}
+
+function extractOps(text) {
+  const t = String(text || '');
+  const tt = t.trim();
+  // 恢复全停（必须明说「恢复吧」类短语，绝不自动）
+  if (/^(恢复吧|恢复发送|全部恢复|都恢复|恢复所有|恢复排程|解除全停)/.test(tt)) return { kind: 'resume_all' };
+  // 全停 / 停发（含日期 → 日历；无日期 → 紧急全停）
+  if (/(先全停|全停|都停发|全店暂停|紧急停发|暂停一切|都先别发|停止发送)/.test(t)) {
+    const range = parseDateRangeZh(t);
+    if (range) return { kind: 'blackout', params: { ...range, label: (t.match(/[「『]([^」』]{1,20})[」』]/) || [])[1] || '停发' } };
+    return { kind: 'pause_all' };
+  }
+  if (/停发|别发|暂停发送/.test(t)) {
+    const range = parseDateRangeZh(t);
+    if (range) return { kind: 'blackout', params: { ...range, label: (t.match(/[「『]([^」』]{1,20})[」』]/) || [])[1] || '停发' } };
+  }
+  // 重发（频次护栏确认流）
+  if (/再打一轮|重发|再发一轮|没打开的再/.test(t)) {
+    return { kind: 'resend', target: extractOpsTarget(t), subject: (t.match(/主题[行为]?\s*[「『]([^」』]+)[」』]/) || [])[1] || '' };
+  }
+  // 单批折扣：「改成 15%」
+  const dm = t.match(/(?:改成|改为|换成|调整为?)\s*(\d{1,2}(?:\.\d+)?)\s*%/);
+  if (dm) return { kind: 'op', op: 'discount', target: extractOpsTarget(t), params: { percent_off: +dm[1] } };
+  // 单批暂停/恢复
+  if (/暂停/.test(t)) return { kind: 'op', op: 'pause', target: extractOpsTarget(t) };
+  if (/恢复/.test(t)) return { kind: 'op', op: 'resume', target: extractOpsTarget(t) };
+  // 建批（I1）：≥2 批的明确说法
+  if (/两个批次|两批|分别建批|分别做(成)?(两|2)?批|拆(成)?(两|2)批|建两个|三个批次|三批|几批|多个批次/.test(t)) {
+    return { kind: 'batch_plan' };
+  }
+  return null;
+}
+
+/** 从原话提取批次指代（A 批 / 批次 A / 第一封 / 第 2 批 / 加购未付那批；无指代 null） */
+function extractOpsTarget(t) {
+  let m = t.match(/([A-Ja-j])\s*(?:批|批次)/);                      // 「A 批暂停」
+  if (m) return { letter: m[1].toUpperCase() };
+  m = t.match(/(?:批次|批)\s*([A-Ja-j])(?![A-Za-z])/);              // 「批次 A 暂停」
+  if (m) return { letter: m[1].toUpperCase() };
+  m = t.match(/第\s*([一二三四五六七八九十]|\d{1,2})\s*(?:个|批|批次|封)/);
+  if (m) return { ordinal: m[1] };
+  m = t.match(/([\u4e00-\u9fff]{2,8})那批|那批([\u4e00-\u9fff]{2,8})/);
+  if (m) return { keyword: m[1] || m[2] };
+  return null;
+}
+
+/** 降级建批：从原话按出现顺序提取人群（整词匹配，禁碎片切片）；offer 沿用槽位/原话数值 */
+function batchesFromText(text, act) {
+  const t = String(text || '');
+  const found = [];
+  const scan = [
+    [/加购/, '加购未付'],
+    [/下单未付|弃购/, '下单未付'],
+    [/浏览/, '浏览未买'],
+    [/老客|沉睡|流失/, '老客']
+  ];
+  const hits = [];
+  for (const [re, label] of scan) {
+    const m = re.exec(t);
+    if (m) hits.push({ at: m.index, label });
+  }
+  hits.sort((a, b) => a.at - b.at);
+  for (const h of hits) if (!found.includes(h.label)) found.push(h.label);
+  if (found.length < 2) return [];
+  const pctM = t.match(/(\d{1,2}(?:\.\d+)?)\s*%/);
+  const needsOffer = (act && act.needs && act.needs.offer && act.needs.offer.value) || '';
+  const offerText = pctM ? `${pctM[1]}% off` : (needsOffer || '10% off');
+  return found.map(aud => ({ audience_desc: aud, offer_text: offerText }));
 }
 
 // —— B1 critic 护栏：slot_update 的 value 必须在本轮用户消息原文中有语义依据 ——
@@ -288,6 +374,9 @@ class IGDE {
     this.callAI = opts.callAI || null;
     this.callCritic = opts.callCritic || null;
     this.contextOptions = opts.contextOptions || {};
+    // Wave 3 批次/运维执行器（I1/I2/I3）：server 注入（store/connector 感知）；
+    // 也可经 handle() 的 opts.executors 按请求注入（带 userId 作用域）。缺省 = 批次域不劫持对话。
+    this.executors = opts.executors || null;
     this.maxLlmCallsPerTurn = Math.max(1, Math.min(8, Number(opts.maxLlmCallsPerTurn) || 3));
     this.criticMode = ['always', 'suspicious', 'off'].includes(opts.criticMode)
       ? opts.criticMode
@@ -550,6 +639,36 @@ class IGDE {
     // —— B2 合并：correction > 新值 > 同值忽略；冲突检测；extras 纠错；C6 兜底 ——
     const mergeResult = this._mergeTurn(act, turn, runtime);
 
+    // —— Wave 3 批次域（I1/I2/I3）：batch_plan / campaign_ops / 降级词表 / 待确认确认流 ——
+    //  命中即短路本轮常规 B4 流水线（运维轮的回复由执行器结构化结果确定性组装，不进桩/模型话术层）。
+    const executors = opts.executors || this.executors || null;
+    if (executors) {
+      const opsTurn = await this._handleOpsTurn(act, userText, env, usedAI, executors);
+      if (opsTurn) {
+        let opsReply = guardrailL1(opsTurn.reply || '');
+        if (!guardrailL0(opsReply) || opsReply.trim().length < 2) { opsReply = this._pickFallback(act); guardrailHits.push('L0'); }
+        if (!guardrailL2(opsReply)) { opsReply = this._pickFallback(act); guardrailHits.push('L2'); }
+        if (!guardrailL4(opsReply, act.stage)) { opsReply = this._pickFallback(act); guardrailHits.push('L4'); }
+        act.messages.push({ role: 'user', content: userText, ts: nowMs });
+        act.messages.push({ role: 'assistant', content: opsReply, ts: nowMs });
+        act.updated_at = nowMs;
+        // 运维轮不推进 FSM（「改成 15%」这类措辞不应把 S3 打回 S2 作废快照）
+        const opsPlanCard = (act.stage === 'S3' && act.plan_card) ? act.plan_card : null;
+        await doPersist();
+        if (opts.onReplyToken && tokenBuffer.length) {
+          for (const p of tokenBuffer) opts.onReplyToken(p);
+        }
+        return {
+          reply: opsReply, stage: act.stage, needs: act.needs, planCard: opsPlanCard, guardrailHits,
+          engine: this._engineOf(usedAI && !aiDead),
+          chips: opsTurn.chips || [], askedSlot: null,
+          campaignOps: opsTurn.opResults || null,
+          batches: opsTurn.batches || null,   // done 帧 batches：batch_plan 待确认时下发（前端画待确认批次卡）
+          agentMeta: this._agentMeta(runtime)
+        };
+      }
+    }
+
     // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
     // 有真模型时，_aiCoach 已自然接住离题，此处若兜底会覆盖模型的正常回复 → 必须跳过。
     if (!usedAI && this._offTopicWeak(act, userText, filledBefore)) {
@@ -684,6 +803,237 @@ class IGDE {
 
   /** 本轮引擎档位：online = 走了真实模型 envelope；degraded = 桩 / AI 失败（G2 降级路径） */
   _engineOf(online) { return online ? 'online' : 'degraded'; }
+
+  /* ------------------- Wave 3 批次域（I1/I2/I3）------------------- */
+
+  // 待确认批次计划的确认/否认短语（仅 pending 存在时才参与判定，不影响常规对话）
+  _confirmOpsRe() { return /确认建批|建批吧|建吧|就这么建|就这样建|确认重发|重发吧|确认|对的?|没错|可以|行|好吧|ok|就这样|是的/i; }
+  _denyOpsRe() { return /不对|先不|别建|不建|先等等|等一下|等下|改一下|再想想|取消|先别|暂不|再改改|不对哦/i; }
+
+  /**
+   * 批次/运维轮主入口。返回 null = 本轮无运维语义（回归常规 B4 流水线）。
+   * 判定顺序：待确认批次 → 待确认重发 → envelope campaign_ops → envelope batch_plan → 降级词表。
+   */
+  async _handleOpsTurn(act, userText, env, usedAI, executors) {
+    const pending = (act.pending_ops && typeof act.pending_ops === 'object') ? act.pending_ops : {};
+    const text = String(userText || '').trim();
+    const confirm = this._confirmOpsRe().test(text);
+    const deny = this._denyOpsRe().test(text);
+
+    // ① 待确认批次计划（I1：0 静默建批 —— plan 轮绝不建，确认才建）
+    if (Array.isArray(pending.batches) && pending.batches.length && !deny) {
+      if (confirm) {
+        let r = null;
+        try { r = await executors.createBatches(pending.batches, { exclusionOverride: Boolean(pending.exclusion_override) }); } catch (e) { r = null; }
+        act.pending_ops = null;
+        if (r) return { reply: this._composeCreated(r), chips: [], opResults: [{ op: 'create_batches', ok: true, count: (r.campaigns || []).length }] };
+        return { reply: '建批的时候店铺那边出了点状况，稍后再说一次「确认建批」我就再试。', chips: [], opResults: [{ op: 'create_batches', ok: false }] };
+      }
+      // I4 覆盖：「别排除，就要发」→ 先提示风险，确认建批时照建并留痕
+      if (/别排除|不要排除|不用排除|不排除|就要发|都得发|都要发|照发/.test(text) && !pending.exclusion_override) {
+        pending.exclusion_override = true;
+        act.pending_ops = pending;
+        return {
+          reply: '行，风险得先说明白：被排除的人里可能有刚买过单的、刚收过邮件的，重复打扰容易伤名单、退订率会涨。你坚持的话，回「确认建批」我就按不排除建，并留痕备查。',
+          chips: ['确认建批', '改一下'], opResults: [{ op: 'exclusion_override', ok: true }]
+        };
+      }
+    }
+    if (Array.isArray(pending.batches) && pending.batches.length && deny) {
+      act.pending_ops = null;
+      return { reply: '好，这份先不建。要调哪一批（人群 / 钩子 / 时间）直接说。', chips: [], opResults: [{ op: 'cancel_plan', ok: true }] };
+    }
+
+    // ② 待确认重发（I3 频次护栏确认流）
+    if (pending.resend) {
+      if (confirm) {
+        let r = null;
+        try { r = await executors.campaignOp({ op: 'resend', campaign_id: pending.resend.campaign_id, params: { subject: pending.resend.subject || '', confirm_frequency: true } }); } catch (e) { r = null; }
+        act.pending_ops = null;
+        return { reply: this._composeOpReply('resend', r) || '重发没成，稍后再试。', chips: [], opResults: [{ op: 'resend', ok: Boolean(r && r.ok) }] };
+      }
+      if (deny) {
+        act.pending_ops = null;
+        return { reply: '好，不重发了，名单先养一养。', chips: [], opResults: [{ op: 'cancel_resend', ok: true }] };
+      }
+    }
+
+    // ③ envelope campaign_ops（在线路径）：引擎校验 op 枚举后逐条经执行器落地
+    const rawOps = Array.isArray(env.campaignOps) ? env.campaignOps : [];
+    const ops = rawOps.filter(o => o && typeof o === 'object' && typeof o.op === 'string'
+      && ['pause', 'resume', 'discount', 'exclude', 'resend', 'pause_all', 'resume_all', 'blackout'].includes(String(o.op).trim()));
+    if (ops.length) {
+      const results = [];
+      const parts = [];
+      for (const rawOp of ops.slice(0, 6)) {
+        const kind = String(rawOp.op).trim();
+        const params = (rawOp.params && typeof rawOp.params === 'object') ? rawOp.params : {};
+        const r = await this._execOneOp(executors, kind, {
+          target: rawOp.target != null ? String(rawOp.target) : null,
+          campaignId: rawOp.campaign_id || null,
+          params
+        }).catch(() => null);
+        results.push({ op: kind, ...(r || { ok: false }) });
+        parts.push(this._composeOpReply(kind, r));
+      }
+      const reply = parts.filter(Boolean).join('\n');
+      if (reply) return { reply, chips: [], opResults: results };
+    }
+
+    // ④ envelope batch_plan（在线路径）：不落库 —— 逐批复述 + chips，等用户下轮确认
+    const rawPlan = Array.isArray(env.batchPlan) ? env.batchPlan : [];
+    const batchPlan = rawPlan.filter(b => b && typeof b === 'object' && String(b.audience || b.audience_desc || '').trim());
+    if (batchPlan.length) {
+      return this._planBatchesTurn(act, batchPlan.map(b => ({
+        name: b.name,
+        audience_desc: String(b.audience_desc || b.audience).trim(),
+        offer_text: String(b.offer || b.offer_text || '').trim(),
+        percent_off: Number(b.percent_off) || undefined,
+        scheduled_at: Number(b.scheduled_at) || undefined
+      })), executors);
+    }
+
+    // ⑤ 降级词表（仅桩 / AI 失败路径；整短语匹配，禁碎片切片）
+    if (!usedAI) {
+      const op = extractOps(text);
+      if (op && op.kind === 'batch_plan') {
+        const batches = batchesFromText(text, act);
+        if (batches.length) return this._planBatchesTurn(act, batches, executors);
+      }
+      if (op && op.kind === 'pause_all') {
+        const r = await executors.pauseAll().catch(() => null);
+        if (r) return { reply: this._composeOpReply('pause_all', r), chips: [], opResults: [{ op: 'pause_all', ok: true, ...r }] };
+      }
+      if (op && op.kind === 'resume_all') {
+        const r = await executors.resumeAll().catch(() => null);
+        if (r) return { reply: this._composeOpReply('resume_all', r), chips: [], opResults: [{ op: 'resume_all', ok: true, ...r }] };
+      }
+      if (op && op.kind === 'blackout') {
+        const r = await executors.addBlackout(op.params).catch(() => null);
+        if (r) return { reply: this._composeOpReply('blackout', r), chips: [], opResults: [{ op: 'blackout', ok: Boolean(r.ok), ...(r) }] };
+      }
+      if (op && (op.kind === 'resend' || op.kind === 'op')) {
+        // 单批操作：目标能解析到真实批次才接手（否则不劫持正常对话）
+        const resolved = executors.resolveTarget ? await executors.resolveTarget(op.target || null) : null;
+        if (resolved) {
+          const passTarget = op.target != null ? op.target : { campaign_id: resolved.campaign_id };
+          if (op.kind === 'resend') {
+            const r = await executors.campaignOp({ op: 'resend', target: passTarget, params: { subject: op.subject || '', confirm_frequency: false } }).catch(() => null);
+            if (r && r.needs_confirm) {
+              act.pending_ops = { ...(act.pending_ops || {}), resend: { campaign_id: r.campaign_id, subject: op.subject || '' } };
+              return {
+                reply: `先等一下——${r.risk}。重复打扰容易伤名单，确认要再打一轮就回「确认重发」。`,
+                chips: ['确认重发', '先不重发'], opResults: [{ op: 'resend', ok: false, needs_confirm: true }]
+              };
+            }
+            if (r && r.ok) return { reply: this._composeOpReply('resend', r), chips: [], opResults: [{ op: 'resend', ok: true }] };
+          } else {
+            const r = await executors.campaignOp({ op: op.op, target: passTarget, params: op.params || {} }).catch(() => null);
+            const reply = this._composeOpReply(op.op, r);
+            if (reply) return { reply, chips: [], opResults: [{ op: op.op, ...(r || {}) }] };
+          }
+        }
+      }
+    }
+    return null;
+  }
+
+  /** I1 建批计划轮：逐批复述 + chips，pending 存 act（不落 campaigns 行） */
+  async _planBatchesTurn(act, batches, executors) {
+    const LETTERS = 'ABCDEFGHIJ';
+    let previews = null;
+    try { previews = await executors.previewBatches(batches); } catch (e) { previews = null; }
+    const list = (Array.isArray(previews) && previews.length === batches.length) ? previews
+      : batches.map((b, i) => ({
+        name: b.name || `${LETTERS[i]} ${String(b.audience_desc || '').slice(0, 12)}`,
+        audience_desc: b.audience_desc, offer_text: b.offer_text,
+        percent_off: b.percent_off != null ? b.percent_off : null,
+        reach_count: null, excluded: []
+      }));
+    act.pending_ops = { ...(act.pending_ops || {}), batches: batches.map(b => ({ ...b })) };
+    const parts = list.map(p => {
+      const offer = p.offer_text || (p.percent_off ? `${p.percent_off}% off` : '无钩子');
+      return `批次 ${p.name}：${p.audience_desc}${p.reach_count != null ? ` ${p.reach_count} 人` : ''}，${offer}`;
+    });
+    let reply = `拆成 ${list.length} 批，逐批跟你核对：${parts.join('；')}。对吗？`;
+    const excl = list.flatMap(p => (p.excluded || []));
+    if (excl.length) reply += `（已自动排除：${excl.map(x => `${x.reason} ${x.count} 人`).join('、')}）`;
+    reply += ' 建批后每批独立折扣码、独立走发送闸门，先不发。';
+    if (list.length > 3) reply += ' 批多了你自己也要看不过来，建议合并或排队。';
+    return {
+      reply, chips: ['确认建批', '改一下'],
+      opResults: [{ op: 'batch_plan', ok: true, count: list.length }],
+      batches: list.map(p => ({
+        name: p.name, audience_desc: p.audience_desc,
+        offer_text: p.offer_text || (p.percent_off ? `${p.percent_off}% off` : '无钩子'),
+        reach_count: p.reach_count != null ? p.reach_count : 0
+      }))
+    };
+  }
+
+  /** 建批确认轮的确定性回复（逐批人话名 + 码 + 失败三出口 + 并行批次建议） */
+  _composeCreated(r) {
+    const camps = (r && r.campaigns) || [];
+    const okParts = camps.map(c =>
+      `「${c.name}」${c.discount && c.discount.code ? `（码 ${c.discount.code}，${c.reach_count} 人${c.scheduled_at ? '，已排程' : ''}）` : `（${c.reach_count} 人）`}`);
+    let reply = `好，${camps.length} 批都建好了：${okParts.join('、')}。建批不等于发送，要发哪批说一声，可以指定时间。`;
+    const fails = (r && r.failures) || [];
+    if (fails.length) {
+      reply += ` 另外「${fails[0].name}」建码没成（${fails[0].reason}），先存成草稿，可以：${(fails[0].options || []).join(' / ')}。`;
+    }
+    if (r && r.advice) reply += ` ${r.advice}`;
+    return reply;
+  }
+
+  /** 运维操作的确定性回复（I3 灵魂：边界声明必含） */
+  _composeOpReply(kind, r) {
+    if (!r) return null;
+    if (kind === 'pause_all') {
+      return `已全店紧急停发：运行中的批次转暂停，待发/冻结的批次全部冻结（不删）。恢复必须你明说「恢复吧」，我不会自动恢复。`;
+    }
+    if (kind === 'resume_all') {
+      const n = Number(r.resumed_count != null ? r.resumed_count : (r.resumed || []).length);
+      return `好，全停解除${n ? `，${n} 个批次回到原状态` : ''}。`;
+    }
+    if (kind === 'blackout') {
+      if (r.ok === false || r.error) return `停发日历没挂上：${r.error || r.reason || '区间不对'}`;
+      const g = r.range || {};
+      return `停发日历已挂上：${g.label || '停发'} ${g.from || ''} 到 ${g.to || ''}。窗口内的排程发送会冻结（不删不发送），结束后自动顺延恢复；期间新批次可建、不可发。`;
+    }
+    if (kind === 'pause') {
+      return r.ok ? `好，「${r.name}」已暂停。${r.boundary}。要继续时明说「恢复」。` : `暂停没成：${r.reason}`;
+    }
+    if (kind === 'resume') {
+      return r.ok ? `好，「${r.name}」恢复排程。${r.boundary}。` : `恢复没成：${r.reason}`;
+    }
+    if (kind === 'discount') {
+      if (!r.ok) return `改折扣没成：${r.reason}`;
+      const old = r.oldCode ? `旧码 ${r.oldCode} 对已发邮件继续有效，` : '';
+      return `改好了：「${r.name}」未发部分${(r.changed || []).join('、')}，新码 ${r.code} 只对未发的生效；${old}${r.boundary}。`;
+    }
+    if (kind === 'exclude') {
+      if (!r.ok) return `排除没成：${r.reason}`;
+      const rej = (r.rejected && r.rejected.length) ? `；另有 ${r.rejected.length} 人已发过、存档只读未动` : '';
+      return `已从「${r.name}」未发名单移除 ${r.excluded_count} 人并逐条留痕${rej}。${r.boundary}。`;
+    }
+    if (kind === 'resend') {
+      if (r && r.needs_confirm) return `先等一下——${r.risk}。重复打扰容易伤名单，确认要再打一轮就回「确认重发」。`;
+      if (r && r.ok && r.camp) {
+        return `新批次「${r.camp.name}」已建好（新码 ${((r.camp.discount || {}).code) || '发送前创建'}，${(r.camp.recipients || []).length} 人）。旧批次已发部分不受影响，这轮只动没打开的。`;
+      }
+      return `重发没成：${(r && r.reason) || '未知原因'}`;
+    }
+    return null;
+  }
+
+  /** 单条运维执行（campaign_ops 与降级词表共用） */
+  async _execOneOp(executors, kind, { target, campaignId, params }) {
+    if (kind === 'pause_all') return executors.pauseAll();
+    if (kind === 'resume_all') return executors.resumeAll();
+    if (kind === 'blackout') return executors.addBlackout(params || {});
+    return executors.campaignOp({ op: kind, target, campaign_id: campaignId || null, params: params || {} });
+  }
+
 
   /** B1 critic：envelope slot_updates 逐条校验原文语义依据。confidence<0.6 → inferred；
    *  词表命中直通；无依据 → 丢弃（丢弃优先于降级 inferred）。 */
@@ -1063,6 +1413,7 @@ class IGDE {
     let reply = '';
     const emptyPatch = { facts: [], decisions: [], corrections: [] };
     let slotUpdates = [], extras = [], corrections = [], restatement = [];
+    let batchPlan = [], campaignOps = [];
     let needsLegacy = null, memoryPatch = emptyPatch, profilePatch = {};
     const absorb = (j) => {
       reply = typeof j.reply === 'string' ? j.reply : '';
@@ -1071,6 +1422,9 @@ class IGDE {
         : (Array.isArray(j.slotUpdates) ? j.slotUpdates : []);
       extras = Array.isArray(j.extras) ? j.extras : [];
       corrections = Array.isArray(j.corrections) ? j.corrections : [];
+      // Wave 3 批次域（I1/I3）：可选 batch_plan / campaign_ops（引擎校验后经执行器落地）
+      batchPlan = Array.isArray(j.batch_plan) ? j.batch_plan : (Array.isArray(j.batchPlan) ? j.batchPlan : []);
+      campaignOps = Array.isArray(j.campaign_ops) ? j.campaign_ops : (Array.isArray(j.campaignOps) ? j.campaignOps : []);
       needsLegacy = (j.needs && typeof j.needs === 'object') ? j.needs : null;
       memoryPatch = (j.memory_patch && typeof j.memory_patch === 'object') ? j.memory_patch
         : (j.memoryPatch && typeof j.memoryPatch === 'object' ? j.memoryPatch : emptyPatch);
@@ -1093,7 +1447,7 @@ class IGDE {
         if (slot) slotUpdates.push({ slot: f, value: slot.value, confidence: 1, inferred: false });
       }
     }
-    return { reply, restatement, slotUpdates, extras, corrections, memoryPatch, profilePatch };
+    return { reply, restatement, slotUpdates, extras, corrections, batchPlan, campaignOps, memoryPatch, profilePatch };
   }
 
   /** L2 复核（本地正则 + critic 精判），供重生成后判定 */
@@ -1364,7 +1718,7 @@ class IGDE {
 }
 
 module.exports = {
-  IGDE, extractNeeds, isNonInfo, scopeBoundary,
+  IGDE, extractNeeds, extractOps, extractOpsTarget, batchesFromText, parseDateRangeZh, isNonInfo, scopeBoundary,
   guardrailL0, guardrailL1, guardrailL2, guardrailL3, guardrailL4,
   NEEDED_FIELDS, FIELD_LABEL, PREACH_PATTERNS, D_REDIRECT_POOL, FALLBACK_POOL,
   CORRECTION_TONE_RE, SLOT_CHIPS, valueGroundedInText, clampNeedValue, looksLikeInjection

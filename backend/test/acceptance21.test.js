@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * PRD v2 21 句验收 —— in-scope 14 句（#1-#11、#13、#15、#16）离线自动化。
+ * PRD v2 21 句验收 —— in-scope 18 句（#1-#11、#13、#15-#16；Wave 3 启用 #17-#20）离线自动化。
  *
  * 用例本体在 eval/cases/prd-v2.jsonl（输入唯一来源：14 句 in-scope + 7 句 deferred）；
  * 本测试按序重放到**同一个 act**，逐句断言（断言点 = 任务 B-4 剧本）。
@@ -119,23 +119,112 @@ const ENVELOPES = {
       { slot: 'offer', old: '10% off', new: '15% off' }
     ]
   },
+  // #16 S2 后任意输入：引导确认（envelope 走流式，保证 B3 顺序断言有 token 帧）
   p16: {
     reply: '都核对好了就点「确认发送」，我这边随时开工。有要再调的地方，直接跟我说。',
     restatement: ['收到：商家确认配置'],
     slot_updates: [],
     extras: [],
     corrections: []
+  },
+  // #17（Wave 3 启用）：并列批次 —— batch_plan 待确认，引擎逐批复述（确定性组装，reply 不上屏）
+  p17: {
+    reply: '（拆批确认由引擎按净值预览逐批复述）',
+    restatement: ['收到：拆两批 —— 加购未付、下单未付'],
+    slot_updates: [],
+    extras: [],
+    corrections: [],
+    batch_plan: [{ audience: '加购未付', offer: '10% off' }, { audience: '下单未付', offer: '10% off' }]
+  },
+  // #18（Wave 3 启用）：全局停发 —— 黑五日历 + 紧急全停（恢复须明说）
+  p18: {
+    reply: '（停发编排由引擎确定性组装）',
+    restatement: ['收到：黑五停发 + 先全停'],
+    slot_updates: [],
+    extras: [],
+    corrections: [],
+    campaign_ops: [
+      { op: 'blackout', params: { from: '2026-11-27', to: '2026-11-28', label: '黑五' } },
+      { op: 'pause_all' }
+    ]
+  },
+  // #19（Wave 3 启用）：未发部分改折扣（边界声明）
+  p19: {
+    reply: '（改折扣由引擎组装边界声明）',
+    restatement: ['收到：A 批未发部分折扣改为 15%'],
+    slot_updates: [],
+    extras: [],
+    corrections: [],
+    campaign_ops: [{ op: 'discount', target: 'A', params: { percent_off: 15 } }]
+  },
+  // #20（Wave 3 启用）：建批自动排除（核对单净值 + 逐条明细）
+  p20: {
+    reply: '（建批排除明细由引擎组装）',
+    restatement: ['收到：再建一批加购未付，排除已下单与已触达'],
+    slot_updates: [],
+    extras: [],
+    corrections: [],
+    batch_plan: [{ audience: '加购未付', offer: '10% off' }]
   }
 };
-const IN_SCOPE_ORDER = ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08', 'p09', 'p10', 'p11', 'p13', 'p15', 'p16'];
+const IN_SCOPE_ORDER = ['p01', 'p02', 'p03', 'p04', 'p05', 'p06', 'p07', 'p08', 'p09', 'p10', 'p11', 'p13', 'p15', 'p16', 'p17', 'p18', 'p19', 'p20'];
 
-test('prd-v2.jsonl 结构：21 句齐全，14 句 in-scope / 7 句 deferred', () => {
+/**
+ * Wave 3 批次域执行器桩（I1/I2/I3/I4）：与 server.makeCampaignExecutor 同一结构化结果契约，
+ * 引擎侧人话组装（逐批复述 / 边界声明 / 排除明细）是真实执行的被测对象。
+ */
+function makeWave3Executor() {
+  const calls = { previewBatches: [], createBatches: [], campaignOps: [], pauseAll: 0, resumeAll: 0, addBlackout: [] };
+  const reachOf = (desc) => (String(desc).includes('加购') ? 23 : 17);
+  return {
+    calls,
+    async previewBatches(batches) {
+      calls.previewBatches.push(batches);
+      return batches.map((b, i) => ({
+        name: `${'ABC'[i]} ${b.audience_desc}`,
+        audience_desc: b.audience_desc,
+        offer_text: b.offer_text || '10% off',
+        percent_off: 10,
+        reach_count: reachOf(b.audience_desc),
+        excluded: String(b.audience_desc).includes('加购')
+          ? [{ reason: '已购买（店铺已下单）', count: 2 }, { reason: '频控窗口内已触达', count: 1 }]
+          : []
+      }));
+    },
+    async createBatches(batches) {
+      calls.createBatches.push(batches);
+      return {
+        campaigns: batches.map((b, i) => ({
+          id: 'cmp_' + i, name: `${'ABC'[i]} ${b.audience_desc}`, audience_desc: b.audience_desc,
+          status: 'draft', discount: { text: '', code: 'CART' + (10 + i), code_status: 'created' },
+          reach_count: reachOf(b.audience_desc), scheduled_at: null
+        })),
+        failures: [],
+        advice: null
+      };
+    },
+    resolveTarget() { return { campaign_id: 'cmp_0', name: 'A 加购未付' }; },
+    async campaignOp(o) {
+      calls.campaignOps.push(o);
+      return {
+        ok: true, name: 'A 加购未付', code: 'NEW15', oldCode: 'OLD10',
+        changed: ['折扣改为 15%'], boundary: '已发 18 封不受影响，改的是未发的 5 封'
+      };
+    },
+    async pauseAll() { calls.pauseAll += 1; return { ok: true, paused: 1, frozen: 1 }; },
+    async resumeAll() { calls.resumeAll += 1; return { ok: true, resumed: [], resumed_count: 0 }; },
+    async addBlackout(params) { calls.addBlackout.push(params); return { ok: true, range: { from: params.from, to: params.to, label: params.label } }; }
+  };
+}
+
+test('prd-v2.jsonl 结构：21 句齐全，18 句 in-scope / 3 句 deferred', () => {
   const cases = acc.loadCases(CASES_FILE);
   assert.equal(cases.length, 21, 'prd-v2.jsonl 应含 21 句');
   const inScope = cases.filter(c => !c.deferred);
   const deferred = cases.filter(c => c.deferred);
-  assert.equal(inScope.length, 14, 'in-scope 应为 14 句（Wave 2 启用 #13）');
-  assert.equal(deferred.length, 7, 'deferred 应为 7 句');
+  assert.equal(inScope.length, 18, 'in-scope 应为 18 句（Wave 2 启用 #13、Wave 3 启用 #17-#20）');
+  assert.equal(deferred.length, 3, 'deferred 应为 3 句');
+  assert.deepEqual(deferred.map(c => c.id).sort(), ['p12', 'p14', 'p21'], 'deferred 句仍为 #12/#14/#21');
   for (const c of deferred) assert.deepEqual(c.expect, {}, 'deferred 句断言必须为空对象');
   assert.deepEqual(inScope.map(c => c.id), IN_SCOPE_ORDER, 'in-scope 句序应与剧本一致');
   for (const c of inScope) {
@@ -144,12 +233,15 @@ test('prd-v2.jsonl 结构：21 句齐全，14 句 in-scope / 7 句 deferred', ()
   }
 });
 
-test('13 句 in-scope 重放到同一个 act：逐句断言全过', async () => {
+test('18 句 in-scope 重放到同一个 act：逐句断言全过', async () => {
   const cases = acc.loadCases(CASES_FILE);
   const byId = Object.fromEntries(cases.map(c => [c.id, c]));
 
+  // Wave 3 批次域执行器（I1/I2/I3/I4 结构化结果桩）：人话组装在引擎侧，测试断言调用与确定性回复
+  const executor = makeWave3Executor();
+
   const events = [];
-  const igde = acc.makeScriptedEngine(IN_SCOPE_ORDER.map(id => ENVELOPES[id]), events);
+  const igde = acc.makeScriptedEngine(IN_SCOPE_ORDER.map(id => ENVELOPES[id]), events, { executors: executor });
   const act = acc.makeAcceptanceAct('act_acceptance21');
   const op = igde.opening();
   act.messages.push({ role: 'assistant', content: op.reply, ts: 0 });
@@ -274,6 +366,45 @@ test('13 句 in-scope 重放到同一个 act：逐句断言全过', async () => 
       assert.equal(a.stage, 'S2', 'p16 stage 保持 S2');
       assert.equal(a.filled_count, 4, 'p16 filled_count 保持 4');
       assert.equal(a.code_status, 'none', 'p16 code_status 恒 none');
+    },
+    p17(a, r, ctx) {
+      // #17（Wave 3 I1）：拆批逐批复述 —— 0 静默（计划轮绝不建批），待确认计划挂 act
+      const ex = ctx.executor.calls;
+      assert.deepEqual(ex.createBatches, [], 'p17 0 静默：计划轮 createBatches 未调用');
+      assert.equal(ex.previewBatches.length, 1, 'p17 逐批复述需要净值预览');
+      assert.equal(ex.previewBatches[0].length, 2);
+      assert.ok(a.pending_ops && a.pending_ops.batches.length === 2, 'p17 待确认计划挂 act.pending_ops（不落 campaigns）');
+      assert.ok(/批次 A 加购未付/.test(r.reply) && /批次 B 下单未付/.test(r.reply), 'p17 逐批复述（人话名+人数+钩子）');
+      assert.ok(/对吗/.test(r.reply), 'p17 逐批复述确认句式');
+      assert.ok(Array.isArray(r.batches) && r.batches.length === 2, 'p17 done 帧 batches（待确认批次卡）');
+    },
+    p18(a, r, ctx) {
+      // #18（Wave 3 I2）：黑五日历挂上 + 紧急全停；恢复须明说；p17 计划仍未被静默执行
+      const ex = ctx.executor.calls;
+      assert.deepEqual(ex.addBlackout, [{ from: '2026-11-27', to: '2026-11-28', label: '黑五' }], 'p18 黑五日历挂上');
+      assert.equal(ex.pauseAll, 1, 'p18 紧急全停立即执行');
+      assert.ok(/停发日历已挂上/.test(r.reply), 'p18 回复含日历口径（窗口内冻结不删）');
+      assert.ok(/恢复必须你明说「恢复吧」/.test(r.reply), 'p18 紧急全停恢复须明说（绝不自动恢复）');
+      assert.deepEqual(ex.createBatches, [], 'p18 待确认计划仍未被静默建批');
+    },
+    p19(a, r, ctx) {
+      // #19（Wave 3 I3）：改折扣只改未发 —— 边界声明必含；新码只对未发、旧码对已发继续有效
+      const op = ctx.executor.calls.campaignOps[0];
+      assert.ok(op, 'p19 campaignOp 已执行');
+      assert.equal(op.op, 'discount');
+      assert.equal(op.params.percent_off, 15);
+      assert.ok(/已发 18 封不受影响，改的是未发的 5 封/.test(r.reply), 'p19 边界声明（I3 灵魂句）');
+      assert.ok(/折扣改为 15%/.test(r.reply) && /新码 NEW15/.test(r.reply), 'p19 新码只对未发生效');
+      assert.ok(/旧码 OLD10/.test(r.reply), 'p19 旧码对已发邮件继续有效');
+    },
+    p20(a, r, ctx) {
+      // #20（Wave 3 I4）：建批圈人默认排除 —— 核对单净值 = 圈定 − 排除，明细逐条
+      const ex = ctx.executor.calls;
+      assert.equal(ex.previewBatches.length, 2, 'p20 第二次批次计划预览');
+      assert.ok(/已购买（店铺已下单） 2 人/.test(r.reply), 'p20 排除明细：已购买（已下单）');
+      assert.ok(/已触达 1 人/.test(r.reply), 'p20 排除明细：已触达');
+      assert.ok(a.pending_ops && a.pending_ops.batches.length === 1, 'p20 新计划覆盖待确认（仍不落库）');
+      assert.ok(/对吗/.test(r.reply), 'p20 计划轮仍以待确认收口');
     }
   };
 
@@ -290,12 +421,12 @@ test('13 句 in-scope 重放到同一个 act：逐句断言全过', async () => 
     results[id] = r;
     acc.assertPersistBeforeTokens(events.slice(before), `${id} B3 顺序`);
     acc.assertTurnCommon(invariant, act, r, turn);
-    perTurn[id](act, r, { corrBefore });
+    perTurn[id](act, r, { corrBefore, executor });
   }
 
-  assert.equal(persistCalls.length, 14, '每句恰好落库一次');
-  assert.equal(Object.keys(ENVELOPES).length, 14);
-  assert.ok(results.p01, '14 轮全部执行');
+  assert.equal(persistCalls.length, 18, '每句恰好落库一次');
+  assert.equal(Object.keys(ENVELOPES).length, 18);
+  assert.ok(results.p01, '18 轮全部执行');
 
   // —— 终态汇总：extras 7 条、四槽全 explicit、id 不变 ——
   assert.equal(act.memory.extras.length, 7, '终态 extras 应为 7 条');
