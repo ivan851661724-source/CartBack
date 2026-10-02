@@ -1,0 +1,293 @@
+{
+  "suite": "prd-v2-acceptance-21",
+  "generatedAt": "2026-10-02T12:20:50.059Z",
+  "source": "eval/cases/prd-v2.jsonl",
+  "total": 21,
+  "passed": 21,
+  "failed": 0,
+  "deferred_remaining": 0,
+  "final_state": {
+    "act_id": "act_acceptance21",
+    "stage": "S2",
+    "filled_count": 4,
+    "extras": [
+      {
+        "key": "brand",
+        "value": "LunaGlow",
+        "at": 1790943650030
+      },
+      {
+        "key": "品类",
+        "value": "手工香薰蜡烛",
+        "at": 1790943650030
+      },
+      {
+        "key": "客单价",
+        "value": "35美元",
+        "at": 1790943650036
+      },
+      {
+        "key": "兴趣",
+        "value": "居家氛围、天然成分",
+        "at": 1790943650035
+      },
+      {
+        "key": "发送时段",
+        "value": "晚上8点",
+        "at": 1790943650040
+      },
+      {
+        "key": "产品特色",
+        "value": "天然大豆蜡、48小时长烧",
+        "at": 1790943650040
+      },
+      {
+        "key": "发送频率",
+        "value": "每周不超过2封",
+        "at": 1790943650047
+      }
+    ],
+    "needs": {
+      "audience": "加购未付客户",
+      "reason": "太久没动静、快被遗忘",
+      "offer": "15% off",
+      "goal": "提升到转化 / 成交"
+    }
+  },
+  "cases": [
+    {
+      "id": "p01",
+      "input": "我的品牌叫 LunaGlow，做手工香薰蜡烛，客单价 28 美元",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "加购未付",
+        "浏览未买",
+        "老客"
+      ],
+      "stage": "S1",
+      "expect_assert": "品牌名/品类/客单价进 extras（3 条）；audience 仍空；下一问问 audience；chips=[加购未付,浏览未买,老客]；filled_count 不回退"
+    },
+    {
+      "id": "p02",
+      "input": "主要客户是 25 到 40 岁的美国女性，喜欢居家氛围和天然成分",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "忘记结账",
+        "在对比价格",
+        "我来说原因"
+      ],
+      "stage": "S1",
+      "expect_assert": "audience.value 含 25 与 美国女性；兴趣描述进 extras；下一问问 reason；chips=[忘记结账,在对比价格,我来说原因]"
+    },
+    {
+      "id": "p03",
+      "input": "客单价改成 35 美元",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "折扣",
+        "免邮",
+        "小赠品"
+      ],
+      "stage": "S1",
+      "expect_assert": "corrections 追加一条（slot=客单价，old=28美元，new=35美元）；extras 客单价更新为 35；回复含 35；conflict 不触发"
+    },
+    {
+      "id": "p04",
+      "input": "客户主要是年轻人",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "18-24",
+        "25-34",
+        "维持当前年龄定位"
+      ],
+      "stage": "S1",
+      "expect_assert": "与已填 audience 冲突 → audience 不被覆盖；本轮问句为冲突澄清；chips=[18-24,25-34,维持当前年龄定位]"
+    },
+    {
+      "id": "p05",
+      "input": "挽回原因就盯加购未付款的",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "expect_assert": "reason.value 含 加购未付（此前 pain 槽漏接的回归样本）；C6 兜底：上一轮 audience 冲突未回应 → 接受候选值 inferred"
+    },
+    {
+      "id": "p06",
+      "input": "折扣力度给 10% off 就行",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "expect_assert": "offer.value = 10% off（含数值与单位）"
+    },
+    {
+      "id": "p07",
+      "input": "发送时段选晚上 8 点",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "expect_assert": "extras 增加 发送时段；offer/goal 不动；仍问缺失项（goal）"
+    },
+    {
+      "id": "p08",
+      "input": "产品特色是天然大豆蜡、48 小时长烧",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "expect_assert": "extras 增加 产品特色；仍问缺失项（goal）"
+    },
+    {
+      "id": "p09",
+      "input": "营销目标是本月挽回 100 单",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "goal.value 含 100；filled_count=4；stage=S2；chips=[]；产出 planCard"
+    },
+    {
+      "id": "p10",
+      "input": "发送频率每周不超过 2 封",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "offer 不动（错切回归样本：发送 的 送 不得触发钩子抽取）；extras 增加 发送频率；stage 保持 S2"
+    },
+    {
+      "id": "p11",
+      "input": "我希望拿到的结果是：本月挽回 100 单",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "goal 已填 → 同值忽略不清零：filled_count 保持 4、act.id 不变、stage 保持 S2、corrections 不新增"
+    },
+    {
+      "id": "p12",
+      "input": "邮件正文直接用中文写给美国客户",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "Wave 5 启用（E4 对话内版）：确定性短轮拒绝并解释「邮件语种跟收件人走——美国客户发英文版，发送时逐收件人按 locale 本地化」+ 四项配置没动；四槽不动（offer/audience 保持）、stage 保持 S2、chips=[]（发送时 G0 拦截兜底见 test/g0-intercept.test.js）"
+    },
+    {
+      "id": "p13",
+      "input": "加购未付的客户忘了付款，希望他们回来完成付款，把方案卡给我看看",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "Wave 2 启用（降级补测）：断开 LLM 后按序重放 #1-#10 与本句输入 —— 回复仍走状态机（逐项确认+下一问→齐后引导确认）、每轮延迟<1s、engine=degraded、4/4 时 stage=S2 且不出 planCard（真实出卡在 /confirm 建码之后）"
+    },
+    {
+      "id": "p14",
+      "input": "哈哈哈今天天气真不错啊",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "Wave 5 启用（E5 离题拉回补断言）：S2 后闲聊 0 崩溃 0 编造 —— 礼貌拉回 + 状态复述（四样齐/确认卡）、无槽位写入（offer/goal/reason 不动、extras 不新增）、stage 保持 S2、chips=[]；连发 3 条闲聊的降级专项用例见 test/acceptance21.test.js"
+    },
+    {
+      "id": "p15",
+      "input": "受众改成老客，折扣换 15%",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "同轮两条 correction 生效：audience.value 含 老客、offer.value 含 15%；corrections 追加 2 条；回复复述两个新值；filled_count 保持 4"
+    },
+    {
+      "id": "p16",
+      "input": "嗯，我知道了",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "4/4 且 S2 后任意输入 → 回复为引导确认（含 确认 或 核对 字样），不继续问四槽、不产出新追问 chips（chips=[]），stage 保持 S2"
+    },
+    {
+      "id": "p17",
+      "input": "把加购未付和下单未付分别做成两个批次",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "确认建批",
+        "改一下"
+      ],
+      "stage": "S2",
+      "expect_assert": "Wave 3 I1 启用：batch_plan 待确认 —— 引擎逐批复述（批次 A 加购未付 / 批次 B 下单未付 + 净值人数 + 钩子）并以「对吗」收口，chips=[确认建批,改一下]；act.pending_ops 挂计划而 campaigns 0 静默（previewBatches 调用、createBatches 未调用），确认轮才真正建批（见 acceptance21 主重放 perTurn p17）"
+    },
+    {
+      "id": "p18",
+      "input": "黑五（11/27–11/28）都停发，先全停",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "Wave 3 I2 启用：campaign_ops 黑五日历挂上（2026-11-27~2026-11-28）+ 紧急全停立即执行；回复含「停发日历已挂上」「窗口内冻结不删」「恢复必须明说恢复吧」；p17 计划仍未被静默建批。恢复吧恢复流与窗口过后自动顺延（HTTP 两阶段）见 test/wave3-campaigns.test.js"
+    },
+    {
+      "id": "p19",
+      "input": "没发完的那些折扣改成 15%",
+      "pass": true,
+      "failures": [],
+      "chips": [],
+      "stage": "S2",
+      "expect_assert": "Wave 3 I3 启用：改折扣只改未发 —— 回复含边界声明「已发 18 封不受影响，改的是未发的 5 封」（I3 灵魂句）+ 新码 NEW15 只对未发生效 + 旧码 OLD10 对已发邮件继续有效；campaignOp discount percent_off=15"
+    },
+    {
+      "id": "p20",
+      "input": "再建一批加购未付的，把已经下单的和最近发过邮件的都排除掉",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "确认建批",
+        "改一下"
+      ],
+      "stage": "S2",
+      "expect_assert": "Wave 3 I4 启用：建批圈人默认排除已下单/已触达 —— 批次计划回复逐条列排除明细（已购买（店铺已下单）2 人、频控窗口内已触达 1 人），净值=圈定−排除；「别排除」风险提示 + 覆盖留痕流见 test/wave3-campaigns.test.js"
+    },
+    {
+      "id": "p21",
+      "input": "现在都在跑啥",
+      "pass": true,
+      "failures": [],
+      "chips": [
+        "换主题行再打",
+        "先不动"
+      ],
+      "stage": "S2",
+      "expect_assert": "Wave 5 启用（I5 批次状态一眼看）：每批一行「{name}：{状态中文}，已发 X/Y，回流 Z 单净赚 $N」（A 加购未付 18/23、B 下单未付 17/17），打开率 <10% 的批次行尾「建议换主题行再打一轮」+ chips=[换主题行再打,先不动] + 建议目标挂 act.pending_ops.resend_target；查询轮 stage 不动；口径与 notify.campaignStats 同源（换主题行再打→resend 409 确认流见 test/wave5-closeout.test.js）"
+    }
+  ]
+}

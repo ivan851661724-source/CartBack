@@ -676,6 +676,60 @@ function freezeCampaignHoldouts(store, camp, pending, { ratio = HOLDOUT_RATIO } 
   return plan;
 }
 
+/* ------------------------------ I5 批次状态一眼看（Wave 5） ------------------------------ */
+
+// 状态中文（I5 汇报行口径）
+const STATUS_ZH = {
+  draft: '建好未发', scheduled: '已排程', running: '发送中',
+  paused: '已暂停', frozen: '已冻结', done: '已发完'
+};
+// 打开率显著低的判定线（该批行尾加「建议换主题行再打一轮」）
+const LOW_OPEN_RATE = 0.10;
+const RESEND_ADVICE = '，建议换主题行再打一轮';
+// >3 批：只报非正常态（paused/frozen/打开率异常），正常跑的折叠成一行计数
+const REPORT_FOLD_LIMIT = 3;
+
+/**
+ * I5 三行汇报（确定性组装；口径与 notify.campaignStats 同源——入参即 publicCampaign 形状）。
+ * @param {Array} items publicCampaign 形状 [{id,name,status,reach_count,sent_count,stats:{opened,recovered,net}}]
+ * @returns {{reply, chips, advised:[campaignId], lines:[string]}}
+ *   ≤3 批：逐批一行；>3 批：只报非正常态（paused/frozen/异常），正常跑的折叠成一行计数。
+ *   打开率显著低（opened/sent < 10%，sent>0 才判）→ 行尾加建议 + 全局 chips ['换主题行再打','先不动']。
+ */
+function composeBatchReport(items, { lowOpenRate = LOW_OPEN_RATE } = {}) {
+  const list = (Array.isArray(items) ? items : []).filter(c => c && c.name);
+  if (!list.length) return { reply: '', chips: [], advised: [], lines: [] };
+  const round2 = (n) => +(Number(n) || 0).toFixed(2);
+  const lineOf = (c) => {
+    const st = STATUS_ZH[c.status] || String(c.status || '');
+    const sent = Math.max(0, Number(c.sent_count) || 0);
+    const reach = Math.max(0, Number(c.reach_count) || 0);
+    const stats = c.stats || {};
+    let text = `${c.name}：${st}，已发 ${sent}/${reach}，回流 ${Math.max(0, Number(stats.recovered) || 0)} 单净赚 $${round2(stats.net)}`;
+    const opened = Math.max(0, Number(stats.opened) || 0);
+    const lowOpen = sent > 0 && (opened / sent) < lowOpenRate;
+    if (lowOpen) text += RESEND_ADVICE;
+    return { text, lowOpen, abnormal: c.status === 'paused' || c.status === 'frozen' };
+  };
+  const fold = list.length > REPORT_FOLD_LIMIT;
+  const lines = [];
+  const advised = [];
+  let normalCount = 0;
+  for (const c of list) {
+    const { text, lowOpen, abnormal } = lineOf(c);
+    if (!fold || abnormal || lowOpen) {
+      lines.push(text);
+      if (lowOpen && c.id) advised.push(c.id);
+    } else {
+      normalCount++;
+    }
+  }
+  if (fold && normalCount > 0) lines.push(`其余 ${normalCount} 批正常推进（无暂停/冻结，不用盯）`);
+  const chips = advised.length ? ['换主题行再打', '先不动'] : [];
+  const reply = lines.join('\n') + (advised.length ? '\n（低打开率的批次换主题行再打一轮通常比加码划算）' : '');
+  return { reply, chips, advised, lines };
+}
+
 module.exports = {
   LETTERS, CAMPAIGN_STATUSES, CODE_FAIL_OPTIONS,
   PARALLEL_BATCH_ADVICE_LIMIT, PARALLEL_BATCH_ADVICE,
@@ -690,5 +744,7 @@ module.exports = {
   // 全局停发
   getGlobalPaused, setGlobalPaused, pauseAll: applyPauseAll, resumeAll, reconcileBlackout, sendBlocker, allCampaigns,
   // 闸门
-  evaluateCampaignGates, freezeCampaignHoldouts, CAMPAIGN_GATE_LABELS, CAMPAIGN_GATE_ORDER
+  evaluateCampaignGates, freezeCampaignHoldouts, CAMPAIGN_GATE_LABELS, CAMPAIGN_GATE_ORDER,
+  // Wave 5 I5 批次状态汇报
+  STATUS_ZH, LOW_OPEN_RATE, RESEND_ADVICE, REPORT_FOLD_LIMIT, composeBatchReport
 };

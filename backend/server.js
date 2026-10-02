@@ -32,6 +32,9 @@ const campaignsMod = require('./lib/campaigns');
 const exclusionMod = require('./lib/exclusion');
 // —— Wave 4 体验与记忆（F1 零配置开场 / F3 主动回执 / A3 商家记忆 / F2 对话内算账）——
 const notify = require('./lib/notify');
+// —— Wave 5 收口（A4 僵尸会话 / E1 冲动折扣大促季判定）——
+const zombie = require('./lib/zombie');
+const impulse = require('./lib/impulse');
 
 let config = cfg.load();
 const store = new Store();
@@ -83,6 +86,7 @@ queue.register('posters', (j) => processPosterJob(j));
 queue.register('g6_purge', () => competitorsMod.g6Purge(store));
 queue.register('tag_expiry', () => applyTagExpiryWeights());
 queue.register('receipt_24h', (j) => processReceiptJob(j));          // Wave 4 F3②：T+24h 打开/点击/回流汇总
+queue.register('zombie_sweep', () => zombie.sweepZombieActs(store)); // Wave 5 A4：僵尸会话每小时扫描收口
 queue.recover();
 
 /* ===================== Wave 4 体验与记忆（F1 / F3 / A3）===================== */
@@ -184,7 +188,7 @@ function latestPrefsFor(userId, excludeActId) {
   return null;
 }
 
-// —— A3④ / 接口契约①：GET /api/state 顶层 welcome / prefs / last_plan ——
+// —— A3④ / 接口契约①：GET /api/state 顶层 welcome / prefs / last_plan / todos ——
 function buildStateExtras(userId) {
   const acts = store.getActsByUser(userId);
   // F1：欢迎语资格 = 该商家名下不存在任何 act（含 closed）
@@ -201,6 +205,11 @@ function buildStateExtras(userId) {
   if (!prefs) {
     const prof = normalizeAgentProfile(store.getAgentProfile(userId));
     if (prof && Object.keys(prof).length) prefs = prof;
+  }
+  // Wave 5 偏好写入：user 级偏好存在则覆盖合并（POST /api/config prefs 持久化；前端保存后回读验证）
+  const userPrefs = store.getUserPrefs(userId);
+  if (userPrefs && Object.keys(userPrefs).length) {
+    prefs = { ...(prefs || {}), ...userPrefs };
   }
   // A3④：last_plan = 最近一个确认过的 act（有 plan_card/execution_snapshot 或名下 campaign）
   let last_plan = null;
@@ -224,7 +233,8 @@ function buildStateExtras(userId) {
     };
     break;
   }
-  return { welcome, prefs, last_plan };
+  // Wave 5 A4：商家待办列表（未 done，created_at 倒序 ≤20；契约①形状 {id,summary,act_id,created_at,done}）
+  return { welcome, prefs, last_plan, todos: store.getOpenTodos(userId, 20) };
 }
 
 function agentContextOptions() {
@@ -1169,6 +1179,19 @@ function makeCampaignExecutor(userId) {
     },
     pauseAll() { return campaignsMod.pauseAll(store); },
     resumeAll() { return campaignsMod.resumeAll(store); },
+    // —— Wave 5 E1：大促季判定（停发日历命中区间 ±14 天 → 阈值放宽到 40%）——
+    saleWindow() { return impulse.inSaleWindow(store); },
+    // —— Wave 5 E1：坚持原折扣的审计留痕（events type='audit'）——
+    audit({ kind, act_id, note } = {}) {
+      return store.addEvent({
+        type: 'audit', draft_id: act_id || null, audience_id: null,
+        value: 0, order_id: `${kind || 'e1'}:${String(note || '').slice(0, 120)}`, ts: Date.now()
+      });
+    },
+    // —— Wave 5 I5：批次状态汇报数据源（publicCampaign 形状；stats 与 notify.campaignStats 同源）——
+    listCampaignReports() {
+      return store.getCampaignsByUser(userId).map(c => campaignsMod.publicCampaign(store, c));
+    },
     addBlackout(params) {
       const parsed = campaignsMod.parseBlackoutRange(params || {});
       if (!parsed.ok) return parsed;
@@ -1784,7 +1807,9 @@ const server = http.createServer(async (req, res) => {
         welcome: extras.welcome,
         prefs: extras.prefs,
         last_plan: extras.last_plan,
-        store_banner: storeBanner
+        store_banner: storeBanner,
+        // —— Wave 5 A4 契约①：商家待办列表（{id, summary, act_id, created_at, done}，未 done 倒序 ≤20）——
+        todos: extras.todos
       });
     }
 
@@ -1810,6 +1835,26 @@ const server = http.createServer(async (req, res) => {
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;   // 缺省全标已读
       const marked = store.markNotificationsRead(req.userId, ids);
       return sendJson(res, 200, { ok: true, marked, unread: store.unreadNotificationCount(req.userId) });
+    }
+
+    // —— Wave 5 A4 契约②：点待办 → 用原 act 数据开新会话预填（{ok, act}；幂等：已 done → 409）——
+    const todoRe = pathname.match(/^\/api\/todos\/([\w-]+)\/resume$/);
+    if (todoRe && method === 'POST') {
+      const todo = store.getTodo(todoRe[1]);
+      if (!todo) return sendJson(res, 404, { error: 'todo not found' });
+      if (todo.user_id && req.userId && todo.user_id !== req.userId) return sendJson(res, 404, { error: 'todo not found' });
+      if (todo.done) return sendJson(res, 409, { ok: false, error: '该待办已恢复过（幂等：不重复开新会话）' });
+      const src = todo.act_id ? store.getAct(todo.act_id) : null;
+      if (!src) return sendJson(res, 404, { error: '原会话已不存在，无法恢复' });
+      const now = Date.now();
+      const newAct = zombie.buildResumedAct(src, { now });
+      if (req.userId) newAct.user_id = req.userId;
+      // 新建会话语义：该用户其它未收口会话置 closed（原 act 已 closed 保持）
+      store.closeOpenActs(newAct.user_id || null, newAct.id);
+      store.upsertAct(newAct);
+      store.markTodoDone(todo.id);
+      logEvent('todo_resumed', { todo_id: todo.id, from_act: src.id, to_act: newAct.id });
+      return sendJson(res, 200, { ok: true, act: store.getAct(newAct.id) });
     }
 
     // —— 创建引导会话（支持 preset 预选受众：受众模块「点开画像跳配置」）——
@@ -2591,6 +2636,22 @@ const server = http.createServer(async (req, res) => {
         config.g0Whitelist = body.g0Whitelist
           .map(s => String(s).trim()).filter(Boolean).filter(s => s.length <= 40).slice(0, 50);
       }
+      // Wave 5 偏好写入：body.prefs（{tone, discount_habit, signature, ...}）→ user 级持久化，
+      // GET /api/state 顶层 prefs 合并返回（与 g0Whitelist 等全局键并列，互不影响）。
+      // 语义：键级合并更新；value 置空串 = 删除该键；≤16 键、键名 ≤40 字、值 ≤200 字。
+      if (body.prefs && typeof body.prefs === 'object' && !Array.isArray(body.prefs)) {
+        const cur = store.getUserPrefs(req.userId);
+        const merged = { ...cur };
+        for (const [k, v] of Object.entries(body.prefs).slice(0, 16)) {
+          const key = String(k || '').trim().slice(0, 40);
+          if (!key) continue;
+          const val = String(v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v))).trim().slice(0, 200);
+          if (val === '') delete merged[key];
+          else merged[key] = val;
+        }
+        store.setUserPrefs(req.userId, merged);
+        logEvent('user_prefs_saved', { userId: req.userId, keys: Object.keys(merged).length });
+      }
       if (Number.isFinite(body.aiContextWindowTokens)) config.aiContextWindowTokens = Math.max(2048, Math.min(1000000, body.aiContextWindowTokens | 0));
       if (Number.isFinite(body.aiMaxOutputTokens)) config.aiMaxOutputTokens = Math.max(64, Math.min(32768, body.aiMaxOutputTokens | 0));
       if (Number.isFinite(body.aiContextSafetyMargin)) config.aiContextSafetyMargin = Math.max(128, Math.min(65536, body.aiContextSafetyMargin | 0));
@@ -3050,6 +3111,9 @@ server.listen(PORT, () => {
   setInterval(() => queue.enqueue({ type: 'g6_purge', payload: {} }), 3600 * 1000);
   // ⑤ 窗口期满未转化 → 标签 −0.5（每 6 小时检查一次）
   setInterval(() => queue.enqueue({ type: 'tag_expiry', payload: {} }), 6 * 3600 * 1000);
+  // —— Wave 5 A4：僵尸会话收口（每小时扫描；启动即跑一次兜底重启间隙）——
+  queue.enqueue({ type: 'zombie_sweep', payload: {} });
+  setInterval(() => queue.enqueue({ type: 'zombie_sweep', payload: {} }), 3600 * 1000);
   // —— Wave 3 I2：启动对账停发日历（窗口已过 → 日历冻结批次自动顺延恢复）并重排其发送 job ——
   const restoredBoot = campaignsMod.reconcileBlackout(store);
   for (const camp of restoredBoot) {

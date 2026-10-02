@@ -41,6 +41,9 @@ const {
 const { normalizeLocale } = require('./storeConnector');
 // Wave 4 F2：算账口径与账本（estGmv 公式）同源——挽回率/折扣成本计算复用 execution 单处权威
 const execution = require('./execution');
+// Wave 5：I5 批次状态汇报（campaigns 单处口径）+ E1 冲动折扣拦截（impulse 单处口径）
+const campaignsMod = require('./campaigns');
+const impulse = require('./impulse');
 
 // 槽位优先级即数组顺序：B4 选问 audience > reason > offer > goal
 const NEEDED_FIELDS = SLOTS;
@@ -56,6 +59,11 @@ const LEDGER_RE = /(值多少|值不值|划不划算|能赚多少|赚多少|能�
 // —— Wave 4 A3 复用意图（新会话首条消息「照上次的来」→ prefs 预填）/ 否认复用（清预填）——
 const REUSE_RE = /(照上次的?来?|跟(上次|上回)一样|和(上次|上回)一样|上个月那套|上次那套|按上次的?|照旧)/i;
 const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别跟|不跟|别拿|不拿|不是照|不是跟).{0,3}(上次|上回|上个月|那套)/i;
+
+// —— Wave 5 I5 批次状态汇报意图（「现在都在跑啥」「几个批次怎么样了」「批次状态」）——
+const BATCH_STATUS_RE = /(现在都在跑啥|都在跑啥|在跑啥|批次状态|批次怎么样|几个批次|批次都怎么样|批次情况|汇报一下批次|批次汇报)/i;
+// —— Wave 5 E4 对话内语种越权（#12）：要求把邮件正文/主题写成指定语种 → 拒绝 + 解释语种跟随收件人 ——
+const LOCALE_FORCE_RE = /((邮件|正文|内容|文案|标题|主题行?|信)[^。；;？?！!]{0,16}?(直接用|用|改成|换成|写成|翻译成|以)\s*(中文|英文|英语|法语|德语|西班牙语|日语|韩语|意大利语|俄语|葡萄牙语)(写|发|来写)?)|((直接用|就用|用)(中文|英文|英语|法语|德语|西班牙语|日语|韩语)(写|发|给))/;
 
 // —— D 类（私人生活/无关话题）重定向池：引擎级双保险的话术口径（与 lib/llm.js COACH_SYSTEM_PROMPT D 类一致）——
 // 首句先「接住」用户刚说的（哪怕只是"哈哈这个我帮不上~"），再拉回邮件营销主业；不追问字段、不复读同一句。
@@ -75,7 +83,8 @@ const FALLBACK_POOL = [
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
 // Wave 3：批次域动作词（批次/停发/全停/暂停/恢复/重发）也是业务词 —— 运维话术不得被离题路由劫持
 // Wave 4：算账问句 / 复用意图（F2/A3）同为业务词，桩模式下不得被离题兜底吞掉
-const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发|值多少|值不值|划不划算|能赚|能回多少|算账|照上次|跟上次|和上次|上个月那套|上次那套|按上次|照旧)/i;
+// Wave 5：I5 批次状态问句（都在跑啥/批次状态/几个批次）同上
+const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发|值多少|值不值|划不划算|能赚|能回多少|算账|照上次|跟上次|和上次|上个月那套|上次那套|按上次|照旧|都在跑啥|在跑啥|批次状态|几个批次|批次怎么样)/i;
 
 // —— 离题/元问题/身份询问 的温和接住池（桩与模型降级共用，_rotateReply 轮换防复读；guardrailHits 记空，非边界拒绝）——
 const OFFTOPIC_POOL = [
@@ -199,8 +208,8 @@ function extractOps(text) {
     const range = parseDateRangeZh(t);
     if (range) return { kind: 'blackout', params: { ...range, label: (t.match(/[「『]([^」』]{1,20})[」』]/) || [])[1] || '停发' } };
   }
-  // 重发（频次护栏确认流）
-  if (/再打一轮|重发|再发一轮|没打开的再/.test(t)) {
+  // 重发（频次护栏确认流）；Wave 5 I5：「换主题行再打」是低打开率建议的承接动作（同 resend 语义）
+  if (/再打一轮|重发|再发一轮|没打开的再|换主题行再打/.test(t)) {
     return { kind: 'resend', target: extractOpsTarget(t), subject: (t.match(/主题[行为]?\s*[「『]([^」』]+)[」』]/) || [])[1] || '' };
   }
   // 单批折扣：「改成 15%」
@@ -675,6 +684,13 @@ class IGDE {
       conflictCandidates: []
     };
 
+    // —— Wave 5 预检短轮（B2 合并前，命中即短路）：#12 语种越权拦截 / E1 冲动折扣拦截 ——
+    //    offer 相关更新一律剥离（E1 决议轮由「替代/坚持」分支写入），先建议后落槽。
+    const w5pre = this._wave5PreTurn(act, userText, turn, { executors: opts.executors || this.executors });
+    if (w5pre) {
+      return await this._emitShortTurn(act, userText, w5pre, { usedAI, aiDead, runtime, guardrailHits, doPersist, opts, tokenBuffer, nowMs });
+    }
+
     // —— B2 合并：correction > 新值 > 同值忽略；冲突检测；extras 纠错；C6 兜底 ——
     const mergeResult = this._mergeTurn(act, turn, runtime);
 
@@ -735,6 +751,12 @@ class IGDE {
         chips: w4.chips || [], askedSlot: w4.askedSlot || null,
         agentMeta: this._agentMeta(runtime)
       };
+    }
+
+    // —— Wave 5 I5 批次状态一眼看：「现在都在跑啥」→ 三行汇报/折叠/异常建议（确定性短路；口径与 notify.campaignStats 同源）——
+    const w5 = this._batchStatusTurn(act, userText, executors);
+    if (w5) {
+      return await this._emitShortTurn(act, userText, w5, { usedAI, aiDead, runtime, guardrailHits, doPersist, opts, tokenBuffer, nowMs });
     }
 
     // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
@@ -982,8 +1004,14 @@ class IGDE {
       }
       if (op && (op.kind === 'resend' || op.kind === 'op')) {
         // 单批操作：目标能解析到真实批次才接手（否则不劫持正常对话）
-        const resolved = executors.resolveTarget ? await executors.resolveTarget(op.target || null) : null;
+        // Wave 5 I5：「换主题行再打」承接低打开率建议 → 目标优先取汇报时挂的 resend_target
+        const hintTarget = (act.pending_ops && act.pending_ops.resend_target)
+          ? { campaign_id: act.pending_ops.resend_target } : null;
+        const resolved = (op.kind === 'resend' && hintTarget)
+          ? hintTarget
+          : (executors.resolveTarget ? await executors.resolveTarget(op.target || null) : null);
         if (resolved) {
+          if (act.pending_ops) delete act.pending_ops.resend_target;   // 建议已承接，一次性消费
           const passTarget = op.target != null ? op.target : { campaign_id: resolved.campaign_id };
           if (op.kind === 'resend') {
             const r = await executors.campaignOp({ op: 'resend', target: passTarget, params: { subject: op.subject || '', confirm_frequency: false } }).catch(() => null);
@@ -1216,6 +1244,135 @@ class IGDE {
     };
   }
 
+
+  /* ------------------- Wave 5：E1 冲动折扣拦截 / #12 语种越权 / I5 批次状态（确定性短路轮）------------------- */
+
+  /** 短路轮统一出口（与批次运维轮同构：护栏 L0/L1/L2/L4 → 先落库后回复 → token 缓冲冲刷；不推进 FSM）。 */
+  async _emitShortTurn(act, userText, short, ctx) {
+    const { usedAI, aiDead, runtime, guardrailHits, doPersist, opts, tokenBuffer, nowMs } = ctx;
+    let reply = guardrailL1(short.reply || '');
+    if (!guardrailL0(reply) || reply.trim().length < 2) { reply = this._pickFallback(act); guardrailHits.push('L0'); }
+    if (!guardrailL2(reply)) { reply = this._pickFallback(act); guardrailHits.push('L2'); }
+    if (!guardrailL4(reply, act.stage)) { reply = this._pickFallback(act); guardrailHits.push('L4'); }
+    if (short.askedSlot) {
+      act.memory = ensureMemory(act.memory, nowMs);
+      act.memory.ask_count[short.askedSlot] = (Number(act.memory.ask_count[short.askedSlot]) || 0) + 1;
+    }
+    act.messages.push({ role: 'user', content: userText, ts: nowMs });
+    act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
+    act.updated_at = nowMs;
+    await doPersist();
+    if (opts.onReplyToken && tokenBuffer.length) {
+      for (const p of tokenBuffer) opts.onReplyToken(p);
+    }
+    return {
+      reply, stage: act.stage, needs: act.needs,
+      planCard: (act.stage === 'S3' && act.plan_card) ? act.plan_card : null,
+      guardrailHits,
+      engine: this._engineOf(usedAI && !aiDead),
+      chips: short.chips || [], askedSlot: short.askedSlot || null,
+      ...(Array.isArray(short.opResults) ? { campaignOps: short.opResults } : {}),
+      agentMeta: this._agentMeta(runtime)
+    };
+  }
+
+  /**
+   * Wave 5 预检（B2 合并前调用，turn.updates 可被剥离）。返回 null = 无 Wave 5 语义，回归常规流水线。
+   * 判定顺序：#12 语种越权 → E1 待决议轮（替代/坚持/放弃）→ E1 新命中拦截。
+   */
+  _wave5PreTurn(act, userText, turn, { executors } = {}) {
+    // ① #12 语种越权（E4 对话内版）：G0 是发送时拦截，这里是对话内的确定性拒绝 + 解释
+    const locale = this._localeGuardTurn(userText);
+    if (locale) return locale;
+    const pending = (act.pending_ops && typeof act.pending_ops === 'object') ? act.pending_ops : {};
+    // ② E1 待决议轮：offer 更新一律剥离（决议分支才写槽）
+    if (pending.e1) {
+      if (turn && Array.isArray(turn.updates)) turn.updates = turn.updates.filter(u => u.slot !== 'offer');
+      return this._resolveImpulsePending(act, userText, pending, executors);
+    }
+    // ③ E1 新命中：先拦截不入 offer 槽，给替代建议 + chips
+    const det = this._detectImpulseForTurn(userText, executors);
+    if (det.hit) {
+      if (turn && Array.isArray(turn.updates)) turn.updates = turn.updates.filter(u => u.slot !== 'offer');
+      act.pending_ops = { ...(act.pending_ops || {}), e1: { ...det, at: Date.now() } };
+      return { reply: impulse.composeIntercept(det), chips: ['换成替代方案', '就要这个折扣'], askedSlot: null };
+    }
+    return null;
+  }
+
+  /** #12（E4 对话内版）：「邮件正文直接用中文写给美国客户」类 → 拒绝 + 语种跟随收件人 + 槽位不动。 */
+  _localeGuardTurn(userText) {
+    if (!LOCALE_FORCE_RE.test(String(userText || ''))) return null;
+    return {
+      reply: '语种这头我不改：挽回邮件的语种跟着收件人走——你的客户在美国，邮件就发英文版（发送时逐收件人按其 locale 本地化），聊天里咱们用中文随便聊。四项配置都没动，要继续调哪样？',
+      chips: [], askedSlot: null
+    };
+  }
+
+  /** E1 检测入口（词表 offer 原文 + 大促季放宽阈值；阈值/窗口常量读 lib/config 单处权威） */
+  _detectImpulseForTurn(userText, executors) {
+    let kwOffer = '';
+    try { kwOffer = (extractNeeds(userText) || {}).offer || ''; } catch (e) { kwOffer = ''; }
+    let saleWindow = false;
+    try { saleWindow = executors && typeof executors.saleWindow === 'function' ? Boolean(executors.saleWindow()) : false; } catch (e) { saleWindow = false; }
+    return impulse.detectImpulse(userText, { offerRaw: kwOffer, saleWindow });
+  }
+
+  /**
+   * E1 待决议轮：坚持（照做入槽 + 审计留痕「建议已给，用户坚持」）> 替代（替代值入槽）> 放弃（撤建议回正常流水线）。
+   * 返回 null = 本轮不做决议（建议已撤），落回常规 B4 流水线。
+   */
+  _resolveImpulsePending(act, userText, pending, executors) {
+    const e1 = pending.e1 || {};
+    const clearE1 = () => {
+      const rest = { ...(pending || {}) };
+      delete rest.e1;
+      act.pending_ops = Object.keys(rest).length ? rest : null;
+    };
+    if (impulse.INSIST_RE.test(userText)) {
+      if (e1.offerRaw) act.needs.offer = { value: clampNeedValue(e1.offerRaw), source: 'explicit', at: Date.now() };
+      clearE1();
+      // 审计留痕（建议已给，用户坚持）；无执行器（单测桩）时跳过留痕不阻断
+      if (executors && typeof executors.audit === 'function') {
+        try {
+          executors.audit({
+            kind: 'e1_insist', act_id: act.id,
+            note: `E1 建议已给（阈值 ${e1.threshold}%），用户坚持原方案${e1.percent != null ? ` ${e1.percent}% off` : (e1.kind === 'mass' ? '（全量触达）' : '')}`
+          });
+        } catch (err) { /* 留痕失败不阻断用户决策 */ }
+      }
+      const kept = e1.offerRaw || (e1.percent != null ? `${e1.percent}% off` : '原方案');
+      return { reply: `行，按你说的「${kept}」进方案——替代建议已经给过、留痕备查，毛利这块你把着舵。还要配哪项？`, chips: [], askedSlot: null };
+    }
+    if (impulse.ALTERNATIVE_RE.test(userText)) {
+      const alt = impulse.pickAlternative(userText);
+      act.needs.offer = { value: clampNeedValue(alt, 40), source: 'explicit', at: Date.now() };
+      clearE1();
+      return { reply: `好，钩子换成「${alt}」，已进方案：毛利保住，回流预期也更真实。还要调哪项？`, chips: [], askedSlot: null };
+    }
+    clearE1();
+    return null;
+  }
+
+  /**
+   * Wave 5 I5：批次状态问句 → 三行汇报（≤3 批逐批一行；>3 批只报非正常态 + 折叠计数行）。
+   * 打开率显著低 → 行尾「建议换主题行再打一轮」+ chips；建议目标挂 act.pending_ops.resend_target，
+   * 用户回「换主题行再打」→ 走既有 resend 409 确认流（频次护栏语义不变）。
+   * 无批次/无执行器 → null（不劫持对话）。
+   */
+  _batchStatusTurn(act, userText, executors) {
+    if (!BATCH_STATUS_RE.test(String(userText || ''))) return null;
+    if (!executors || typeof executors.listCampaignReports !== 'function') return null;
+    let camps = null;
+    try { camps = executors.listCampaignReports(); } catch (e) { camps = null; }
+    if (!Array.isArray(camps) || !camps.length) return null;
+    const rep = campaignsMod.composeBatchReport(camps);
+    if (!rep.reply) return null;
+    if (rep.advised.length) {
+      act.pending_ops = { ...(act.pending_ops || {}), resend_target: rep.advised[0] };
+    }
+    return { reply: rep.reply, chips: rep.chips, askedSlot: null };
+  }
 
   /** B1 critic：envelope slot_updates 逐条校验原文语义依据。confidence<0.6 → inferred；
    *  词表命中直通；无依据 → 丢弃（丢弃优先于降级 inferred）。 */
@@ -1476,7 +1633,7 @@ class IGDE {
       // Wave 2：确认动作走 /confirm 端点（先建码后出卡），聊天里的「对/生成」只做引导
       const t = userText.trim();
       const deny = /不对|错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
-      if (deny) return { reply: '好，哪点要改？告诉我，其它对的我留着。', asked: false };
+      if (deny) return { reply: '好，哪点要改？四样都在下面确认卡里，说改哪样就行，其它对的我留着。', asked: false };
       if (this.missingFields(act).length === 0) {
         const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
         if (confirm) return { reply: '好，四样都核对齐了。点下面的「确认」按钮，我去你的店铺创建折扣码并生成方案卡。', asked: false };
@@ -1903,5 +2060,6 @@ module.exports = {
   IGDE, extractNeeds, extractOps, extractOpsTarget, batchesFromText, parseDateRangeZh, isNonInfo, scopeBoundary,
   guardrailL0, guardrailL1, guardrailL2, guardrailL3, guardrailL4,
   NEEDED_FIELDS, FIELD_LABEL, PREACH_PATTERNS, D_REDIRECT_POOL, FALLBACK_POOL,
-  CORRECTION_TONE_RE, SLOT_CHIPS, valueGroundedInText, clampNeedValue, looksLikeInjection
+  CORRECTION_TONE_RE, SLOT_CHIPS, valueGroundedInText, clampNeedValue, looksLikeInjection,
+  BATCH_STATUS_RE, LOCALE_FORCE_RE
 };

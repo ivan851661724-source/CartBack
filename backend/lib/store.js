@@ -20,7 +20,8 @@ const SCHEMA = {
     summary_cursor: 'INTEGER', context_version: 'INTEGER',
     plan_card: 'JSON',            // Wave 2 D3：confirm 产出的服务端权威 planCard（S3 可回读；S2 改参后作废）
     execution_snapshot: 'JSON',   // Wave 2 D3：confirm 冻结的四字段快照（audience/reach_count/discount/estGmv），闸门⑤ diff 依据
-    pending_ops: 'JSON'           // Wave 3 I1/I3：待确认的批次计划 {batches:[...]} / 重发确认 {resend:{...}}（batch_plan 阶段不建 campaigns 行，确认才建）
+    pending_ops: 'JSON',          // Wave 3 I1/I3：待确认的批次计划 {batches:[...]} / 重发确认 {resend:{...}}（batch_plan 阶段不建 campaigns 行，确认才建）
+    resumed_from: 'TEXT'          // Wave 5 A4：由哪个收口会话 resume 而来（待办恢复留痕；新建会话为 null）
   },
   drafts: {
     id: 'TEXT', act_id: 'TEXT', subject: 'TEXT', body: 'TEXT', audience: 'JSON',
@@ -149,6 +150,15 @@ const SCHEMA = {
   },
   sessions: {
     id: 'TEXT', token_hash: 'TEXT', user_id: 'TEXT', created_at: 'INTEGER'
+  },
+  // —— Wave 5 A4 僵尸会话收口：商家待办列表（扫描产出；点待办 → resume 开新会话预填）——
+  todos: {
+    id: 'TEXT', user_id: 'TEXT',
+    act_id: 'TEXT',          // 关联原会话（resume 复制其 needs/memory 预填）
+    type: 'TEXT',            // 'zombie_session'（A4 扫描收口）
+    summary: 'TEXT',         // 人话摘要「挽回下单未付：已记录受众与原因，还差 优惠、目标」（不带进度数字）
+    done: 'INTEGER',         // 0|1（resume 后置 1；幂等：已 done 再 resume → 409）
+    created_at: 'INTEGER', updated_at: 'INTEGER'
   }
 };
 
@@ -720,6 +730,48 @@ class Store {
   setMeta(key, value) {
     const rows = this._read('meta').filter(m => m.key !== key);
     rows.push({ key, value: String(value) }); this._write('meta', rows);
+  }
+
+  // —— Wave 5 偏好写入（POST /api/config prefs）：user 级偏好的最简持久化（meta JSON；GET /api/state 顶层合并） ——
+  getUserPrefs(userId) {
+    if (!userId) return {};
+    try {
+      const parsed = JSON.parse(this.getMeta('user_prefs:' + userId) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch (e) { return {}; }
+  }
+  setUserPrefs(userId, prefs) {
+    if (!userId) return {};
+    const clean = prefs && typeof prefs === 'object' && !Array.isArray(prefs) ? prefs : {};
+    this.setMeta('user_prefs:' + userId, JSON.stringify(clean));
+    return clean;
+  }
+
+  // —— Wave 5 A4：todos（商家待办列表；resume 后 done=1，幂等 409）——
+  addTodo(t) {
+    t.id = t.id || uid('todo_');
+    t.type = t.type || 'zombie_session';
+    t.done = t.done ? 1 : 0;
+    t.created_at = t.created_at || Date.now();
+    t.updated_at = t.updated_at || t.created_at;
+    const rows = this._read('todos'); rows.push(t); this._write('todos', rows);
+    return t;
+  }
+  getTodo(id) { return this._read('todos').find(t => t.id === id) || null; }
+  listTodos() { return this._read('todos'); }
+  /** 未 done 待办（created_at 倒序 ≤limit；契约①：GET /api/state 顶层 todos） */
+  getOpenTodos(userId, limit = 20) {
+    return this._read('todos')
+      .filter(t => !t.done && (!t.user_id || !userId || t.user_id === userId))
+      .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
+      .slice(0, Math.max(1, limit));
+  }
+  markTodoDone(id) {
+    const rows = this._read('todos');
+    const t = rows.find(x => x.id === id);
+    if (!t || t.done) return false;
+    t.done = 1; t.updated_at = Date.now();
+    this._write('todos', rows); return true;
   }
 
   // —— users（行级操作；禁止全表 writeTable，防止跨用户清空） ——

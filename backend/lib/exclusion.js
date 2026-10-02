@@ -6,7 +6,8 @@
  *   ① 已购买   —— 店铺订单已下单的邮箱（/api/store/pull 落 events type='purchased'，audience_id → 邮箱）
  *   ② 已触达   —— 频控窗口内已实发过的邮箱（读 sends 实发表；窗口 = lib/config.FREQUENCY_WINDOW_MS，
  *                 与 E3 频次闸同源单处常量，禁止此处再硬编码）
- *   ③ 已挽回   —— 近期被挽回成功（归因 conversion：events type='convert' 且未退款）
+ *   ③ 已挽回   —— 归因 conversion（events type='convert' 且未退款）命中过、且落在 N 天窗口内
+ *                 （N = lib/config.RECOVERED_EXCLUSION_WINDOW_MS，默认 30 天；近 7 天明细标「上周刚挽回」）
  *
  * 铁律：
  *   - 排除在出核对单之前完成：净值人数 = 圈定 − 排除；排除明细逐条（原因+人数）进核对单展示。
@@ -19,16 +20,20 @@
  * 本模块零网络依赖：store 注入；时钟经 opts.now 注入（默认 Date.now()）。
  */
 
-const { FREQUENCY_WINDOW_MS } = require('./config');
+const { FREQUENCY_WINDOW_MS, RECOVERED_EXCLUSION_WINDOW_MS } = require('./config');
 
 // 与 server.js 原口径一致：挽回窗口 30 天（§1 过滤条件「说到做到」）
 const RECOVERY_WINDOW_MS = 30 * 86400000;
 
-// 排除原因（人话，进核对单/回复展示；断言关键词：已下单 / 已购买 / 已触达 / 已挽回）
+// 「上周刚挽回」细分阈值：convert 落在近 7 天 → 明细标「上周刚挽回」；7–30 天 → 「已挽回（近期转化）」
+const RECENT_RECOVERED_MS = 7 * 86400000;
+
+// 排除原因（人话，进核对单/回复展示；断言关键词：已下单 / 已购买 / 已触达 / 已挽回 / 上周刚）
 const REASON = {
   purchased: '已购买（店铺已下单）',
   reached: '频控窗口内已触达',
   recovered: '已挽回（近期转化）',
+  recovered_recent: '已挽回（上周刚挽回）',
   overlap: '与先发批次人群重叠'
 };
 
@@ -55,14 +60,32 @@ function purchasedEmails(store) {
   return out;
 }
 
-/** ③ 已挽回邮箱集合：归因 conversion（type='convert'，未退款）→ audience 邮箱 */
-function recoveredEmails(store) {
+/** ③ 已挽回：email → 最近一次归因 conversion 时刻（type='convert' 且未退款） */
+function recoveredEmailMap(store) {
   const byId = emailByAudienceId(store);
-  const out = new Set();
+  const map = new Map();
   for (const e of store.getEvents()) {
     if (e.type !== 'convert' || e.refunded || !e.audience_id) continue;
     const em = byId.get(e.audience_id);
-    if (em) out.add(em);
+    if (!em) continue;
+    const ts = Number(e.ts) || 0;
+    if (!map.has(em) || map.get(em) < ts) map.set(em, ts);
+  }
+  return map;
+}
+
+/**
+ * ③ 已挽回邮箱集合（Wave 5 I4 补全：N 天窗口）——
+ * 归因 conversion 命中过的收件人 N 天内不再触达（N = config.RECOVERED_EXCLUSION_WINDOW_MS，默认 30 天）；
+ * 窗口过后允许再次触达（新流失新挽回，不一刀切终身排除）。
+ */
+function recoveredEmails(store, { now, windowMs } = {}) {
+  const at = Number(now) || Date.now();
+  const win = Number(windowMs) > 0 ? Number(windowMs) : RECOVERED_EXCLUSION_WINDOW_MS;
+  const cutoff = at - win;
+  const out = new Set();
+  for (const [em, ts] of recoveredEmailMap(store)) {
+    if (ts >= cutoff) out.add(em);
   }
   return out;
 }
@@ -83,18 +106,13 @@ function reachedEmails(store, { now, windowMs } = {}) {
 
 /**
  * 基础可发送名单（与单方案 filterTargetable 同口径，重构收敛于此）：
- * 邮箱格式有效 + 挽回窗口 30 天内 + 未转化（convert 事件）。
+ * 邮箱格式有效 + 挽回窗口 30 天内 + 未转化（convert 事件；Wave 5 I4：N 天窗口内转化过才排除，
+ * 与「已挽回」三类排除同一窗口口径——窗口过后可再触达）。
  */
-function baseTargetable(store, list, { now, recoveryWindowMs } = {}) {
+function baseTargetable(store, list, { now, recoveryWindowMs, recoveredWindowMs } = {}) {
   const at = Number(now) || Date.now();
   const win = Number(recoveryWindowMs) || RECOVERY_WINDOW_MS;
-  const byId = new Map(store.getAudience().map(a => [a.id, a]));
-  const converted = new Set();
-  for (const e of store.getEvents()) {
-    if (e.type !== 'convert' || !e.audience_id) continue;
-    const a = byId.get(e.audience_id);
-    if (a && a.email) converted.add(normEmail(a.email));
-  }
+  const converted = recoveredEmails(store, { now: at, windowMs: recoveredWindowMs });
   const cutoff = at - win;
   return (list || [])
     .filter(a => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(a.email || ''))
@@ -130,7 +148,16 @@ function excludeRecipients(store, recipients, opts = {}) {
 
   if (!disabled.purchased) take(REASON.purchased, purchasedEmails(store));
   if (!disabled.reached) take(REASON.reached, reachedEmails(store, { now: opts.now, windowMs: opts.windowMs }));
-  if (!disabled.recovered) take(REASON.recovered, recoveredEmails(store));
+  if (!disabled.recovered) {
+    // ③ 已挽回（Wave 5 I4 补全）：N 天窗口内转化过的不触达；近 7 天的细分标「上周刚挽回」
+    const recMap = recoveredEmailMap(store);
+    const at = Number(opts.now) || Date.now();
+    const win = Number(opts.recoveredWindowMs) > 0 ? Number(opts.recoveredWindowMs) : RECOVERED_EXCLUSION_WINDOW_MS;
+    const recent = new Set([...recMap].filter(([em, ts]) => ts >= at - RECENT_RECOVERED_MS).map(([em]) => em));
+    const older = new Set([...recMap].filter(([em, ts]) => ts >= at - win && ts < at - RECENT_RECOVERED_MS).map(([em]) => em));
+    take(REASON.recovered_recent, recent);
+    take(REASON.recovered, older);
+  }
   if (skip && skip.size) take(opts.skipReason || REASON.overlap, skip);
 
   const allow = (recipients || []).filter(r => {
@@ -159,9 +186,11 @@ function auditExclusionOverride(store, { campaignId, excluded, note } = {}) {
 module.exports = {
   REASON,
   RECOVERY_WINDOW_MS,
+  RECENT_RECOVERED_MS,
   normEmail,
   purchasedEmails,
   reachedEmails,
+  recoveredEmailMap,
   recoveredEmails,
   baseTargetable,
   excludeRecipients,
