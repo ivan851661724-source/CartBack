@@ -39,6 +39,14 @@ function parseTextPercent(text) {
     if (zhe <= 0 || zhe >= 10) return null;
     return +((10 - zhe) * 10).toFixed(1);
   }
+  // 中文数字折：「五折」=50%、「八五折」=15%、「七五折」=25%（真模型 30 轮实测：E1 曾漏拦「打五折」）
+  const cnM = t.match(/([一二两三四五六七八九])\.?([一二三四五六七八九])?折/);
+  if (cnM) {
+    const CN = { 一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+    const zhe = CN[cnM[1]] + (cnM[2] ? CN[cnM[2]] / 10 : 0);
+    if (zhe <= 0 || zhe >= 10) return null;
+    return +((10 - zhe) * 10).toFixed(1);
+  }
   return null;
 }
 

@@ -58,7 +58,7 @@ const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|�
 const LEDGER_RE = /(值多少|值不值|划不划算|能赚多少|赚多少|能回多少|值几个钱|算.{0,4}账)/i;
 // —— Wave 4 A3 复用意图（新会话首条消息「照上次的来」→ prefs 预填）/ 否认复用（清预填）——
 const REUSE_RE = /(照上次的?来?|跟(上次|上回)一样|和(上次|上回)一样|上个月那套|上次那套|按上次的?|照旧)/i;
-const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别跟|不跟|别拿|不拿|不是照|不是跟).{0,3}(上次|上回|上个月|那套)/i;
+const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别跟|不跟|别拿|不拿|不是照|不是跟|不是|没照|没跟|不对，?不是).{0,3}(上次|上回|上个月|那套)/i;
 
 // —— Wave 5 I5 批次状态汇报意图（「现在都在跑啥」「几个批次怎么样了」「批次状态」）——
 const BATCH_STATUS_RE = /(现在都在跑啥|都在跑啥|在跑啥|批次状态|批次怎么样|几个批次|批次都怎么样|批次情况|汇报一下批次|批次汇报)/i;
@@ -137,9 +137,10 @@ function extractNeeds(text) {
   }
   // reason（中英文双匹配；旧 pain 槽）
   if (!out.reason) {
-    // 「忘记结账」是 reason 选项的用户原话（chips 文案/口语）：整体采集并从文本消费，
-    // 防止残词「结账」再误触发 goal 罐头（真模型 GUI 联调 Bug-1 实测：一句 chip 填出两个编造槽）
-    if (/忘(了|记)?结账/.test(t)) { out.reason = '忘记结账'; t = t.replace(/忘(了|记)?结账/g, ' '); }
+    // 「忘记结账/忘了付款」是 reason 选项的用户原话（chips 文案/口语）：按原话采集并从文本消费，
+    // 防止残词「结账」再误触发 goal 罐头、「忘了」落入「太久没动静」罐头（真模型 GUI/30 轮实测）
+    const forgotM = t.match(/忘(?:了|记)?(?:结账|付款)/);
+    if (forgotM) { out.reason = forgotM[0]; t = t.replace(forgotM[0], ' '); }
     else if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.reason = '太久没动静、快被遗忘';
     else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.reason = '可能被竞品勾走';
     else if (/运费太贵|运费贵|运费高|运费偏贵|shipping.*(expensive|cost|price)|too expensive|high? cost/i.test(t)) out.reason = '嫌运费贵、临门犹豫';
@@ -821,6 +822,11 @@ class IGDE {
     reply = this._appendInferredNote(reply, act, mergeResult.acceptedInferred, usedAI);
     // 冲突轮回复必须真的在核实（B4 已选冲突轮时模型措辞不稳定 → 引擎兜底补问，PRD 剧本 #4）
     reply = this._appendConflictAsk(reply, question, mergeResult.conflictsNew);
+    // S2 收口引导兜底（B5）：四要素齐且在 S2，模型回复缺确认引导时补一句（真模型 30 轮实测
+    // 「这就帮你生成」类抢跑——生成动作只能走 /confirm 端点，话术必须把用户引向确认卡）
+    if (act.stage === 'S2' && this.missingFields(act).length === 0 && !/确认|核对|行不/.test(reply)) {
+      reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
+    }
 
     // B4 记账：本轮实际追问的槽 ask_count +1；冲突候选标记 asked（下一轮未回应则 C6 兜底）
     if (askedSlot) {
@@ -996,8 +1002,9 @@ class IGDE {
       })), executors);
     }
 
-    // ⑤ 降级词表（仅桩 / AI 失败路径；整短语匹配，禁碎片切片）
-    if (!usedAI) {
+    // ⑤ 词表兜底（整短语匹配，禁碎片切片）：降级路径是唯一抽取源；在线路径当模型没产出
+    //   任何 ops/batch_plan 时同样兜底（真模型 30 轮实测：模型对批次指令偶发「只说不做」）
+    if (!ops.length && !batchPlan.length) {
       const op = extractOps(text);
       if (op && op.kind === 'batch_plan') {
         const batches = batchesFromText(text, act);
