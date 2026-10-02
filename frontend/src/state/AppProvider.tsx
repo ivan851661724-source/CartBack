@@ -4,20 +4,21 @@
  * CartBack v3 全局状态与动作层（React Context）。
  * 1:1 移植自 app.js 的全局 state + boot/loadState/ensureAct/sendMsg/setMode/saveConfig/
  * resetData/doImport/auth/* / switchTab / jumpToConfig 等逻辑，仅把命令式 DOM 操控换成
- * 声明式 state。对话流卡片（confirm/plan/sent）的 planShown 状态机原样保留。
+ * 声明式 state。对话流卡片（confirm/sent）的 planShown 状态机原样保留。
  */
 import React, { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
 import { api, setToken, streamMessage, createAct, confirmAct, ApiAuthError } from '@/lib/api';
 import type {
   Act, Audience, Blackout, BatchPreview, Campaign, Checklist, Chips, Draft, Engine, Holdout,
   Kpis, LastPlan, Me, Metrics, Mode, NotificationItem, NotificationsResp, Opportunities, Prefs,
-  PlanCard, SendResult, Status, StoreBanner, TrendPoint, WelcomeState,
+  PlanCard, SendResult, Status, StoreBanner, TodoItem, TrendPoint, WelcomeState,
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
 import { filledCount } from '@/lib/needs';
 
 export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'comp' | 'set';
-export type PlanShown = 'confirm' | 'plan' | 'sent' | null;
+/** 对话流卡片状态机：confirm=确认卡 / sent=发送回执条（'plan' 成员已随 EmailConfigPanel 死代码清理删除，Wave5） */
+export type PlanShown = 'confirm' | 'sent' | null;
 
 /** confirm 接口 200 后的方案卡状态（对话流 PlanCard 卡的数据源；S3 改口回 S2 时整体复位） */
 export interface ConfirmState {
@@ -107,6 +108,17 @@ function parseLastPlan(raw: unknown): LastPlan | null {
   };
 }
 
+/** Z5 待办：只保留结构完整项（id 非空字符串 + summary 字符串）；缺省/非法 → []（旧后端无此键不渲染待办区） */
+function parseTodos(raw: unknown): TodoItem[] {
+  if (!Array.isArray(raw)) return [];
+  return (raw as unknown[]).filter(
+    (t): t is TodoItem =>
+      !!t && typeof t === 'object'
+      && typeof (t as TodoItem).id === 'string' && !!(t as TodoItem).id
+      && typeof (t as TodoItem).summary === 'string',
+  );
+}
+
 // 确认卡预建草稿暂存（单用户本地应用，模块级即可）：旧后端回退路径 / demo 引导跳步可能预建，
 // confirm 新接口成功后若存在暂存草稿则删除（confirm 由后端建稿），避免同卡出现僵尸草稿
 let pendingCardDraft: { actId: string; draft: Draft } | null = null;
@@ -157,6 +169,8 @@ interface AppState {
   storeBanner: StoreBanner | null;   // F1 数据开场句数据源（连接状态/周弃购数/客单价…）
   prefs: Prefs;                      // 商家偏好（语气/折扣习惯/署名）
   lastPlan: LastPlan | null;         // 上次方案摘要（对话空态复用入口）
+  // Wave5 Z5：待办（未 done 倒序 ≤20；A4 收口的可见出口，对话空态渲染，「继续」恢复原会话）
+  todos: TodoItem[];
   // Wave4 Z7 通知域：GET /api/notifications（倒序 ≤50）+ 未读数
   notifications: NotificationItem[];
   unread: number;
@@ -189,8 +203,9 @@ interface AppContextValue extends AppState {
   // 动作
   switchTab: (t: Tab) => void;
   switchAct: (id: string) => void;
-  loadState: () => Promise<void>;        // 多会话 #2：切换会话（重置卡片/输入等会话级状态）
+  loadState: (opts?: { preferActId?: string }) => Promise<void>;        // 多会话 #2：切换会话（重置卡片/输入等会话级状态）；resumeTodo 传 preferActId 锚定刚恢复的会话
   newConversation: () => Promise<void>;   // 多会话 #2：新建会话
+  resumeTodo: (id: string) => Promise<void>;   // Z5：待办「继续」→ POST /api/todos/:id/resume 以原 act 数据预填的新会话恢复对话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
   saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string; shopBrand?: string }) => Promise<void>;
@@ -245,6 +260,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     confirmState: null, confirmFailed: null, confirmBusy: false,
     campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],
     welcome: null, storeBanner: null, prefs: {}, lastPlan: null,
+    todos: [],
     notifications: [], unread: 0,
     booted: false, activeTab: 'chat', chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     streaming: false, streamingText: '', editingDraft: null, drawerAud: null,
@@ -302,13 +318,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // —— 数据加载 ——
-  const loadState = useCallback(async () => {
+  const loadState = useCallback(async (opts?: { preferActId?: string }) => {
     const s = await api<any>('/api/state');
     const acts: Act[] = (s.acts || []) as Act[];
     const actIndex = buildActIndex(acts);
-    // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）
+    // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）。
+    // preferActId（resumeTodo）：刚恢复的新会话优先锚定——闭包里的 state.act 还是旧会话，不传会被旧会话抢回。
+    const preferId = opts?.preferActId ?? state.act?.id ?? '';
     // /api/state 不返回 planCard（后端不持久化）——同一会话沿用内存值，否则确认发送/预览后 loadState 把卡片冲掉
-    const nextAct = actIndex.get(state.act?.id ?? '') || acts[0] || state.act;
+    const nextAct = actIndex.get(preferId) || acts[0] || state.act;
     patch({
       status: s.status, kpis: s.kpis, trend: s.trend,
       metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
@@ -316,11 +334,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       acts,
       // Wave3 批次域：campaigns/blackout/global_paused（缺省安全值；pendingBatches 是 done 帧专属，不在此触碰）
       ...parseBatchDomain(s),
-      // Wave4 Z4/C5/Z6：welcome/store_banner/prefs/last_plan（均可缺省，安全降级）
+      // Wave4 Z4/C5/Z6 + Wave5 Z5：welcome/store_banner/prefs/last_plan/todos（均可缺省，安全降级）
       welcome: parseWelcome(s.welcome),
       storeBanner: parseStoreBanner(s.store_banner),
       prefs: parsePrefs(s.prefs),
       lastPlan: parseLastPlan(s.last_plan),
+      todos: parseTodos(s.todos),
       // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
       ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
       act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
@@ -443,6 +462,42 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       toast_('新建会话失败：' + (e?.message || e));
     }
   }, [state.acts, patch, toast_]);
+
+  // —— Z5 待办「继续」→ POST /api/todos/:id/resume：以原 act 数据预填开新会话。
+  // 200 {ok, act} → 用响应 act 切换会话（参照 switchAct 清会话级状态）+ loadState({preferActId}) 回合末刷新；
+  // 409（该待办已 done）→ 静默刷新待办列表（不切会话不报错）；其余失败 toast。走裸 fetch 取状态码（api() 不透传 status）。
+  const resumeTodo = useCallback(async (id: string) => {
+    if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
+    if (!id) return;
+    try {
+      const res = await fetch(`/api/todos/${encodeURIComponent(id)}/resume`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
+      });
+      if (res.status === 409) {
+        // 待办已完成：仅刷新（done 项随下次 /api/state 从 todos 消失），当前会话保持不动
+        loadState().catch(() => {});
+        return;
+      }
+      const data = await res.json().catch(() => null);
+      const nextAct = data && data.act && typeof data.act.id === 'string' && data.act.id
+        ? (data.act as Act) : null;
+      if (!res.ok || !nextAct) { toast_('继续待办失败，请稍后再试'); return; }
+      // 预填的新会话置为当前；不在本地列表时并入头部，并登记 actIndex（loadState 的 O(1) 查找要用）
+      const acts = [nextAct, ...state.acts.filter((a) => a.id !== nextAct.id)];
+      actIndexRef.current.set(nextAct.id, nextAct);
+      patch({
+        act: nextAct, acts, activeTab: 'chat',
+        planPushed: false, planShown: null,
+        confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
+        chips: [],   // chips 属于上一会话的最新回复，切会话即失效
+        pendingBatches: [],   // 待确认批次同属上一会话的最新回复，一并失效
+        chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
+      });
+      await loadState({ preferActId: nextAct.id });   // 刷新 campaigns/todos/通知等，锚定新会话防旧闭包抢回
+    } catch {
+      toast_('继续待办失败，请稍后再试');
+    }
+  }, [state.streaming, state.acts, patch, toast_, loadState]);
 
   // —— 发消息（SSE 流式 + 一次性降级） ——
   const sendMsg = useCallback(async (text: string) => {
@@ -608,6 +663,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       confirmState: null, confirmFailed: null,
       campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],   // 批次域属账号数据，登出一并清空
       welcome: null, storeBanner: null, prefs: {}, lastPlan: null,   // Wave4 新域同属账号数据
+      todos: [],   // Z5 待办亦然
       notifications: [], unread: 0,   // Z7 通知亦然
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER, drawerAud: null, historyOpen: false,
     });
@@ -863,7 +919,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const value: AppContextValue = {
     ...state,
-    switchTab, switchAct, loadState, newConversation, sendMsg, setMode, saveConfig, resetData, doImport,
+    switchTab, switchAct, loadState, newConversation, resumeTodo, sendMsg, setMode, saveConfig, resetData, doImport,
     authSubmit, authLogout, jumpToConfig, confirmPlan, sendConfirmedPlan, createCardDraft, sendEditedDraft, sendDraft, deleteDraft,
     refreshNotifications, markNotificationsRead,
     setChatInput: (v) => patch({ chatInput: v }),

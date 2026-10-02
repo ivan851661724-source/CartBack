@@ -2,14 +2,6 @@
  * CartBack v3 前端常量与纯函数 —— 1:1 移植自 app.js 顶部（与引擎 extractNeeds / server matchAudienceByDesc 口径对齐）。
  */
 
-/** 4 项需求字段：[key, 中文标签]（IGDE 静默采集；槽位名随后端契约 pain→reason） */
-export const FIELDS: [keyof import('./types').Needs, string][] = [
-  ['audience', '针对谁'],
-  ['reason', '为什么挽回'],
-  ['goal', '要什么结果'],
-  ['offer', '给什么钩子'],
-];
-
 /**
  * 初始引导：品牌基础信息 10 项（快捷描述 chip + 右侧需求收集 checklist 共用）。
  * - msg：点击 chip 时发给助手的那句完整话（驱动 LLM 对话）

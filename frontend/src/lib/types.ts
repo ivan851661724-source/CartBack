@@ -382,3 +382,15 @@ export interface NotificationsResp {
   items: NotificationItem[];
   unread: number;
 }
+
+// ============================ Wave5 新契约 ============================
+
+/** Z5 待办（GET /api/state 顶层 todos：未 done 倒序 ≤20；缺省 = []）。
+ * A4 收口的可见出口：对话空态渲染 summary + 「继续」，点击 → POST /api/todos/:id/resume。 */
+export interface TodoItem {
+  id: string;
+  summary: string;       // 一句话摘要（如「A 加购未付批次还差确认，回头继续」）
+  act_id: string;        // 来源会话
+  created_at: number | string;
+  done: boolean;
+}

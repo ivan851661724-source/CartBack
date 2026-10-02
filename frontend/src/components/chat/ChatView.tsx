@@ -7,7 +7,7 @@ import { BRAND_POINTS, INTENT_POINTS } from '@/lib/constants';
 import { filledCount, needsValue, needsSource } from '@/lib/needs';
 import { fmtTime } from '@/lib/format';
 import { api } from '@/lib/api';
-import type { Draft, LastPlan, NotificationItem } from '@/lib/types';
+import type { Draft, LastPlan, NotificationItem, TodoItem } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
@@ -20,6 +20,9 @@ const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时�
 /** 回执气泡 type 角标文案（Z7）：t0=发送回执 / t24=回流汇报 / recover=报喜（system 不进对话流） */
 const RECEIPT_TYPE_LABEL: Record<string, string> = { t0: '发送回执', t24: '回流汇报', recover: '报喜' };
 
+/** E1 拦截轮识别组（仅用于「建议」角标）：done 帧 chips 命中其中之一且回复文本含「建议」→ 视为拦截建议气泡 */
+const E1_CHIPS = ['换成替代方案', '就要这个折扣', '换主题行再打', '先不动'];
+
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
   const {
@@ -31,6 +34,7 @@ export default function ChatView() {
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
     campaigns, pendingBatches,
     lastPlan, notifications,
+    todos, resumeTodo,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -42,6 +46,15 @@ export default function ChatView() {
 
   const n = filledCount(act?.needs);
   const messages = act?.messages || [];
+  // E1 拦截轮「建议」角标：最新 agent 回复含「建议」且当前 chips 命中拦截组（换方案/要折扣/换主题/先不动）时，
+  // 给该条气泡加灰色「建议」小标，帮商家一眼认出这是助手的替代建议（纯样式，chips 随下一条消息清空后角标随之消失）。
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) { if (messages[i].role === 'assistant') { lastAssistantIdx = i; break; } }
+  const lastAssistant = lastAssistantIdx >= 0 ? messages[lastAssistantIdx] : null;
+  const e1Badge: string | undefined = !streaming && chips.length > 0
+    && chips.some((c) => E1_CHIPS.includes(c))
+    && typeof lastAssistant?.content === 'string' && lastAssistant.content.includes('建议')
+    ? '建议' : undefined;
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
   // 初始态（引导期）：右侧显示需求收集 checklist；引导走完/跳过后切回机会列表
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
@@ -161,6 +174,7 @@ export default function ChatView() {
             {messages.length === 0 && !streaming && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                 {lastPlan && <LastPlanCard plan={lastPlan} onUse={() => sendMsg('照上次的来')} />}
+                {todos.length > 0 && <TodosCard todos={todos} onResume={resumeTodo} />}
                 <div style={{
                   display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
                   gap: 12, padding: '56px 16px', color: 'var(--muted)',
@@ -173,7 +187,7 @@ export default function ChatView() {
               </div>
             )}
 
-            {messages.map((m, i) => <MessageBubble key={i} m={m} />)}
+            {messages.map((m, i) => <MessageBubble key={i} m={m} badge={i === lastAssistantIdx ? e1Badge : undefined} />)}
 
             {/* ② 主动轻提示：四要素齐了但一直没触发确认卡 → 轻推一句（非弹窗、非表单） */}
             {!streaming && n >= 4 && !act?.planCard && !planShown && messages.length > 4 && (
@@ -496,6 +510,46 @@ function LastPlanCard({ plan, onUse }: { plan: LastPlan; onUse: () => void }) {
         ))}
       </div>
     </button>
+  );
+}
+
+/**
+ * Z5「待办」卡（A4 收口的可见出口）：GET /api/state 顶层 todos（未 done 倒序 ≤20，AppProvider 缺省 []）。
+ * 对话为空时渲染在「上次方案」卡之下——下次打开面板的首屏即见。每条一行（summary + 「继续」小按钮），
+ * 整行可点 = resumeTodo → POST /api/todos/:id/resume 以原会话数据恢复对话；todos 为空时本区块不渲染。
+ */
+function TodosCard({ todos, onResume }: { todos: TodoItem[]; onResume: (id: string) => void }) {
+  return (
+    <div style={{
+      background: '#fff', border: '.5px solid var(--line-2)', borderRadius: 16, padding: '14px 18px',
+      boxShadow: 'var(--shadow-card)',
+    }}>
+      <div style={{ fontSize: 13.5, fontWeight: 700, color: '#1E293B', marginBottom: 4 }}>⏳ 待办</div>
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {todos.map((t, i) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onResume(t.id)}
+            title="继续这条待办：接着上次的方案聊"
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12,
+              width: '100%', padding: '9px 0', background: 'none', border: 'none',
+              borderBottom: i < todos.length - 1 ? '.5px dashed #DDE2E8' : 'none',
+              cursor: 'pointer', textAlign: 'left', fontFamily: 'inherit',
+            }}
+          >
+            <span style={{
+              fontSize: 12.5, color: 'var(--text)', minWidth: 0,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}>{t.summary}</span>
+            <span style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--brand)', whiteSpace: 'nowrap', flexShrink: 0 }}>
+              继续 →
+            </span>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
