@@ -1,0 +1,1563 @@
+{
+  "model": "qwen3.7-plus",
+  "base_url": "https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+  "started_at": "2026-10-02T12:58:58.650Z",
+  "turns": [
+    {
+      "id": "p01",
+      "input": "我的品牌叫 LunaGlow，做手工香薰蜡烛，客单价 28 美元",
+      "reply": "收到，LunaGlow 手工香薰蜡烛，客单价 28 刀。想先捞哪拨人？是加购了没付款的，还是只逛了没买的，或者是沉睡的老客？",
+      "engine": "online",
+      "chips": [
+        "加购未付",
+        "浏览未买",
+        "老客"
+      ],
+      "stage": "S1",
+      "filled": 0,
+      "needs": {
+        "audience": null,
+        "reason": null,
+        "offer": null,
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "28 美元",
+          "at": 1790945943449
+        }
+      ],
+      "corrections": [],
+      "latency_ms": 4803,
+      "checks": [
+        {
+          "name": "extras 含品牌 LunaGlow",
+          "pass": true
+        },
+        {
+          "name": "extras 含品类",
+          "pass": true
+        },
+        {
+          "name": "audience 仍空",
+          "pass": true
+        },
+        {
+          "name": "复述含品牌",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p02",
+      "input": "主要客户是 25 到 40 岁的美国女性，喜欢居家氛围和天然成分",
+      "reply": "懂了，受众是 25-40 岁爱居家氛围的美国女性。她们通常是忘了结账，还是在对比价格，或者你有其他发现？",
+      "engine": "online",
+      "chips": [
+        "忘记结账",
+        "在对比价格",
+        "我来说原因"
+      ],
+      "stage": "S1",
+      "filled": 1,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": null,
+        "offer": null,
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "28 美元",
+          "at": 1790945943449
+        }
+      ],
+      "corrections": [],
+      "latency_ms": 2812,
+      "checks": [
+        {
+          "name": "audience 含人群细节",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p03",
+      "input": "客单价改成 35 美元",
+      "reply": "好嘞，客单价记成 35 美元了。那想给这拨人配个什么钩子拉回来？折扣、免邮还是送个小赠品？",
+      "engine": "online",
+      "chips": [
+        "折扣",
+        "免邮",
+        "小赠品"
+      ],
+      "stage": "S1",
+      "filled": 1,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": null,
+        "offer": null,
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945950454
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 4189,
+      "checks": [
+        {
+          "name": "客单价 correction 生效",
+          "pass": true
+        },
+        {
+          "name": "回复含 35",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p04",
+      "input": "客户主要是年轻人",
+      "reply": "收到，客单价已更新为 35 美元。那咱们给这拨年轻人配个啥钩子？是打个折、包个邮，还是送个小样？",
+      "engine": "online",
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "filled": 1,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": null,
+        "offer": null,
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 5624,
+      "checks": [
+        {
+          "name": "audience 不被「年轻人」直接覆盖",
+          "pass": true
+        },
+        {
+          "name": "回复出现核实/对齐语气",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p05",
+      "input": "挽回原因就盯加购未付款的",
+      "reply": "明白了，专门捞加购了没付款的。想给个什么钩子？折扣、满减、包邮，还是别的？",
+      "engine": "online",
+      "chips": [
+        "折扣",
+        "免邮",
+        "小赠品"
+      ],
+      "stage": "S1",
+      "filled": 2,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": null,
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 3020,
+      "checks": [
+        {
+          "name": "reason 含「加购未付」（回归样本）",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p06",
+      "input": "折扣力度给 10% off 就行",
+      "reply": "行，10% off 记下了。那这封邮件最想让他们干啥？是赶紧回来结账，还是顺道看看新品？",
+      "engine": "online",
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "filled": 3,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 2350,
+      "checks": [
+        {
+          "name": "offer=10% off",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p07",
+      "input": "发送时段选晚上 8 点",
+      "reply": "晚上 8 点这个时间点记下了。那这封邮件最想让他们干啥？是赶紧回来结账，还是顺道看看新品？",
+      "engine": "online",
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "filled": 3,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 2503,
+      "checks": [
+        {
+          "name": "发送时段进 extras",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p08",
+      "input": "产品特色是天然大豆蜡、48 小时长烧",
+      "reply": "天然大豆蜡和48小时长烧这俩卖点记下了。那咱们发这信最想让他们干啥？是赶紧回来结账、凑个具体金额，还是先跑通流程看看效果？",
+      "engine": "online",
+      "chips": [
+        "挽回订单",
+        "具体金额",
+        "跑通流程",
+        "我自己定"
+      ],
+      "stage": "S1",
+      "filled": 3,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": null
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 3071,
+      "checks": [
+        {
+          "name": "产品特色进 extras",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p09",
+      "input": "营销目标是本月挽回 100 单",
+      "reply": "明白，目标是本月捞回 100 单。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 2298,
+      "checks": [
+        {
+          "name": "goal 含 100",
+          "pass": true
+        },
+        {
+          "name": "filled_count=4",
+          "pass": true
+        },
+        {
+          "name": "stage=S2",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p10",
+      "input": "发送频率每周不超过 2 封",
+      "reply": "每周不超过 2 封的频率也记下了。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945972504
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 3182,
+      "checks": [
+        {
+          "name": "offer 不被「发送频率」错切",
+          "pass": true
+        },
+        {
+          "name": "offer 保持 10%",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p11",
+      "input": "我希望拿到的结果是：本月挽回 100 单",
+      "reply": "收到，目标就是本月挽回 100 单。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 2969,
+      "checks": [
+        {
+          "name": "不清零：filled_count 仍 4",
+          "pass": true
+        },
+        {
+          "name": "同值忽略：goal 无 correction",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p13",
+      "input": "加购未付的客户忘了付款，希望他们回来完成付款，把方案卡给我看看",
+      "reply": "没问题，我这就按你的要求配一封挽回邮件。",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "25-40岁美国女性",
+        "reason": "加购未付款",
+        "offer": "10% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        }
+      ],
+      "latency_ms": 1952,
+      "checks": [
+        {
+          "name": "stage 停留 S2（S2→S3 唯一入口 confirm）",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p15",
+      "input": "受众改成老客，折扣换 15%",
+      "reply": "好嘞，受众换成老客，折扣改成 15%。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 3109,
+      "checks": [
+        {
+          "name": "audience 含 老客",
+          "pass": true
+        },
+        {
+          "name": "offer 含 15%",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p16",
+      "input": "嗯，我知道了",
+      "reply": "行，那我这就按老客、15% off 的钩子去配邮件了。",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 4107,
+      "checks": [
+        {
+          "name": "stage 保持 S2",
+          "pass": true
+        },
+        {
+          "name": "filled_count 保持 4",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p17",
+      "input": "把加购未付和下单未付分别做成两个批次",
+      "reply": "收到，要把加购未付和下单未付分成两个批次。我先按 15% off 的钩子给这两拨人各出一版方案，你看行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 3792,
+      "checks": [
+        {
+          "name": "回复含批次拆分语义",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p18",
+      "input": "黑五（11/27–11/28）都停发，先全停",
+      "reply": "好嘞，黑五那两天先全停。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 1999,
+      "checks": [
+        {
+          "name": "回复含停发语义",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p19",
+      "input": "没发完的那些折扣改成 15%",
+      "reply": "行，没发完的那些折扣都改成 15% off。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 2909,
+      "checks": [
+        {
+          "name": "回复含边界声明语义",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p20",
+      "input": "再建一批加购未付的，把已经下单的和最近发过邮件的都排除掉",
+      "reply": "收到，新建一批加购未付的受众，排除已下单和近期发过邮件的人。我帮你按这个配一封挽回邮件，行不？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 2550,
+      "checks": [
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p12",
+      "input": "邮件正文直接用中文写给美国客户",
+      "reply": "语种这头我不改：挽回邮件的语种跟着收件人走——你的客户在美国，邮件就发英文版（发送时逐收件人按其 locale 本地化），聊天里咱们用中文随便聊。四项配置都没动，要继续调哪样？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 2181,
+      "checks": [
+        {
+          "name": "拒绝中文邮件+解释",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p14",
+      "input": "哈哈哈今天天气真不错啊",
+      "reply": "哈哈，天气好确实让人心情舒畅。不过咱们还是先把 LunaGlow 的挽回邮件搞定吧，毕竟那 100 单的目标还在那儿等着呢。",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 1813,
+      "checks": [
+        {
+          "name": "不编造不崩溃：有正常回复",
+          "pass": true
+        },
+        {
+          "name": "拉回正题语义",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "id": "p21",
+      "input": "现在都在跑啥",
+      "reply": "目前跑的是两批：加购未付和下单未付，钩子都是 15% off。黑五那两天已设停发，没发完的折扣也改好了。你想先看看哪一批的效果？",
+      "engine": "online",
+      "chips": [],
+      "stage": "S2",
+      "filled": 4,
+      "needs": {
+        "audience": "沉睡 / 流失老客",
+        "reason": "加购未付款",
+        "offer": "15% off",
+        "goal": "本月挽回100单"
+      },
+      "extras": [
+        {
+          "key": "brand",
+          "value": "LunaGlow",
+          "at": 1790945943449
+        },
+        {
+          "key": "category",
+          "value": "手工香薰蜡烛",
+          "at": 1790945943449
+        },
+        {
+          "key": "aov",
+          "value": "35 美元",
+          "at": 1790945952578
+        },
+        {
+          "key": "timing",
+          "value": "晚上 8 点",
+          "at": 1790945963952
+        },
+        {
+          "key": "feature",
+          "value": "天然大豆蜡、48 小时长烧",
+          "at": 1790945967024
+        },
+        {
+          "key": "frequency",
+          "value": "每周不超过 2 封",
+          "at": 1790945975474
+        }
+      ],
+      "corrections": [
+        {
+          "slot": "aov",
+          "old": "28 美元",
+          "new": "35 美元",
+          "at": 1790945950454,
+          "scope": "extras"
+        },
+        {
+          "slot": "audience",
+          "old": "25-40岁美国女性",
+          "new": "沉睡 / 流失老客",
+          "at": 1790945980537
+        },
+        {
+          "slot": "offer",
+          "old": "10% off",
+          "new": "15% off",
+          "at": 1790945980537
+        }
+      ],
+      "latency_ms": 2090,
+      "checks": [
+        {
+          "name": "批次汇报语义",
+          "pass": true
+        },
+        {
+          "name": "通用:回复非空",
+          "pass": true
+        },
+        {
+          "name": "通用:不暴露槽位英文名",
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "pass": 21,
+  "total": 21,
+  "finished_at": "2026-10-02T13:00:01.979Z"
+}

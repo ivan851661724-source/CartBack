@@ -808,6 +808,8 @@ class IGDE {
     if (aiDead && !guardrailHits.includes('AI_OFFLINE')) guardrailHits.push('AI_OFFLINE');
     // inferred 槽回复必须可纠正（B5 硬约束）：回复缺「我理解为/不对请纠正」表述时引擎补一句
     reply = this._appendInferredNote(reply, act, mergeResult.acceptedInferred, usedAI);
+    // 冲突轮回复必须真的在核实（B4 已选冲突轮时模型措辞不稳定 → 引擎兜底补问，PRD 剧本 #4）
+    reply = this._appendConflictAsk(reply, question, mergeResult.conflictsNew);
 
     // B4 记账：本轮实际追问的槽 ask_count +1；冲突候选标记 asked（下一轮未回应则 C6 兜底）
     if (askedSlot) {
@@ -1421,6 +1423,12 @@ class IGDE {
       const newVal = clampNeedValue(c.new != null ? c.new : c.value);
       if (!slot || !newVal) continue;
       if (NEEDED_FIELDS.includes(slot)) {
+        // B2 判定权威是用户消息的语气词，不是模型标签：无修正语气时模型的「纠正」降级为普通新值，
+        // 转入 ② 走冲突候选通道（防模型误标 correction 把已确认值静默顶掉——真模型联调 p04 实测）
+        if (!hasTone) {
+          turn.updates.push({ slot, value: newVal, confidence: 1, inferred: false });
+          continue;
+        }
         const prev = needs[slot];
         const oldVal = prev ? prev.value : '';
         if (oldVal === newVal) continue; // 同值忽略
@@ -1453,16 +1461,18 @@ class IGDE {
       const prev = needs[slot];
       if (prev && prev.value === value) continue; // 同值忽略
       const kwTouched = u.kw === true;
-      if (prev && !hasTone && !kwTouched) {
-        // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清
+      if (prev && !hasTone) {
+        // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清。
+        // kw 原话命中同规则：触发词是用户原话，但写入值是词表归一化短语——
+        // 静默覆盖会把用户已确认的具体值（如「本月挽回100单」）冲成罐头短语（真模型联调 p13 实测）。
         turn.conflictCandidates.push({ slot, old: prev.value, new: value });
         continue;
       }
       const inferred = u.inferred === true;
       needs[slot] = { value, source: inferred ? 'inferred' : 'explicit', at: now };
       if (inferred) acceptedInferred.push(slot);
-      if (prev && (hasTone || kwTouched)) {
-        // 用户带修正语气 / 原话逐字覆盖已填值 → 记 corrections（追加制）
+      if (prev && hasTone) {
+        // 用户带修正语气覆盖已填值 → 记 corrections（追加制）
         mem.corrections.push({ slot, old: prev.value, new: value, at: now });
         mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
         corrected.add(slot);
@@ -1522,6 +1532,19 @@ class IGDE {
     const note = `我先按${names}理解，不对请纠正。`;
     if (!reply) return note;
     return reply + (usedAI ? ' ' + note : note);
+  }
+
+  /** 冲突澄清兜底（B5）：B4 本轮选了冲突澄清，但在线模型回复可能只顾推进话题没真的核实
+   *  （真模型联调实测：模型说「客群调整为年轻人」就跳去问下一项）——引擎补一句复述旧值 + 二选一。
+   *  模型已复述旧值核实 → 不重复补。 */
+  _appendConflictAsk(reply, question, conflictsNew) {
+    if (!question || question.kind !== 'conflict') return reply;
+    const c = (conflictsNew || [])[0];
+    if (!c || !c.old || !c.new) return reply;
+    const t = String(reply || '');
+    if (t.includes(String(c.old).slice(0, 8))) return reply; // 已复述旧值 = 在核实
+    const ask = `对了，之前记的是「${c.old}」，这轮要按「${c.new}」算吗？还是维持原来的，你定。`;
+    return t ? `${t} ${ask}` : ask;
   }
 
   /** 离题/元问题/身份询问路由：四槽全空且无业务指向时，返回温和接住池（轮换防复读）；否则 null。

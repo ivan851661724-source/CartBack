@@ -361,7 +361,9 @@ const PER_TURN = {
     const acc = require('./assert');
     assert.ok(/不聊|拉回|确认卡|四样|配置|调/.test(r.reply), 'p14 礼貌拉回 + 状态复述');
     assert.equal(acc.slotText(a.needs.offer), '10% off', 'p14 闲聊不写槽位（offer 不动）');
-    assert.ok(acc.slotText(a.needs.goal).includes('付款'), 'p14 goal 不动（#13 原话采集后的现值）');
+    // B2 冲突规则（真模型联调后对齐）：#13 原话「忘了付款/回来完成付款」会命中 kw 罐头短语，
+    // 但 S2 冻结 + 无修正语气 → 不覆盖（候选丢弃），goal 保持用户已确认的具体值
+    assert.ok(acc.slotText(a.needs.goal).includes('100'), 'p14 goal 保持用户确认值（kw 罐头不静默覆盖）');
     assert.ok(acc.slotText(a.needs.reason), 'p14 reason 非空（本轮不写入，保持采集态）');
     assert.equal(a.stage, 'S2', 'p14 stage 保持 S2');
     assert.deepEqual(r.chips, [], 'p14 无追问 chips');
