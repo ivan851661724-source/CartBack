@@ -10,6 +10,7 @@ import type { Draft } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
+import PlanCardView from './PlanCard';
 
 const EDIT_HINT = '说说要改哪块：受众、钩子、折扣还是发送时机…';
 
@@ -19,13 +20,17 @@ export default function ChatView() {
     act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, chips, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, createCardDraft, switchTab, setHistoryOpen, loadState,
-    setEditingDraft, setEditOpen, setDraftGenerating, toast_,
+    setDraftGenerating, toast_,
+    confirmState, confirmFailed, confirmBusy, confirmPlan,
     onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [clickedChips, setClickedChips] = useState<Set<number>>(new Set());
+  // confirm 409 三出口：「改用店内现成码」的输入行展开 + 码值
+  const [reuseOpen, setReuseOpen] = useState(false);
+  const [reuseCode, setReuseCode] = useState('');
 
   const n = filledCount(act?.needs);
   const messages = act?.messages || [];
@@ -52,11 +57,11 @@ export default function ChatView() {
     return () => { alive = false; };
   }, [planShown, planAudience]);
 
-  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips 出现）
+  // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现）
   useEffect(() => {
     const el = areaRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages.length, streamingText, planShown, streaming, chips]);
+  }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed]);
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
@@ -90,13 +95,28 @@ export default function ChatView() {
   // source==='inferred' 的槽在该行显示「（我推断的，可改）」小标。
   const confirmCard = planShown === 'confirm' && act?.planCard ? act.planCard : null;
   const needsNow = act?.needs ?? null;
+  // planCard reason 兜底：新契约为 reason；旧后端历史数据仍是 pain（键已删，运行时兜底读一次）
+  const cardReason = confirmCard ? (confirmCard.reason || (confirmCard as { pain?: string }).pain) : undefined;
   const confirmRaw: [string, string | undefined, boolean][] = confirmCard ? [
     ['针对谁', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
-    ['为什么挽回', needsValue(needsNow?.reason) || confirmCard.pain, needsSource(needsNow?.reason) === 'inferred'],
+    ['为什么挽回', needsValue(needsNow?.reason) || cardReason, needsSource(needsNow?.reason) === 'inferred'],
     ['要什么结果', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
-    ['给什么钩子', needsValue(needsNow?.offer) || confirmCard.discount || confirmCard.offer, needsSource(needsNow?.offer) === 'inferred'],
+    ['给什么钩子', needsValue(needsNow?.offer)
+      || (typeof confirmCard.discount === 'string' ? confirmCard.discount : confirmCard.discount?.text)
+      || confirmCard.offer, needsSource(needsNow?.offer) === 'inferred'],
   ] : [];
   const confirmRows: [string, string, boolean][] = confirmRaw.map(([label, v, inferred]) => [label, v || '—', inferred]);
+
+  // Wave2 confirm 流：当前会话已确认（confirmState 属于本会话且 act 在 S3）→ 确认卡换已确认态、下方渲染方案卡
+  const confirmedHere = Boolean(confirmState && confirmState.actId === act?.id && act?.stage === 'S3');
+
+  const submitReuse = () => {
+    const code = reuseCode.trim();
+    if (!code) return;
+    setReuseOpen(false);
+    setReuseCode('');
+    confirmPlan({ reuse_code: code });
+  };
 
   return (
     <div className="view-body chat-view-body">
@@ -210,37 +230,56 @@ export default function ChatView() {
                     <div style={{color:'var(--muted)'}}>发送时按 3 类人群生成 3 个变体（价格敏感 / 高意向 / 标准），语种跟随收件人。</div>
                   </div>
                 )}
-                <div style={{display:'flex',gap:'9px',alignItems:'center'}}>
+                <div style={{display:'flex',gap:'9px',alignItems:'center',flexWrap:'wrap'}}>
                   {hasSentForAct ? (
                     <>
                       <span style={{fontSize:'13px',color:'var(--ok2)',fontWeight:600}}>✓ 邮件已发送</span>
                       <button className="btn ghost" onClick={() => switchTab('data')}>查看数据看板 →</button>
                     </>
+                  ) : confirmedHere ? (
+                    <>
+                      <span style={{fontSize:'13px',color:'var(--ok2)',fontWeight:600}}>✓ 已确认方案</span>
+                      <span style={{fontSize:'12.5px',color:'var(--muted)'}}>在下方方案卡核对后发送</span>
+                      <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
+                    </>
                   ) : (
                     <>
-                      <button className="btn primary" onClick={async () => {
-                        const card = confirmCard;
-                        if (!card || !act) return;
-                        // 不切 planShown（保留确认卡在对话流中）；跳邮件 tab + 预建草稿 + 打开预览
-                        switchTab('mail');
-                        setDraftGenerating(true);
-                        try {
-                          const d = await createCardDraft(act.id, card);   // 预建草稿（确认发送复用同一条，防僵尸草稿）
-                          await loadState();
-                          setEditingDraft(d); setEditOpen(true);            // 草稿就绪→打开预览
-                        } catch (e: any) {
-                          // 失败必须可见（此前静默吞掉 → 跳到邮件页后无任何反馈）；留在确认卡方便重试
-                          toast_('草稿生成失败：' + (e?.message || e));
-                          switchTab('chat');
-                        }
-                        setDraftGenerating(false);
-                      }}>可以，去发</button>
+                      <button className="btn primary" disabled={confirmBusy} onClick={() => confirmPlan()}>
+                        {confirmBusy ? '确认中…' : '可以，去发'}
+                      </button>
                       <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
                     </>
                   )}
                 </div>
               </div>
             )}
+            {/* confirm 409（建码失败）：原因 + 三条出口（重试 / 输入店内现成码 / 改发无钩子） */}
+            {confirmFailed && (
+              <div style={{background:'var(--danger-bg)',border:'.5px solid var(--danger)',borderRadius:'16px',padding:'16px 20px',margin:'12px 0'}}>
+                <div style={{fontSize:'14px',fontWeight:700,color:'var(--danger)',marginBottom:'4px'}}>⚠ 折扣码创建失败</div>
+                <div style={{fontSize:'12.5px',color:'var(--text)',marginBottom:'10px'}}>{confirmFailed.reason || '折扣码服务暂时不可用'}</div>
+                <div style={{display:'flex',gap:'8px',alignItems:'center',flexWrap:'wrap'}}>
+                  <button className="btn sm primary" disabled={confirmBusy} onClick={() => confirmPlan()}>重试建码</button>
+                  <button className="btn sm ghost" disabled={confirmBusy} onClick={() => setReuseOpen(v => !v)}>改用店内现成码</button>
+                  <button className="btn sm ghost" disabled={confirmBusy} onClick={() => confirmPlan({ nohook: true })}>改发无钩子提醒信</button>
+                </div>
+                {reuseOpen && (
+                  <div style={{display:'flex',gap:'8px',marginTop:'10px'}}>
+                    <input
+                      value={reuseCode}
+                      onChange={(e) => setReuseCode(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') submitReuse(); }}
+                      placeholder="输入店内已有折扣码，如 SAVE20"
+                      autoFocus
+                      style={{flex:1,minWidth:0,border:'.5px solid var(--line)',borderRadius:'9px',padding:'8px 12px',fontSize:'13px',background:'#fff',color:'var(--text)',outline:'none'}}
+                    />
+                    <button className="btn sm primary" disabled={!reuseCode.trim() || confirmBusy} onClick={submitReuse}>使用该码</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* 方案卡（confirm 200 后渲染在确认卡之后）：折扣徽标 / estGmv 算式 / 五项核对单 / 确认发送 */}
+            {confirmedHere && <PlanCardView />}
             {planShown === 'sent' && lastSent && (
               <SentBanner res={lastSent.res} draft={lastSent.draft} onSeeFlow={() => switchTab('data')} />
             )}

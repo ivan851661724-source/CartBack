@@ -60,13 +60,78 @@ export interface ActMemory {
   ask_count: Record<string, number>;
 }
 
-/** 方案卡：信息齐了由引擎生成（pushConfirm / pushPlan 渲染）。注意：planCard 字段名后端未随 needs 改名，pain 保留 */
+/** 折扣码状态（planCard.discount.code_status）：created=已在店铺创建 / reused=沿用店内已有码 / none=未创建 */
+export type CodeStatus = 'created' | 'reused' | 'none';
+
+/** 新契约 planCard.discount 对象（旧数据该键可能是纯字符串 → 读取处需 typeof 兼容） */
+export interface PlanCardDiscount {
+  text: string;
+  code: string | null;
+  code_status: CodeStatus;
+}
+
+/** estGmv 算式（方案卡点击展开）：people 人 × 客单 aov × 挽回率 rate% − 折扣成本 discount_cost */
+export interface EstGmvFormula {
+  people: number;
+  aov: number;
+  rate: number;           // 挽回率（百分数值，如 12 表示 12%）
+  discount_cost: number;
+}
+
+/** 新契约 estGmv：source=store 店铺实数 / demo 演示数据 */
+export interface PlanCardEstGmv {
+  amount: number;
+  currency: string;       // 'USD'
+  formula?: EstGmvFormula;
+  source?: 'store' | 'demo';
+}
+
+/** 发送前核对单闸门（恒 5 项，服务端 confirm 下发 / send 409 刷新） */
+export type ChecklistGate = 'window' | 'frequency' | 'whitelabel' | 'unsubscribe' | 'amount_code';
+
+export interface ChecklistItem {
+  gate: ChecklistGate | string;
+  label: string;          // 中文
+  pass: boolean;
+  reason?: string;        // 未过原因（中文，红字展示）
+}
+
+/** 对照组（holdout）：frozen=false 时以 note 说明不设组原因 */
+export interface Holdout {
+  frozen: boolean;
+  count: number;
+  ratio?: number;         // 冻结比例（0.1 或 10 均按 10% 展示）
+  note?: string;
+}
+
+/** 发送前核对单（confirm 200 下发；send 闸门 409 时服务端兜底返回最新值） */
+export interface Checklist {
+  items: ChecklistItem[]; // 恒 5 项
+  all_pass: boolean;
+  holdout?: Holdout | null;
+}
+
+/**
+ * 方案卡（新契约 Wave2）：confirm 接口 200 下发，draft_id 指向后端已建草稿（发送直接复用）。
+ * pain 键已删除，流失原因语义并入 reason。旧契约遗留字段保留为可选（过渡期旧后端
+ * done 帧 / 历史会话仍可能下发，读取处需判空；discount 新旧形态不同，读取处需 typeof 兼容）。
+ */
 export interface PlanCard {
+  // —— 新契约 ——
+  draft_id?: string;                // confirm 时后端已建草稿，发送直接 POST /api/draft/:id/send
   audience?: string;
-  pain?: string;
+  reach_count?: number;
+  reason?: string;                  // 流失原因（替代旧 pain）
+  discount?: PlanCardDiscount;
+  estGmv?: PlanCardEstGmv;
+  signature?: string;
+  unsubscribe_ok?: boolean;
+  send_window?: string;
+  language?: string;
+  inferred_slots?: string[];
+  // —— 旧契约遗留（新代码勿依赖） ——
   goal?: string;
   offer?: string;
-  discount?: string;
   subject?: string;
   body?: string;
   sendTiming?: string;
@@ -90,7 +155,7 @@ export interface Act {
   planCard?: PlanCard | null;
   memory?: ActMemory;      // 新契约：槽位纠正/补充等记忆（本波前端仅透传）
   filled_count?: number;   // 新契约：已填槽数（0-4；前端以 filledCount(needs) 实时计算为准）
-  code_status?: string;    // 新契约：折扣码状态（本波恒 "none"，忽略）
+  code_status?: string;    // 新契约：折扣码状态（created/reused/none/failed；方案卡以 planCard.discount 为准）
   created_at?: number;
   updated_at?: number;
 }
@@ -115,6 +180,7 @@ export interface Draft {
   sendTiming?: string;
   locale?: string;
   estGmv: number;
+  currency?: string;   // estGmv 币种（新契约 'USD'；缺省按 ¥ 展示，SentBanner 用）
   cost: number;
   tag_distribution?: Array<{ tag_type: string; tag_value: string; count: number; avg_weight: number }>;
   image_prompt?: string;   // 万相出图提示词快照（EditModal 编辑态展示 / 生成图片复用）

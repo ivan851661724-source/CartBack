@@ -2,7 +2,7 @@
  * needs 三态取值助手 —— 唯一允许读取 act.needs 槽位的地方。
  * 新契约：每槽 null | { value, source: 'explicit'|'inferred', at }；
  * 兼容旧数据：槽位可能是纯字符串（typeof 判断），读取一律走 needsValue()。
- * 槽位名已随后端契约 pain→reason（PlanCard.pain 除外，那是方案卡字段）。
+ * 槽位名已随后端契约 pain→reason（新契约 planCard 亦同：pain 键已删除）。
  */
 import type { Needs } from './types';
 

@@ -7,7 +7,7 @@
  *
  * React 文本默认转义，来自后端/LLM/CSV 的字符串直接 {value}，无需 esc()。
  */
-import type { Act, Chips, Engine, PlanCard, Stage, Needs } from './types';
+import type { Act, Chips, Checklist, Engine, PlanCard, Stage, Needs } from './types';
 
 /** 本地令牌（bootstrap 下发；与 cb_session cookie 并存，cookie 优先鉴权） */
 let authToken: string | null = null;
@@ -124,4 +124,49 @@ export async function createAct(preset?: { audience?: string }): Promise<Act> {
     method: 'POST',
     body: JSON.stringify(preset ? { preset } : {}),
   }).then((r: any) => r.act ?? r);
+}
+
+/** POST /api/act/:id/confirm 的三种结局：ok=确认成功 / conflict=建码失败(409) / unsupported=旧后端无此接口(404) */
+export type ConfirmOutcome =
+  | { kind: 'ok'; act?: Act; planCard: PlanCard; checklist?: Checklist }
+  | { kind: 'conflict'; reason: string; options: string[]; act?: Act }
+  | { kind: 'unsupported' };
+
+/**
+ * 确认卡「可以，去发」：POST /api/act/:id/confirm。
+ * - 200 {ok, act, planCard, checklist, holdout}（act.stage=S3）→ ok
+ * - 409 {ok:false, code_status:'failed', reason, options, act}（建码失败，不出 planCard）→ conflict
+ * - 404 / 响应体不可解析（旧后端未部署此接口）→ unsupported（调用方回退预建草稿旧路径）
+ * 其余状态（新后端在但异常）抛错，由调用方 toast——不盲目回退旧路径造成双重草稿。
+ */
+export async function confirmAct(actId: string, body?: Record<string, unknown>): Promise<ConfirmOutcome> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  if (authToken) headers['x-local-token'] = authToken;
+  let res: Response;
+  try {
+    res = await fetch(`/api/act/${actId}/confirm`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body ?? {}),
+      credentials: 'same-origin',
+    });
+  } catch {
+    return { kind: 'unsupported' };   // 网络层失败交给旧路径兜底（旧路径失败会 toast）
+  }
+  if (res.status === 401 || res.status === 403) throw new ApiAuthError();
+  let data: any = null;
+  try { data = await res.json(); } catch { data = null; }
+  if (res.ok && data && data.ok && data.planCard) {
+    return { kind: 'ok', act: data.act, planCard: data.planCard as PlanCard, checklist: data.checklist as Checklist | undefined };
+  }
+  if (res.status === 409 && data) {
+    return {
+      kind: 'conflict',
+      reason: typeof data.reason === 'string' ? data.reason : '折扣码创建失败',
+      options: Array.isArray(data.options) ? data.options.filter((o: unknown): o is string => typeof o === 'string') : [],
+      act: data.act,
+    };
+  }
+  if (res.status === 404 || !data) return { kind: 'unsupported' };
+  throw new Error((data && typeof data.error === 'string' && data.error) || `确认失败（HTTP ${res.status}）`);
 }

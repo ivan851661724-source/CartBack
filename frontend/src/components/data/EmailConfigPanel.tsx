@@ -2,22 +2,28 @@
 
 import { useApp } from '@/state/AppProvider';
 import { FIELDS } from '@/lib/constants';
+import { needsValue } from '@/lib/needs';
 import { Arrow } from '@/components/ui/icons';
 
 /** 邮件配置+预览面板 —— 嵌入数据看板下方，对应 Figma EmailPage */
 export default function EmailConfigPanel() {
-  const { act, planShown, setPlanShown, setPlanPushed, confirmSendPlan, setChatInput, setChatPlaceholder } = useApp();
+  const { act, planShown, setPlanShown, setPlanPushed, confirmPlan, setChatInput, setChatPlaceholder } = useApp();
 
   const card = act?.planCard;
   if (!card || planShown !== 'plan') return null;
 
   const rows = FIELDS.map(([k, label]) => {
-    // needs 槽位已随后端契约 pain→reason；planCard 字段名未改名，reason 槽读 planCard.pain
-    const v = (k === 'offer' ? (card.discount || card.offer) : k === 'reason' ? (card as any).pain : (card as any)[k]) || '';
+    // 新契约：槽位与 planCard 键统一用 reason（pain 已删除）；needs 槽位优先，planCard 兜底。
+    // discount 兼容新旧形态（新=对象{text,code,code_status}，旧=纯字符串）。
+    const needsVal = needsValue(act?.needs?.[k]);
+    const cardVal = k === 'offer'
+      ? (typeof card.discount === 'string' ? card.discount : card.discount?.text) || card.offer
+      : (card as Record<string, unknown>)[k];
+    const v = needsVal || (typeof cardVal === 'string' ? cardVal : '') || '';
     return (
       <div className="ec-row" key={k}>
         <span className="ec-k">{label}</span>
-        <span className="ec-v">{v}</span>
+        <span className="ec-v">{v || '—'}</span>
       </div>
     );
   });
@@ -72,15 +78,15 @@ export default function EmailConfigPanel() {
             </div>
           </div>
 
-          {/* 折扣 + 优惠码 */}
+          {/* 折扣 + 优惠码（discount 兼容新旧形态：新=对象，旧=纯字符串） */}
           <div className="ec-field-row">
             <div className="ec-field ec-half">
               <label>折扣（%）</label>
-              <div className="ec-input">{card.discount || '8'}</div>
+              <div className="ec-input">{(typeof card.discount === 'string' ? card.discount : card.discount?.text) || '8'}</div>
             </div>
             <div className="ec-field ec-half">
               <label>优惠码（自动生成）</label>
-              <div className="ec-code">{card.coupon || '—'}</div>
+              <div className="ec-code">{(typeof card.discount === 'object' && card.discount ? card.discount.code : null) || card.coupon || '—'}</div>
             </div>
           </div>
 
@@ -93,7 +99,7 @@ export default function EmailConfigPanel() {
             }}>
               <Arrow /> 微调
             </button>
-            <button className="btn primary" onClick={() => confirmSendPlan(card)}>
+            <button className="btn primary" onClick={() => confirmPlan()}>
               <Arrow /> 发送
             </button>
           </div>

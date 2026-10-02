@@ -34,7 +34,7 @@ function rewriteImageUrls(html: string, imgPath: string): string {
  * 编辑态：双栏（左预览右编辑面板：主题/正文/主图/提示词+生成图片/按人群预览/保存并预览）。
  */
 export default function EditModal() {
-  const { editOpen, editingDraft, setEditOpen, sendEditedDraft } = useApp();
+  const { editOpen, editingDraft, setEditOpen, sendEditedDraft, confirmState } = useApp();
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   const [subj, setSubj] = useState('');
   const [body, setBody] = useState('');
@@ -67,6 +67,15 @@ export default function EditModal() {
       setPreview(null);
     }
   }, [editOpen, editingDraft]);
+
+  // 发送闸门联动（Wave2）：仅当该草稿正是 confirm 流程建的（confirmState.planCard.draft_id 匹配）
+  // 才有核对单数据 → all_pass=false 禁用发送；无关联数据（邮件页其他草稿 / 旧后端）按现行为不禁用，
+  // 绝不因数据缺失永久禁用发送。
+  const linkedChecklist = editingDraft && confirmState?.planCard?.draft_id === editingDraft.id
+    ? confirmState.checklist
+    : null;
+  const failCount = linkedChecklist ? linkedChecklist.items.filter((i) => !i.pass).length : 0;
+  const sendBlocked = Boolean(linkedChecklist && linkedChecklist.all_pass === false);
 
   // 发送（预览态/编辑态共用；以当前编辑内容为准）
   const onSend = async () => {
@@ -154,7 +163,19 @@ export default function EditModal() {
       )}
 
       <div className="em-actions">
-        <button className="em-btn" onClick={onSend}>发送</button>
+        <button
+          className="em-btn"
+          onClick={onSend}
+          disabled={sendBlocked}
+          title={sendBlocked ? `核对单 ${failCount} 项未过，修复后再发送` : undefined}
+        >
+          发送
+        </button>
+        {sendBlocked && (
+          <span style={{ color: 'var(--danger)', fontSize: 12, fontWeight: 600 }}>
+            核对单 {failCount} 项未过，修复后再发送
+          </span>
+        )}
         <button className="em-btn" onClick={() => setMode('edit')} disabled={mode === 'edit'}>
           {mode === 'edit' ? '编辑中...' : '编辑'}
         </button>
