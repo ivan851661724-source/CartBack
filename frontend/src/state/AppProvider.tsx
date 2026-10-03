@@ -208,7 +208,7 @@ interface AppContextValue extends AppState {
   resumeTodo: (id: string) => Promise<void>;   // Z5：待办「继续」→ POST /api/todos/:id/resume 以原 act 数据预填的新会话恢复对话
   sendMsg: (text: string) => Promise<void>;
   setMode: (m: Mode) => Promise<void>;
-  saveConfig: (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string; shopBrand?: string }) => Promise<void>;
+  saveConfig: (body: { espKey: string; espFrom: string; shopBrand?: string; aiKey?: string; aiModel?: string; aiBaseUrl?: string }) => Promise<void>;
   resetData: () => Promise<void>;
   doImport: (csv: string) => Promise<boolean>;
   authSubmit: (email: string, password: string, name: string) => Promise<string | true>;
@@ -594,12 +594,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [loadState, toast_]);
 
   // —— 保存配置 ——
-  const saveConfig = useCallback(async (body: { aiKey: string; espKey: string; espFrom: string; aiModel: string; aiBaseUrl?: string; shopBrand?: string }) => {
+  // aiKey/aiModel/aiBaseUrl 不再由设置页下发（AI 连接由服务端环境变量接管）；字段可选，传了才携带。
+  const saveConfig = useCallback(async (body: { espKey: string; espFrom: string; shopBrand?: string; aiKey?: string; aiModel?: string; aiBaseUrl?: string }) => {
     const payload: Record<string, string> = {
-      aiKey: body.aiKey.startsWith('•') ? '' : body.aiKey,
       espKey: body.espKey.startsWith('•') ? '' : body.espKey,
-      espFrom: body.espFrom, aiModel: body.aiModel,
+      espFrom: body.espFrom,
     };
+    if (typeof body.aiKey === 'string') payload.aiKey = body.aiKey.startsWith('•') ? '' : body.aiKey;
+    if (typeof body.aiModel === 'string') payload.aiModel = body.aiModel;
     if (typeof body.aiBaseUrl === 'string') payload.aiBaseUrl = body.aiBaseUrl;
     if (typeof body.shopBrand === 'string') payload.shopBrand = body.shopBrand;
     const r = await api<{ status: Status }>('/api/config', { method: 'POST', body: JSON.stringify(payload) });

@@ -2775,8 +2775,9 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { status: cfg.status(config), scope: 'user' });
       }
       if (typeof body.mode === 'string') config.mode = body.mode === 'real' ? 'real' : 'demo';
-      if (typeof body.aiKey === 'string') config.aiKey = body.aiKey.trim();
-      if (typeof body.espKey === 'string') config.espKey = body.espKey.trim();
+      // 空串=不变更（掩码「未修改」约定）：AI/ESP 密钥已由环境变量接管，防止保存其他项时误清密钥
+      if (typeof body.aiKey === 'string' && body.aiKey.trim()) config.aiKey = body.aiKey.trim();
+      if (typeof body.espKey === 'string' && body.espKey.trim()) config.espKey = body.espKey.trim();
       if (typeof body.espFrom === 'string') config.espFrom = body.espFrom.trim();
       // ESP 供应商变量：resend（默认）| brevo（api-key 头 + /v3/smtp/email）| smtp（163/QQ 等，授权码作密码）
       if (typeof body.espProvider === 'string' && ['resend', 'brevo', 'smtp'].includes(body.espProvider.trim())) config.espProvider = body.espProvider.trim();

@@ -15,11 +15,10 @@ import {
 export default function SettingsView() {
   const { status, setMode, saveConfig, resetData, guideStyle, setGuideStyle, prefs } = useApp();
   const s = status || ({} as any);
-  const [aiKey, setAiKey] = useState('');
+  // AI 连接已由服务端环境变量接管（CARTBACK_AI_KEY 等），设置页不再暴露 Key/模型/基地址；
+  // 保存 payload 也不再携带 aiKey——后端 config POST 对空串会整字覆盖，防止误清环境配置。
   const [espKey, setEspKey] = useState('');
   const [espFrom, setEspFrom] = useState('');
-  const [aiModel, setAiModel] = useState('deepseek-chat');
-  const [aiBaseUrl, setAiBaseUrl] = useState('');
   const [shopBrand, setShopBrand] = useState('');
   const [msg, setMsg] = useState('');
   // G0 白名单（品牌名/专有名词，含中文品牌名；白名单内不拦截）
@@ -80,11 +79,8 @@ export default function SettingsView() {
   };
 
   useEffect(() => {
-    setAiKey(s.aiConfigured ? '••••••••' : '');
     setEspKey(s.espConfigured ? '••••••••' : '');
     setEspFrom(s.espFrom || '');
-    setAiModel(s.aiModel || 'deepseek-chat');
-    setAiBaseUrl(s.aiBaseUrl || '');
     setShopBrand(s.shopBrand || '');
     setG0Terms(Array.isArray(s.g0Whitelist) ? s.g0Whitelist : []);
   }, [status]);
@@ -96,8 +92,8 @@ export default function SettingsView() {
   }, [prefs]);
 
   const onSave = async () => {
-    await saveConfig({ aiKey, espKey, espFrom, aiModel, aiBaseUrl, shopBrand });
-    setMsg('已保存（密钥仅存于服务端，不回传前端）');
+    await saveConfig({ espKey, espFrom, shopBrand });
+    setMsg('已保存（密钥仅存于服务端，不回传前端；AI 连接由服务端环境变量管理）');
   };
 
   const configStatus = `AI：${s.aiConfigured ? '已配置' : '未配置（离线桩模型）'} · ESP：${s.espConfigured ? '已配置（真实发送）' : '仿真发送'} · 发件域：${s.espFrom || '—'} · 模型：${s.aiModel || 'deepseek-chat'}`;
@@ -158,28 +154,6 @@ export default function SettingsView() {
         <span className="desc">一次性接好 · 之后只负责聊天和点确认</span>
       </div>
       <div className="setup-wrap">
-        <div className="setup-card glass-card done">
-          <div className="s-no">✓</div>
-          <div className="s-body">
-            <div className="s-head"><h3>连接 AI 助手</h3><Tag kind={s.aiConfigured ? 'intent' : 'gray'}>{s.aiConfigured ? '已连接' : '待配置'}</Tag></div>
-            <div className="s-desc">开放式对话引擎（IGDE）在线 · 密钥仅存本机。</div>
-            <div className="row">
-              <input type="password" placeholder="sk-…（已保存，输入新值可替换）" value={aiKey} onChange={(e) => setAiKey(e.target.value)} />
-              <input type="text" placeholder="deepseek-chat" style={{ maxWidth: 200 }} value={aiModel} onChange={(e) => setAiModel(e.target.value)} />
-              <button className="btn ghost sm" onClick={onSave}>保存</button>
-            </div>
-            <div className="row">
-              <input
-                type="text"
-                placeholder="接口基地址（OpenAI 兼容，如 Token Plan 专属地址）"
-                value={aiBaseUrl}
-                onChange={(e) => setAiBaseUrl(e.target.value)}
-              />
-            </div>
-            <div className="s-desc">专属 Key 必须与专属基地址配套（如阿里 Token Plan 走通用 dashscope 地址不抵扣套餐）；模型示例：deepseek-v4-flash / qwen3.7-plus / glm-5.2。</div>
-          </div>
-        </div>
-
         <div className="setup-card glass-card">
           <div className="s-no">2</div>
           <div className="s-body">
