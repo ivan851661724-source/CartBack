@@ -8,6 +8,8 @@
 import * as fs from 'fs';
 import * as readline from 'readline';
 
+import { normalizeCategory } from './category-profile';
+
 export interface UserRecord {
   user_id: string;
   email: string;
@@ -26,6 +28,7 @@ export interface UserRecord {
   price_sensitivity: string;
   customer_segment: string;
   style_preference: string; // tech / fashion / business / outdoor（受众风格品类标签代表值）
+  category: string;         // 品类（批次 2）：phone_case/apparel/jewelry/generic；商品库选用时随商品记录带入，空 = 通用模板
   cart_url: string;
   raw: Record<string, unknown>;
 }
@@ -65,7 +68,8 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
   const audience = strVal(card.audience).trim();
   let locale = strVal(card.locale ?? d.locale, 'en').trim();
   if (locale.length === 2) locale = `${locale}-${locale.toUpperCase()}`;
-  const productEn = strVal(card.product ?? card.product_en, 'Premium Phone Case').trim();
+  // 兜底产品名不再写死「Premium Phone Case」（品类烙印，批次 2 写死点清理）；品类优先取显式字段
+  const productEn = strVal(card.product ?? card.product_en, 'Premium Product').trim();
   const productCn = strVal(card.product_cn).trim();
   const brandRaw = strVal(card.brand ?? d.brand, 'CartBack').trim();
   const brand = brandRaw || 'CartBack';
@@ -96,7 +100,9 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
     cart_url: cartUrl,
     gender: tagGender === 'male' ? 'M' : tagGender === 'female' ? 'F' : 'O',
     age_range: tagAge || '25-34',
-    device: tagDevice || 'iPhone',
+    // device 默认不写死「iPhone」（品类烙印，批次 2 写死点清理）：仅手机壳品类在图片 prompt 中消费机型位
+    device: tagDevice,
+    category: normalizeCategory(card.category ?? d.category),
     goal: 'abandonment_recovery',
     send_window: '10:30-21:00',
     price_sensitivity: topTagByType(dist, 'price_sensitivity'),
@@ -126,6 +132,7 @@ export function makeUser(overrides: Record<string, unknown>): UserRecord {
     price_sensitivity: '',
     customer_segment: '',
     style_preference: '',
+    category: '',
     cart_url: 'https://cartback.demo',
     raw: {},
   };
@@ -173,6 +180,7 @@ export async function loadUserData(filePath: string): Promise<JsonlLoadResult> {
         style_preference: strVal(data.style_preference),
         price_sensitivity: strVal(data.price_sensitivity),
         customer_segment: strVal(data.customer_segment),
+        category: normalizeCategory(data.category),
         cart_url: strVal(data.cart_url, 'https://cartback.demo'),
         raw: data,
       });

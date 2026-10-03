@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { Close } from '@/components/ui/icons';
 import { api } from '@/lib/api';
+import { listProducts, type ProductItem } from '@/lib/products';
 
 /** 按人群/语言预览数据（后端渲染管线同口径产出） */
 interface DraftPreview {
@@ -55,6 +56,10 @@ export default function EditModal() {
       setImgPath((editingDraft as any).image_path || '');
       setPreviewHtml(rewriteImageUrls((editingDraft as any).html || '', (editingDraft as any).image_path || ''));
       setMsg(''); setErr(false); setRegenerating(false);
+      // 商品库选择器随弹窗重置：组件常驻挂载，不重置会残留上次会话的列表/展开态（设置页新上传不可见）
+      setProductPickerOpen(false);
+      setProductList([]);
+      setApplyingProductId('');
 
       // ④ 按人群/语言预览（渲染管线实际产物；失败静默不打扰编辑）
       // 形状校验：500 时返回 {error} 而非抛异常，直接 set 会让下方 preview.tiers.some 崩溃
@@ -103,6 +108,51 @@ export default function EditModal() {
       setErr(true);
     } finally {
       setRegenerating(false);
+    }
+  };
+
+  // 「改用我的商品图」（批次 1）：商品库选用 → 服务端解析本地路径走既有管道
+  // （万相图生图 → 原图叠字 → 文生图 三档回退），邮件 Hero 直接换成上传图。
+  const [productPickerOpen, setProductPickerOpen] = useState(false);
+  const [productList, setProductList] = useState<ProductItem[]>([]);
+  const [productLoading, setProductLoading] = useState(false);
+  const [applyingProductId, setApplyingProductId] = useState('');
+
+  const openProductPicker = async () => {
+    setProductPickerOpen((v) => !v);
+    if (productList.length === 0) {
+      setProductLoading(true);
+      try {
+        setProductList(await listProducts());
+      } catch (e: any) {
+        setMsg(e?.message || '商品库加载失败');
+        setErr(true);
+      } finally {
+        setProductLoading(false);
+      }
+    }
+  };
+
+  const onApplyProduct = async (p: ProductItem) => {
+    if (!editingDraft || applyingProductId) return;
+    setApplyingProductId(p.id); setMsg(''); setErr(false);
+    try {
+      const r = await api<{ image_path?: string; image_prompt?: string; html?: string; error?: string }>(
+        `/api/draft/${editingDraft.id}/image`,
+        { method: 'POST', body: JSON.stringify({ product_image_id: p.id, prompt: imagePrompt.trim() }) },
+      );
+      if (r.error) { setMsg(r.error); setErr(true); return; }
+      if (r.image_path) setImgPath(r.image_path);
+      // 与 onRegenImage 同口径同步 image_prompt：空提示词时服务端快照了按品类自动生成的 prompt，回填保持所见即所存
+      if (r.image_prompt && !imagePrompt.trim()) setImagePrompt(r.image_prompt);
+      if (r.html) setPreviewHtml(rewriteImageUrls(r.html, r.image_path || imgPath));
+      setProductPickerOpen(false);
+      setMsg(`已改用商品图「${p.name}」`);
+    } catch (e: any) {
+      setMsg('商品图应用失败：' + (e?.message || e));
+      setErr(true);
+    } finally {
+      setApplyingProductId('');
     }
   };
 
@@ -210,6 +260,36 @@ export default function EditModal() {
         <button className="em-btn em-regen" onClick={onRegenImage} disabled={regenerating}>
           {regenerating ? '生成中…' : '生成图片'}
         </button>
+      </div>
+
+      {/* 改用我的商品图（批次 1）：展开商品库横排选择，选中即应用 */}
+      <div style={{ marginTop: 8 }}>
+        <button className="btn ghost sm" onClick={openProductPicker} disabled={productLoading}>
+          {productLoading ? '加载中…' : productPickerOpen ? '收起商品库 ▴' : '改用我的商品图 ▾'}
+        </button>
+        {productPickerOpen && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, marginTop: 8 }}>
+            {productList.length === 0 && !productLoading && (
+              <span style={{ fontSize: 12.5, color: 'var(--muted)' }}>
+                商品库还是空的——到「设置 → 商品库」上传商品图
+              </span>
+            )}
+            {productList.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => onApplyProduct(p)}
+                disabled={Boolean(applyingProductId)}
+                title={p.name}
+                style={{
+                  padding: 0, border: '0.5px solid var(--line)', borderRadius: 10, background: '#fff',
+                  cursor: applyingProductId ? 'wait' : 'pointer', overflow: 'hidden', width: 64, height: 64,
+                }}
+              >
+                <img src={p.image_url} alt={p.name} style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="em-foot">

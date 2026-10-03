@@ -1,8 +1,15 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import Tag from '@/components/ui/Tag';
+import {
+  CATEGORY_OPTIONS,
+  deleteProduct,
+  listProducts,
+  uploadProduct,
+  type ProductItem,
+} from '@/lib/products';
 
 /** 设置四步向导（AI / ESP / 店铺 / 模式 / 偏好）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
 export default function SettingsView() {
@@ -24,6 +31,53 @@ export default function SettingsView() {
   const [prefSignature, setPrefSignature] = useState('');
   const [prefsMsg, setPrefsMsg] = useState('');
   const [prefsBusy, setPrefsBusy] = useState(false);
+
+  // —— 商品库（批次 1 上传链路）：上传/列表/删除；品类点选为主（批次 2 构图依据），留空由后端读图推断 ——
+  const [products, setProducts] = useState<ProductItem[]>([]);
+  const [productsMsg, setProductsMsg] = useState('');
+  const [productsErr, setProductsErr] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [uploadCategory, setUploadCategory] = useState('');
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const refreshProducts = useCallback(async () => {
+    try {
+      setProducts(await listProducts());
+    } catch {
+      /* 未登录/网络异常静默：商品库非阻断性配置 */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshProducts();
+  }, [refreshProducts, status]);
+
+  const onPickFile = async (file: File | null | undefined) => {
+    if (!file) return;
+    setUploading(true); setProductsMsg(''); setProductsErr(false);
+    try {
+      const p = await uploadProduct(file, uploadCategory);
+      setProductsMsg(`已上传「${p.name}」`);
+      await refreshProducts();
+    } catch (e: any) {
+      setProductsMsg(e?.message || '上传失败');
+      setProductsErr(true);
+    } finally {
+      setUploading(false);
+      if (fileRef.current) fileRef.current.value = '';
+    }
+  };
+
+  const onRemoveProduct = async (p: ProductItem) => {
+    try {
+      await deleteProduct(p.id);
+      setProducts((cur) => cur.filter((x) => x.id !== p.id));
+      setProductsMsg('已删除');
+    } catch (e: any) {
+      setProductsMsg(e?.message || '删除失败');
+      setProductsErr(true);
+    }
+  };
 
   useEffect(() => {
     setAiKey(s.aiConfigured ? '••••••••' : '');
@@ -150,6 +204,57 @@ export default function SettingsView() {
               <input type="text" placeholder="如 Qin Pet Custom（留空 = 跟随方案卡）" value={shopBrand} onChange={(e) => setShopBrand(e.target.value)} />
               <button className="btn ghost sm" onClick={onSave}>保存</button>
             </div>
+          </div>
+        </div>
+
+        {/* —— 商品库（批次 1）：上传/列表/删除；图片 ≤2MB 前端压图 base64 提交，零新依赖 —— */}
+        <div className="setup-card glass-card">
+          <div className="s-no">3</div>
+          <div className="s-body">
+            <div className="s-head"><h3>商品库（商品图）</h3><Tag kind={products.length ? 'intent' : 'gray'}>{products.length ? `${products.length} 张商品图` : '待上传'}</Tag></div>
+            <div className="s-desc">上传你的商品图，邮件主图可直接选用（自动叠折扣/CTA）。图片自动压缩至 1024px；品类用于生图构图（留空由 AI 读图推断）。</div>
+            <div className="row">
+              <select
+                value={uploadCategory}
+                onChange={(e) => setUploadCategory(e.target.value)}
+                style={{ maxWidth: 140 }}
+                aria-label="商品品类"
+              >
+                <option value="">品类（AI 推断）</option>
+                {CATEGORY_OPTIONS.map((c) => (
+                  <option key={c.value} value={c.value}>{c.label}</option>
+                ))}
+              </select>
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                style={{ display: 'none' }}
+                onChange={(e) => onPickFile(e.target.files?.[0])}
+              />
+              <button className="btn ghost sm" disabled={uploading} onClick={() => fileRef.current?.click()}>
+                {uploading ? '上传中…' : '上传商品图'}
+              </button>
+              {(productsMsg || productsErr) && (
+                <span className={productsErr ? 'msg err' : 'msg-ok'} style={{ fontSize: 12.5 }}>{productsMsg}</span>
+              )}
+            </div>
+            {products.length > 0 && (
+              <div className="row" style={{ flexWrap: 'wrap', gap: 10, marginTop: 10 }}>
+                {products.map((p) => (
+                  <div key={p.id} style={{ display: 'flex', flexDirection: 'column', gap: 4, alignItems: 'center' }}>
+                    <img
+                      src={p.image_url}
+                      alt={p.name}
+                      title={`${p.name} · ${CATEGORY_OPTIONS.find((c) => c.value === p.category)?.label || '通用'}`}
+                      style={{ width: 72, height: 72, objectFit: 'cover', borderRadius: 10, border: '0.5px solid var(--line)' }}
+                    />
+                    <span style={{ fontSize: 11.5, color: 'var(--muted)', maxWidth: 76, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{p.name}</span>
+                    <button className="btn ghost sm" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => onRemoveProduct(p)}>删除</button>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
 

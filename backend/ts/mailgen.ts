@@ -107,7 +107,7 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
   let imagePath = '';
   if (!skipImage) {
     try {
-      imagePath = await generateProductImage({
+      const img = await generateProductImage({
         config: cfg,
         user,
         productImagePath: (payload.product_image_path as string) || null,
@@ -115,12 +115,11 @@ export async function run(payloadIn: Record<string, unknown>): Promise<MailgenRe
         outputDir: OUTPUT_DIR,
         promptOverride: imagePromptOverride,
       });
+      imagePath = img.path;
       if (imagePath) {
-        const qvReady = Boolean(cfg.qianwen_vision.api_key && cfg.qianwen_vision.base_url);
-        imageMethod = qvReady ? 'wanx' : 'pollinations';
-        const baseName = path.basename(imagePath);
-        if (baseName.includes('_final') && !qvReady) imageMethod = 'pollinations+overlay';
-        else if (baseName.includes('_final')) imageMethod = 'wanx+overlay';
+        // method 由 image-generator 按实际生效档位给出（wanx-edit / upload / wanx / pollinations
+        // 及 -fallback、+overlay 变体），不再用文件名启发式猜测
+        imageMethod = img.method || 'unknown';
       } else {
         imageMethod = 'empty';
         warnings.push('图片生成全部降级失败，返回空图（邮件里将只显示品牌头+文案+CTA）');
@@ -200,6 +199,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     device: 'iPhone 15', product_en: 'Glitter Rhinestone Clear Case', product_cn: '闪钻冰透手机壳',
     product: 'Glitter Rhinestone Clear Case', discount: 15.0, goal: 'abandonment_recovery',
     locale: 'en-US', preferred_language: 'English', price_sensitivity: 'value', customer_segment: 'new',
+    category: 'phone_case',
     cart_url: 'https://cartback.demo/u1',
   },
   {
@@ -208,6 +208,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     device: 'iPhone 15 Pro Max', product_en: 'Rugged Armor MagSafe Case', product_cn: '军工磁吸防摔壳',
     product: 'Rugged Armor MagSafe Case', discount: 12.0, goal: 'abandonment_recovery',
     locale: 'en-US', preferred_language: 'Spanish', price_sensitivity: 'premium', customer_segment: 'returning',
+    category: 'phone_case',
     cart_url: 'https://cartback.demo/u2',
   },
   {
@@ -216,6 +217,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     device: 'iPhone 14', product_en: 'Premium Leather Wallet Case', product_cn: '真皮卡包翻盖壳',
     product: 'Premium Leather Wallet Case', discount: 10.0, goal: 'abandonment_recovery',
     locale: 'de-DE', preferred_language: 'German', price_sensitivity: 'premium', customer_segment: 'vip',
+    category: 'phone_case',
     cart_url: 'https://cartback.demo/u3',
   },
   {
@@ -224,6 +226,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     device: 'iPhone 13', product_en: 'Simple Transparent Soft Case', product_cn: '简约透明软壳',
     product: 'Simple Transparent Soft Case', discount: 20.0, goal: 'abandonment_recovery',
     locale: 'en-CA', preferred_language: 'French', price_sensitivity: 'value', customer_segment: 'returning',
+    category: 'phone_case',
     cart_url: 'https://cartback.demo/u4',
   },
   {
@@ -232,7 +235,28 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     device: 'iPhone 15 Pro', product_en: 'Waterproof Rugged Outdoor Case', product_cn: '防水户外防护壳',
     product: 'Waterproof Rugged Outdoor Case', discount: 8.0, goal: 'abandonment_recovery',
     locale: 'en-AU', preferred_language: 'Italian', price_sensitivity: 'standard', customer_segment: 'new',
+    category: 'phone_case',
     cart_url: 'https://cartback.demo/u5',
+  },
+  // 批次 2 自测补充：非手机壳画像 ×2（退出条件：同一受众画像、不同品类 → 构图不同，
+  // 全链路对非手机壳品类无手机壳/iPhone 默认值残留）
+  {
+    name: 'P6 法国都市时尚女 — 羊毛大衣（服装品类：上身或平铺构图）',
+    user_id: 'st5_6', email: '', brand: 'Maison Lune', gender: 'F', age_range: '25-34',
+    device: '', product_en: 'Wool Blend Long Coat', product_cn: '羊毛混纺长款大衣',
+    product: 'Wool Blend Long Coat', discount: 18.0, goal: 'abandonment_recovery',
+    locale: 'fr-FR', preferred_language: 'French', price_sensitivity: 'premium', customer_segment: 'vip',
+    category: 'apparel',
+    cart_url: 'https://cartback.demo/u6',
+  },
+  {
+    name: 'P7 日本优雅女 — 淡水珍珠项链（饰品品类：微距摆拍构图，无人像/机型）',
+    user_id: 'st5_7', email: '', brand: 'Tsuki Pearl', gender: 'F', age_range: '35-44',
+    device: '', product_en: 'Freshwater Pearl Necklace', product_cn: '淡水珍珠项链',
+    product: 'Freshwater Pearl Necklace', discount: 10.0, goal: 'abandonment_recovery',
+    locale: 'ja-JP', preferred_language: '', price_sensitivity: 'standard', customer_segment: 'returning',
+    category: 'jewelry',
+    cart_url: 'https://cartback.demo/u7',
   },
 ];
 
@@ -295,8 +319,8 @@ async function selftest5(withImage: boolean): Promise<number> {
     const name = p.name;
     const user = makeUser(p);
     process.stderr.write(
-      `[selftest5] (${i + 1}/5) ${name} — lang=${user.preferred_language || user.locale} ` +
-        `price=${user.price_sensitivity || '-'} seg=${user.customer_segment || '-'} disc=${formatG(user.discount)}%\n`,
+      `[selftest5] (${i + 1}/${SELFTEST5_PROFILES.length}) ${name} — lang=${user.preferred_language || user.locale} ` +
+        `cat=${user.category || 'generic'} price=${user.price_sensitivity || '-'} seg=${user.customer_segment || '-'} disc=${formatG(user.discount)}%\n`,
     );
 
     let subject = '';
@@ -316,11 +340,11 @@ async function selftest5(withImage: boolean): Promise<number> {
     let imagePath = '';
     if (withImage) {
       try {
-        imagePath = await generateProductImage({
+        const img = await generateProductImage({
           config: cfg, user, skip: false, outputDir: OUTPUT_DIR,
         });
-        const qv = Boolean(cfg.qianwen_vision.api_key && cfg.qianwen_vision.base_url);
-        imageMethod = imagePath ? (qv ? 'wanx' : 'pollinations') : 'empty';
+        imagePath = img.path;
+        imageMethod = imagePath ? (img.method || 'unknown') : 'empty';
       } catch (e) {
         imageMethod = `error: ${(e as Error).message}`;
       }
@@ -344,7 +368,7 @@ async function selftest5(withImage: boolean): Promise<number> {
         brand: user.brand, product_en: user.product_en, product_cn: user.product_cn,
         discount: user.discount, goal: user.goal, locale: user.locale,
         preferred_language: user.preferred_language, price_sensitivity: user.price_sensitivity,
-        customer_segment: user.customer_segment,
+        customer_segment: user.customer_segment, category: user.category,
       },
       subject, body, copy_provider: provider, image_method: imageMethod,
       html_len: html.length, html,

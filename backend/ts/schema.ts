@@ -54,6 +54,8 @@ export const MailgenPayloadSchema = z
     force_regen_copy: z.boolean().optional(),
     skip_image: z.boolean().optional(),
     product_image_path: z.string().optional(),
+    // 品类（批次 2）：phone_case/apparel/jewelry/generic；商品库选用时随商品记录带入，空 = 通用模板
+    category: z.string().optional(),
     // 受众标签分布快照（server.js /api/draft 传入）：[{tag_type, tag_value, count, avg_weight}]
     // 宽松 unknown[]，由 fromPlanCard 取每类 count 最高代表值填充画像
     tag_distribution: z.array(z.unknown()).optional(),

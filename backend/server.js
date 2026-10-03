@@ -35,6 +35,8 @@ const notify = require('./lib/notify');
 // —— Wave 5 收口（A4 僵尸会话 / E1 冲动折扣大促季判定）——
 const zombie = require('./lib/zombie');
 const impulse = require('./lib/impulse');
+// —— 商品库（批次 1 上传链路 / 批次 2 品类字段）：设置页上传，邮件 Hero 可直接选用 ——
+const productsMod = require('./lib/products');
 
 let config = cfg.load();
 const store = new Store();
@@ -377,6 +379,8 @@ async function generateMailHtml(draft, card, opts = {}) {
     force_regen_copy: Boolean(card.force_regen_copy),  // 兼容字段：generateCopy 有 AI key 时一律走 LLM，此开关现无实际作用（保留供「换一批文案」语义复用）
     skip_image:        Boolean(card.skip_image),        // 纯文案调试时跳过图片生成
     product_image_path: card.product_image_path || '',  // 商家已有现成产品图时直接用，更快
+    // 品类（批次 2）：商品库选用时随商品记录带入；空 = 按受众画像/通用模板构图
+    category: card.category || '',
     // 编辑态「生成图片」重跑：提示词覆盖 + 文案透传（不动已润色的 subject/body）
     image_prompt_override: imagePromptOverride,
     copy_passthrough: copyPassthrough,
@@ -2210,6 +2214,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     // —— 编辑态「生成图片」（Figma 446:6142）：按（可编辑）提示词重跑图片，文案/主题不动 ——
+    // 批次 1「最后一米」：接受 product_image_id（商品库选用）→ 解析为本地路径 → 走 generateMailHtml
+    // 既有 product_image_path 管道（本地图直接用/万相图生图/叠字），只补上游赋值。
     const im = pathname.match(/^\/api\/draft\/([\w-]+)\/image$/);
     if (im && method === 'POST') {
       const draft = store.getDraft(im[1]);
@@ -2219,10 +2225,12 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，不能再修改' });
       }
       let prompt = draft.image_prompt || '';
+      let productImageId = '';
       try {
         const body = await readBody(req);
         if (typeof body.prompt === 'string' && body.prompt.trim()) prompt = body.prompt.trim();
-        else if (typeof body.prompt === 'string') return sendJson(res, 400, { error: '提示词不能为空' });
+        else if (typeof body.prompt === 'string' && !body.product_image_id) return sendJson(res, 400, { error: '提示词不能为空' });
+        if (typeof body.product_image_id === 'string' && body.product_image_id.trim()) productImageId = body.product_image_id.trim();
       } catch (e) { /* 无 body：沿用 draft.image_prompt */ }
       try {
         // 伪 card：复用 generateMailHtml 管线（透传现有 subject/body，仅重跑图片）；brand/product 走草稿固化快照
@@ -2231,8 +2239,18 @@ const server = http.createServer(async (req, res) => {
           coupon: draft.coupon, audience: draft.audience, locale: draft.locale,
           brand: draft.brand, product: draft.product,
         };
+        if (productImageId) {
+          const prod = store.getProduct(productImageId);
+          if (!prod || (prod.user_id && prod.user_id !== req.userId)) {
+            return sendJson(res, 404, { error: '商品不存在或不可见' });
+          }
+          const prodPath = productsMod.resolveProductImagePath(store, req.userId, productImageId);
+          if (!prodPath) return sendJson(res, 404, { error: '商品图文件已丢失，请重新上传' });
+          pseudoCard.product_image_path = prodPath;
+          if (prod.category) pseudoCard.category = prod.category;   // 批次 2：品类随商品记录带入（构图按品类）
+        }
         await generateMailHtml(draft, pseudoCard, { imagePromptOverride: prompt, copyPassthrough: true });
-        logEvent('draft_image_regen', { draft_id: draft.id, prompt_len: prompt.length, image_method: (draft.mailgen_meta || {}).image_method });
+        logEvent('draft_image_regen', { draft_id: draft.id, prompt_len: prompt.length, product_image_id: productImageId || null, image_method: (draft.mailgen_meta || {}).image_method });
         return sendJson(res, 200, {
           image_path: draft.image_path, image_prompt: draft.image_prompt || prompt, html: draft.html,
         });
@@ -2240,6 +2258,57 @@ const server = http.createServer(async (req, res) => {
         logEvent('draft_image_regen_fail', { draft_id: draft.id, error: String(e && e.message || e) });
         return sendJson(res, 500, { error: '生成图片失败：' + (e && e.message || e) });
       }
+    }
+
+    // —— 商品库（批次 1）：设置页上传/列表/删除；user_id 隔离，多账号互不可见 ——
+    if (pathname === '/api/products' && method === 'GET') {
+      const items = store.getProductsByUser(req.userId).map(p => ({
+        id: p.id, name: p.name, category: p.category || '',
+        content_type: p.content_type, bytes: p.bytes, created_at: p.created_at,
+        image_url: '/api/image/' + encodeURIComponent(p.file_path),
+      }));
+      return sendJson(res, 200, { products: items });
+    }
+    if (pathname === '/api/products' && method === 'POST') {
+      // 图片走 JSON/base64 通道（无 multipart 依赖）：前端压图 ≤2MB → base64 ≈ 2.7MB 字符，放宽读限到 6MB
+      let body;
+      try {
+        body = await readBody(req, 6e6);
+      } catch (e) {
+        return sendJson(res, e && e.message === 'body too large' ? 413 : 400, { error: e && e.message === 'body too large' ? '图片超过 2MB，请压缩后重试' : '请求体不是合法 JSON' });
+      }
+      const decoded = productsMod.decodeImageDataUrl(body);
+      if (!decoded) return sendJson(res, 400, { error: '缺少图片数据（image_data 需为 base64 或 data URL）' });
+      if (decoded.length > productsMod.MAX_UPLOAD_BYTES) return sendJson(res, 413, { error: '图片超过 2MB，请压缩后重试' });
+      // 品类：商家点选为主；未选 → 对话 LLM 读图推断兜底（qwen3.7-plus 等多模态，已配置才可用）；仍空 = 通用模板
+      let category = productsMod.CATEGORIES.includes(body.category) ? body.category : '';
+      if (!category) {
+        try {
+          const raw = String(body.image_data || body.data_url || body.image_base64 || '').trim();
+          const declared = String(body.content_type || decoded.declaredMime || 'image/jpeg').toLowerCase() || 'image/jpeg';
+          const dataUrl = raw.startsWith('data:') ? raw : `data:${declared};base64,${raw}`;
+          category = await productsMod.inferCategory(dataUrl, config);
+          if (category) logEvent('product_category_inferred', { userId: req.userId, category });
+        } catch (e) { /* 推断失败非致命：落通用模板 */ }
+      }
+      const r = productsMod.saveUploadedProduct(store, req.userId, { ...body, category });
+      if (r.error) return sendJson(res, r.error[0], { error: r.error[1] });
+      logEvent('product_uploaded', { userId: req.userId, product_id: r.product.id, category: r.product.category, bytes: r.product.bytes });
+      metricsInc('product_uploaded');
+      return sendJson(res, 200, {
+        product: {
+          id: r.product.id, name: r.product.name, category: r.product.category,
+          content_type: r.product.content_type, bytes: r.product.bytes, created_at: r.product.created_at,
+          image_url: '/api/image/' + encodeURIComponent(r.product.file_path),
+        },
+      });
+    }
+    const pdm = pathname.match(/^\/api\/products\/([\w-]+)$/);
+    if (pdm && method === 'DELETE') {
+      const ok = productsMod.deleteProductFile(store, req.userId, pdm[1]);
+      if (!ok) return sendJson(res, 404, { error: '商品不存在或不可见' });
+      logEvent('product_deleted', { userId: req.userId, product_id: pdm[1] });
+      return sendJson(res, 200, { deleted: true });
     }
 
     // —— 发送（PRD §0.6：改 202 入队；预检 + D4 五道闸门 + holdout 冻结 + 幂等键 send:{userId}:{draftId}）——
@@ -3204,7 +3273,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (!fs.existsSync(fullPath)) return sendJson(res, 404, { error: 'image not found', path: fullPath });
       const ext = path.extname(fullPath).toLowerCase();
-      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif' }[ext] || 'image/png';
+      // webp：商品库上传允许 webp（lib/products.js 嗅探白名单），这里必须配对返回真实 MIME
+      const mime = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp' }[ext] || 'image/png';
       res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'max-age=3600' });
       fs.createReadStream(fullPath).pipe(res);
       return;

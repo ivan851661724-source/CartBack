@@ -32,6 +32,7 @@ const SCHEMA = {
     image_prompt: 'TEXT',      // 万相出图提示词快照（EditModal 编辑态展示 / 生成图片复用）
     brand: 'TEXT',             // M4 白标：邮件品牌快照（设置页品牌 > 方案卡品牌，创建时固化）
     product: 'TEXT',           // M6 个性化：商品位快照（方案卡 product > 标签画像品类兜底）
+    mailgen_meta: 'JSON',      // 产图档位/文案来源观测（image_method=wanx-edit/upload/…，统计图生图命中率与回退率）
     tag_distribution: 'JSON'   // 创建时圈中受众的标签分布快照（卡片展示产品分类/年龄段/机型等代表值）
   },
   audience: {
@@ -150,6 +151,16 @@ const SCHEMA = {
   },
   sessions: {
     id: 'TEXT', token_hash: 'TEXT', user_id: 'TEXT', created_at: 'INTEGER'
+  },
+  // —— 商品库（批次 1 上传链路）：商家自传商品图 + 品类，按 user_id 隔离（与 draft 同模式）——
+  products: {
+    id: 'TEXT', user_id: 'TEXT',
+    name: 'TEXT',               // 商家可读名（默认取文件名主干）
+    category: 'TEXT',           // 品类（批次 2）：phone_case/apparel/jewelry/generic；商家点选为主，空 = 推断/通用
+    file_path: 'TEXT',          // 本地绝对路径（output/uploads/{userId}/{productId}_{ts}.png）
+    content_type: 'TEXT',       // 上传时校验通过的图片 MIME
+    bytes: 'INTEGER',           // 落盘字节数
+    created_at: 'INTEGER', updated_at: 'INTEGER'
   },
   // —— Wave 5 A4 僵尸会话收口：商家待办列表（扫描产出；点待办 → resume 开新会话预填）——
   todos: {
@@ -364,6 +375,25 @@ class Store {
     const next = rows.filter(x => x.id !== id);
     if (next.length === rows.length) return false;
     this._write('drafts', next); return true;
+  }
+
+  // —— products（商品库）：归属与可见性口径同 drafts（user_id 隔离）——
+  getProductsByUser(userId, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
+    return this._read('products')
+      .filter(p => p.user_id ? p.user_id === userId : incUn)
+      .sort((a, b) => b.created_at - a.created_at);
+  }
+  getProduct(id) { return this._read('products').find(p => p.id === id) || null; }
+  upsertProduct(p) {
+    const rows = this._read('products').filter(x => x.id !== p.id);
+    rows.push(p); this._write('products', rows); return p;
+  }
+  deleteProduct(id) {
+    const rows = this._read('products');
+    const next = rows.filter(x => x.id !== id);
+    if (next.length === rows.length) return false;
+    this._write('products', next); return true;
   }
 
   // —— audience ——

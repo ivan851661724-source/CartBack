@@ -29,6 +29,8 @@ export interface DeepSeekConfig {
 export interface QianwenVisionConfig {
   api_key: string;
   model: string;
+  /** 图生图（批次 3）专用模型：验证记录 qwen-image-2.0-pro 保真可执行去字；wan2.7-image-pro 仅文生图 */
+  edit_model: string;
   image_size: string;
   base_url: string;
 }
@@ -93,7 +95,7 @@ function defaults(): Config {
   return {
     minimax: { api_key: '', model: 'MiniMax-M2.7', base_url: 'https://api.minimax.chat/v1' },
     deepseek: null,
-    qianwen_vision: { api_key: '', model: 'wan2.7-image-pro', image_size: '768*1152', base_url: '' },
+    qianwen_vision: { api_key: '', model: 'wan2.7-image-pro', edit_model: 'qwen-image-2.0-pro', image_size: '768*1152', base_url: '' },
     brevo: { api_key: '', sender_email: 'hello@example.com', sender_name: 'CartBack' },
     email: null,
     marketing: {
@@ -156,6 +158,7 @@ function applyEnv(cfg: Config): void {
   setStr(cfg.qianwen_vision, 'api_key', 'CARTBACK_WANX_KEY');
   setStr(cfg.qianwen_vision, 'base_url', 'CARTBACK_WANX_URL');
   setStr(cfg.qianwen_vision, 'model', 'CARTBACK_WANX_MODEL');
+  setStr(cfg.qianwen_vision, 'edit_model', 'CARTBACK_WANX_EDIT_MODEL');
   setStr(cfg.marketing, 'cta_button', 'CARTBACK_CTA');
   setStr(cfg.marketing, 'image_style', 'CARTBACK_IMAGE_STYLE');
   // 空的 deepseek key 退回 None 语义（与 Python 一致：未配置时 deepseek 可为 None）
@@ -186,9 +189,11 @@ function applyNodeInjection(cfg: Config, aiConfig?: AiConfig | null): void {
   const vk = String(aiConfig.visionKey || aiConfig.wanxKey || '').trim();
   const vu = String(aiConfig.visionBaseUrl || aiConfig.wanxBaseUrl || '').trim();
   const vm = String(aiConfig.visionModel || aiConfig.wanxModel || '').trim();
+  const vem = String(aiConfig.visionEditModel || aiConfig.wanxEditModel || '').trim();
   if (vk) cfg.qianwen_vision.api_key = vk;
   if (vu) cfg.qianwen_vision.base_url = vu;
   if (vm) cfg.qianwen_vision.model = vm;
+  if (vem) cfg.qianwen_vision.edit_model = vem;
 }
 
 export function loadConfig(opts: { configPath?: string; aiConfig?: AiConfig | null } = {}): Config {
@@ -215,7 +220,7 @@ export function loadConfig(opts: { configPath?: string; aiConfig?: AiConfig | nu
         base_url: String(ds.base_url ?? 'https://api.deepseek.com'),
       };
     }
-    for (const k of ['api_key', 'model', 'image_size', 'base_url'] as const) {
+    for (const k of ['api_key', 'model', 'edit_model', 'image_size', 'base_url'] as const) {
       if (q[k]) cfg.qianwen_vision[k] = String(q[k]);
     }
     for (const k of ['api_key', 'sender_email', 'sender_name'] as const) {

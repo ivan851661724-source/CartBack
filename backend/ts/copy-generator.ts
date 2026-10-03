@@ -9,6 +9,7 @@
 
 import type { Config } from './config';
 import type { UserRecord } from './data-loader';
+import { categoryProfile, normalizeCategory } from './category-profile';
 
 export interface CopyResult {
   subject: string;
@@ -73,6 +74,8 @@ export function buildPrompt(user: UserRecord): string {
   if (user.customer_segment) userExtras.push(`customer segment: ${user.customer_segment}`);
   if (user.style_preference) userExtras.push(`style preference: ${user.style_preference}`);
   const extrasStr = userExtras.length ? `, ${userExtras.join(', ')}` : '';
+  // device 位：空值不写死（批次 2 写死点清理）——只有画像标签带机型时才提
+  const deviceDesc = user.device ? `, ${user.device} user` : '';
   let toneHint = '';
   if (userExtras.length) {
     toneHint =
@@ -89,7 +92,7 @@ export function buildPrompt(user: UserRecord): string {
   return (
     'You are an expert e-commerce email copywriter. Write a recovery email for an abandoned cart.\n\n' +
     `BRAND: ${user.brand}\n` +
-    `TARGET USER: ${genderDesc}, age ${user.age_range}, ${user.device} user${extrasStr}\n` +
+    `TARGET USER: ${genderDesc}, age ${user.age_range}${deviceDesc}${extrasStr}\n` +
     `${productLine}\n` +
     `DISCOUNT: ${formatG(user.discount)}% OFF\n` +
     `GOAL: ${user.goal || 'abandonment_recovery'}\n` +
@@ -343,8 +346,10 @@ function representativeAge(ageRange: string): number {
 
 /**
  * 生成简短中文自然语言图片 prompt（无约束指令模板）。
- * 结构：{人群}手持{机型}{产品}的电商广告图，{风格}，手持特写浅景深，
- *       底部渲染{折扣}% OFF和{CTA}文字，真实摄影，高级感，8k
+ * 批次 2 品类化：构图按品类档案表（category-profile.ts）——
+ *   手机壳 = {人群}手持{机型}{产品}…手持特写浅景深（唯一保留机型位的品类）；
+ *   服装 = 上身或平铺；饰品 = 微距摆拍；通用/无品类 = 产品置于场景中央。
+ * 非手机壳品类不再出现「手持 iPhone 特写」，产品兜底名不再写死「手机壳」。
  */
 export function generateImagePrompt(user: UserRecord, config: Config): string {
   const age = (user.age_range || '25-34').trim();
@@ -364,18 +369,19 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   // 受众风格品类标签（来自 tag_distribution 代表值）→ 质感加味
   const flavor = STYLE_FLAVOR_BY_PREFERENCE[(user.style_preference || '').trim().toLowerCase()] || '';
 
-  const ageNum = representativeAge(age);
-  // 族裔：preferred_language（fromPlanCard 已从 language 标签回填）→ 兜底 locale，避免恒空
-  const ethnicity = resolveEthnicity(user.preferred_language || user.locale);
-  const genderWord = gender === 'F' ? '女性' : gender === 'M' ? '男性' : '';
-  const demographic = `${ageNum}岁${ethnicity}${genderWord}`;
-
-  const product = (user.product_cn || user.product_en || user.product || '手机壳').trim();
-  const device = (user.device || 'iPhone').trim();
-
   // price_sensitivity / customer_segment 标签 → 视觉氛围加味（此前仅文案用，图片 prompt 未消费）
   const priceFlavor = PRICE_FLAVOR[(user.price_sensitivity || '').trim().toLowerCase()] || '';
   const segFlavor = SEGMENT_FLAVOR[(user.customer_segment || '').trim().toLowerCase()] || '';
+
+  // 品类档案：构图模板 / device 位 / 人像位全部由品类决定（写死点清理）
+  const category = normalizeCategory(user.category) || 'generic';
+  const profile = categoryProfile(category);
+
+  // 族裔：preferred_language（fromPlanCard 已从 language 标签回填）→ 兜底 locale，避免恒空
+  const ethnicity = resolveEthnicity(user.preferred_language || user.locale);
+  const genderWord = gender === 'F' ? '女性' : gender === 'M' ? '男性' : '';
+
+  const product = (user.product_cn || user.product_en || user.product || '产品').trim();
 
   let discountPct = 10;
   const d = Number(user.discount);
@@ -383,7 +389,30 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
   const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
 
   const extraFlavors = [flavor, priceFlavor, segFlavor].filter(Boolean).join('，');
-  // 机型与产品间补空格：产品是英文兜底描述（work essentials 等）时避免与机型粘连
-  const item = /^[a-zA-Z]/.test(product) ? `${device} ${product}` : `${device}${product}`;
-  return `${demographic}手持${item}的电商广告图，${style}${extraFlavors ? `，${extraFlavors}` : ''}，手持特写浅景深，底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+  const tail = `底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+
+  // 人像/机型位仅按品类档案保留：手机壳保留人群+机型（机型与产品间补空格，避免英文兜底名粘连），
+  // 服装保留人群（上身展示），饰品/通用为纯摆拍不出现人物与机型
+  if (profile.keep_device) {
+    const device = (user.device || '').trim();
+    const item = device
+      ? (/^[a-zA-Z]/.test(product) ? `${device} ${product}` : `${device}${product}`)
+      : product;
+    const ageNum = representativeAge(age);
+    const demo = `${ageNum}岁${ethnicity}${genderWord}`;
+    return `${demo}手持${item}的电商广告图，${style}${extraFlavors ? `，${extraFlavors}` : ''}，${profile.composition}，${tail}`;
+  }
+  if (profile.keep_demographic) {
+    const ageNum = representativeAge(age);
+    const demo = `${ageNum}岁${ethnicity}${genderWord}`;
+    return `${demo}${product}的电商广告图，${profile.composition}，${style}${extraFlavors ? `，${extraFlavors}` : ''}，${tail}`;
+  }
+  return `${product}电商广告图，${profile.composition}，${style}${extraFlavors ? `，${extraFlavors}` : ''}，${tail}`;
+}
+
+/** 批次 3 图生图场景替换指令：品类档案 edit_scene + 受众风格加味（产品保真为第一约束） */
+export function generateSceneEditPrompt(user: UserRecord): string {
+  const profile = categoryProfile(user.category);
+  const flavor = STYLE_FLAVOR_BY_PREFERENCE[(user.style_preference || '').trim().toLowerCase()] || '';
+  return flavor ? `${profile.edit_scene}，${flavor}` : profile.edit_scene;
 }

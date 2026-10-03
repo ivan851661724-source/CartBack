@@ -116,7 +116,7 @@ function HoldoutRow({ h }: { h: Holdout }) {
 }
 
 export default function PlanCardView() {
-  const { confirmState, sendConfirmedPlan, drafts, notifications } = useApp();
+  const { confirmState, sendConfirmedPlan, drafts, notifications, switchTab } = useApp();
   const [gmvOpen, setGmvOpen] = useState(false);
   const [sending, setSending] = useState(false);
   if (!confirmState) return null;
@@ -262,6 +262,17 @@ export default function PlanCardView() {
             )}
           </>
         )}
+        {/* 商品图入口（批次 1 拍板：上传在设置页，对话流只放跳转按钮）：
+            选用后邮件 Hero 直接用商家商品图（万相图生图场景化 / 原图叠字），不在对话流内做上传 */}
+        <button
+          type="button"
+          className="btn ghost sm"
+          onClick={() => switchTab('set')}
+          title="到设置页上传并选用商品图，邮件主图将直接使用"
+          style={{ marginLeft: 'auto' }}
+        >
+          🖼 去设置页选商品图
+        </button>
       </div>
     </div>
   );
