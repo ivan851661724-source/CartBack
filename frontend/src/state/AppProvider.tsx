@@ -194,7 +194,7 @@ interface AppState {
   onboardingStep: number; // 0=未开始, 1-4=当前步骤, 4=完成
   onboardingSkipped: boolean;
   // 引导风格（与 demo/real 发送模式解耦的独立开关）：
-  //  'demo' = 硬编码 Leo's PhoneCase 快捷词 + GuideOverlay 浮层引导（演示用）
+  //  'demo' = 硬编码 Leo's PhoneCase 快捷词（演示用；浮层引导已移除）
   //  'safe' = 纯意图快捷词 + 顶栏 HintPill 串联引导（真实商家，不覆盖品牌）
   guideStyle: 'demo' | 'safe';
 }
@@ -673,7 +673,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // —— 引导步骤里程碑自动推进（走查 P0-3）：步骤跟真实状态走（开始采集/方案就绪或已有草稿/已发送），
   // 不再按「点过几个快捷词」自增，避免未采集到需求就宣告前进或「闭环已跑通」 ——
-  // 仅 safe 模式启用（顶栏 HintPill 串联引导需要状态推进）；demo 模式由 GuideOverlay + chips 手动驱动，
+  // 仅 safe 模式启用（顶栏 HintPill 串联引导需要状态推进）；demo 模式由 chips 手动驱动，
   // 否则 DB 里有历史已发送草稿时刷新即 hasSent→step 3，直接弹「引导已完成」
   useEffect(() => {
     setState(s => {

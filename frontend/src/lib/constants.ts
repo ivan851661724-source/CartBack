@@ -49,17 +49,6 @@ export const STAGE_TXT: Record<string, string> = {
 
 export const CHAT_PLACEHOLDER = '说清楚你想挽回谁、为啥、要什么结果…';
 
-/**
- * 初始引导各步气泡文案（与原 Topbar HintPill 一致）。onboardingStep 0-3 对应步骤 1-4。
- * 由 GuideOverlay 复用。
- */
-export const ONBOARDING_TEXTS: Record<number, string> = {
-  0: '点击左侧 10 个快捷描述，告诉助手你的品牌信息。',
-  1: '需求已收集完整！点「可以，去发」生成邮件',
-  2: '点左侧「数据看板」查看点击 / 转化 / GMV / ROI。',
-  3: '完整闭环已跑通！',
-};
-
 
 /** 邮件生命周期进度段：[草稿完成, 发送完成, 触达完成]（recovering 第三段为 ok 色） */
 export const SEG_MAP: Record<string, number[]> = {

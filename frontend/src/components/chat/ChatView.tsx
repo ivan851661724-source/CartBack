@@ -94,7 +94,7 @@ export default function ChatView() {
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
-  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由 GuideOverlay 气泡指向确认卡让用户点「可以，去发」）
+  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（引导浮层已移除，进度由顶栏 HintPill 承载）
   const advanced0Ref = useRef(false);
   useEffect(() => { if (!act?.planCard) advanced0Ref.current = false; }, [act?.planCard]);
   useEffect(() => {

@@ -27,8 +27,9 @@ export default function Topbar() {
   const boRange = bo?.ranges?.[0];
   const boLabel = [boRange?.label, boRange?.from && boRange?.to ? `${boRange.from}~${boRange.to}` : ''].filter(Boolean).join(' ');
 
-  // 引导风格：demo 由 GuideOverlay 接管，顶栏 HintPill 仅在非引导态显示 needs 进度；
+  // 引导风格：demo 无浮层引导（GuideOverlay 已移除），顶栏 HintPill 常驻显示 needs 进度；
   //            safe 由顶栏 HintPill 串联引导（状态感知文案，手动下一步）。
+  //            onboardingSkipped/onboardingStep 仅供 safe 模式文案推进使用。
   const isDemoGuide = guideStyle === 'demo';
   const showOnboarding = !onboardingSkipped && onboardingStep < 4;
   const isLastStep = onboardingStep >= 3;
