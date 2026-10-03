@@ -76,10 +76,20 @@ const D_REDIRECT_POOL = [
 ];
 
 // —— 兜底池（替代旧 SAFE_TEMPLATE 复读机）：均符合"接住 + 拉回主业"口径，轮换 + 去重避免连续相同 ——
+// 注意：这些是「完整句」兜底（内嵌问受众的问句），只用于无 chips 的场景；
+// 护栏替换主回复的场合一律改用 FALLBACK_CATCH_POOL + _fallbackWithProbe（问句按 B4 缺口生成，与 chips 同源）。
 const FALLBACK_POOL = [
   '我这边可能卡了一下，不过你刚说的我接住了。咱接着聊邮件挽回——你最想先捞哪拨客人？',
   '刚才有点断片，但咱别跑偏。想挽回哪拨客人、为啥、希望他们回来干啥，你挑一个说？',
   '我这边没接稳，你刚说的我记着。回到正题：弃购没付的、还是好久没来的老客，你想先聊哪拨？'
+];
+
+// —— 护栏替换兜底的「接住语」池（无问句；问句由 _fallbackWithProbe 按当前缺口单点追加）——
+// 09-30 报告 P1-3：护栏把主回复换成 FALLBACK_POOL 后，问句恒为「问受众」且与 B4 chips 错位。
+const FALLBACK_CATCH_POOL = [
+  '我这边可能卡了一下，不过你刚说的我接住了。',
+  '刚才有点断片，但你的意思我记着，咱继续。',
+  '这轮我没接稳，重来——'
 ];
 
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
@@ -819,8 +829,8 @@ class IGDE {
       runtime.profileChanged = profileResult.stats.accepted > 0;
     }
 
-    // —— B4 选问决策（合并后）：问槽 / 冲突澄清 / 不问；记 ask_count + 冲突 asked 标记 ——
-    const question = this._decideQuestion(act, mergeResult);
+    // —— B4 选问决策（合并后）：问槽 / 冲突澄清 / 不问；question 可被下方对齐防护重绑 ——
+    let question = this._decideQuestion(act, mergeResult);
 
     // —— B5 回复组装：AI envelope reply 或桩教练；0 提取轮直接问缺失项 ——
     let reply = env.reply || '';
@@ -837,21 +847,21 @@ class IGDE {
     reply = this._appendInferredNote(reply, act, mergeResult.acceptedInferred, usedAI);
     // 冲突轮回复必须真的在核实（B4 已选冲突轮时模型措辞不稳定 → 引擎兜底补问，PRD 剧本 #4）
     reply = this._appendConflictAsk(reply, question, mergeResult.conflictsNew);
+    // 问句对齐防护（09-30 报告 P1-2/P1-3 变体）：模型自行口头核实某槽旧值但未交 slot_updates 时，
+    // B4 预决策仍指向下一空槽 → 问句与 chips 错位。检测命中 → 重绑到被核实的槽（冲突 chips）。
+    if (usedAI && !aiDead && question.kind === 'probe') {
+      const verify = this._detectVerifyReply(reply, act);
+      if (verify && verify.slot !== question.slot) {
+        askedSlot = verify.slot;
+        question = { slot: verify.slot, chips: conflictChips(verify.slot), kind: 'conflict' };
+      }
+    }
     // S2 收口引导兜底（B5）：四要素齐且在 S2，模型回复缺确认引导时补一句（真模型 30 轮实测
     // 「这就帮你生成」类抢跑——生成动作只能走 /confirm 端点，话术必须把用户引向确认卡）
     if (act.stage === 'S2' && this.missingFields(act).length === 0 && !/确认|核对|行不/.test(reply)) {
       reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
     }
 
-    // B4 记账：本轮实际追问的槽 ask_count +1；冲突候选标记 asked（下一轮未回应则 C6 兜底）
-    if (askedSlot) {
-      act.memory = ensureMemory(act.memory, nowMs);
-      act.memory.ask_count[askedSlot] = (Number(act.memory.ask_count[askedSlot]) || 0) + 1;
-      for (const c of act.memory.conflicts || []) {
-        if (c.slot === askedSlot) c.asked = true;
-      }
-    }
-    const chips = askedSlot ? (question.chips || []) : [];
     // B5 硬约束落实：本轮选了追问但模型回复没带任何问句 → 引擎补一句该槽探问
     if (askedSlot && question.kind !== 'conflict' && !/[?？]/.test(reply)) {
       reply += ' ' + this.probeFor(askedSlot);
@@ -863,7 +873,11 @@ class IGDE {
     // —— 护栏管线（L0→L1→L2→L4；违规重生成 1 次 + 轮换兜底）——
     //    注：L3 已软化（P0-4）—— 不再强制问号，问号与否交给模型人格（COACH_SYSTEM_PROMPT 要求"该问才问"）
     // L0：空回复或退化输出（实测出现过 3 字符 "[1]" 残渣）→ 落兜底池，绝不直达用户
-    if (!guardrailL0(reply) || reply.trim().length < 2) { reply = this._pickFallback(act); guardrailHits.push('L0'); }
+    // 兜底一律走 _fallbackWithProbe（P1-3）：问句按当前缺口生成并与 chips 同源，绝不复用 FALLBACK_POOL 完整句
+    if (!guardrailL0(reply) || reply.trim().length < 2) {
+      const fb = this._fallbackWithProbe(act, question, mergeResult.conflictsNew);
+      reply = fb.reply; askedSlot = fb.slot; guardrailHits.push('L0');
+    }
     reply = guardrailL1(reply);
     // L2 说教/推销：本地正则先拦 + /critic 精判；违规先重生成 1 次（真模型），仍不过则兜底
     let l2ok = guardrailL2(reply);
@@ -880,13 +894,19 @@ class IGDE {
     if (!l2ok) {
       const regen = await this._tryRegen(act, userText, 'preachy', runtime);
       if (regen && (await this._passL2(regen, runtime))) { reply = regen; guardrailHits.push('L2regen'); }
-      else { reply = this._pickFallback(act); guardrailHits.push('L2'); }
+      else {
+        const fb = this._fallbackWithProbe(act, question, mergeResult.conflictsNew);
+        reply = fb.reply; askedSlot = fb.slot; guardrailHits.push('L2');
+      }
     }
     // L4 抢跑禁令（S3 前不得出方案卡式配置）
     if (!guardrailL4(reply, act.stage)) {
       const regen = await this._tryRegen(act, userText, 'preempt', runtime);
       if (regen && guardrailL4(regen, act.stage)) { reply = regen; guardrailHits.push('L4regen'); }
-      else { reply = this._pickFallback(act); guardrailHits.push('L4'); }
+      else {
+        const fb = this._fallbackWithProbe(act, question, mergeResult.conflictsNew);
+        reply = fb.reply; askedSlot = fb.slot; guardrailHits.push('L4');
+      }
     }
 
     // 交付层防复读（走查 P1-1）：与上一句助手回复高度相似 → 重生成 1 次，仍相似则轮换兜底。
@@ -896,8 +916,25 @@ class IGDE {
     if (lastAssistant && this.missingFields(act).length > 0 && this._similarEnough(lastAssistant.content, reply)) {
       const regen = await this._tryRegen(act, userText, 'repeat', runtime);
       if (regen && !this._similarEnough(lastAssistant.content, regen)) { reply = regen; guardrailHits.push('REPEATregen'); }
-      else { reply = this._pickFallback(act); guardrailHits.push('REPEAT'); }
+      else {
+        const fb = this._fallbackWithProbe(act, question, mergeResult.conflictsNew);
+        reply = fb.reply; askedSlot = fb.slot; guardrailHits.push('REPEAT');
+      }
     }
+
+    // B4 记账（P1-3 修复后移到护栏之后）：askedSlot 已是最终问句的槽位——护栏替换可能改写问句，
+    // 提前记账会把 ask_count 记到本轮实际没问的槽上。本轮实际追问的槽 ask_count +1；冲突候选标记 asked。
+    if (askedSlot) {
+      act.memory = ensureMemory(act.memory, nowMs);
+      act.memory.ask_count[askedSlot] = (Number(act.memory.ask_count[askedSlot]) || 0) + 1;
+      for (const c of act.memory.conflicts || []) {
+        if (c.slot === askedSlot) c.asked = true;
+      }
+    }
+    // chips 与最终问句同源（P1-3 硬约束）：问哪个槽挂哪个槽的选项；护栏替换改写问句后跟随重绑
+    const chips = !askedSlot ? []
+      : (question.kind === 'conflict' && askedSlot === question.slot) ? question.chips
+        : (SLOT_CHIPS[askedSlot] || []);
 
     act.messages.push({ role: 'user', content: userText, ts: nowMs });
     act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
@@ -1648,6 +1685,51 @@ class IGDE {
   /** 兜底选择器：从 FALLBACK_POOL 轮换（用于 L0/L2/L4 兜底与异常兜底） */
   _pickFallback(act) {
     return this._rotateReply(act, null, FALLBACK_POOL);
+  }
+
+  /**
+   * 护栏替换兜底（09-30 报告 P1-3 修复）：旧 FALLBACK_POOL 完整句内嵌「问受众」固定问句，
+   * 替换主回复后与 B4 chips 错位、且重复问已填槽。改为：无问句接住语 + 按 B4 当前缺口单点追问
+   * （ask_count 感知，不重复问已填槽），返回 { reply, slot } 供调用方重挂同源 chips。
+   * 冲突轮保持冲突槽（C6 核实语义不丢）；四槽全满 → 收口引导（不问）。
+   */
+  _fallbackWithProbe(act, question, conflictsNew) {
+    if (question && question.kind === 'conflict' && question.slot) {
+      const c = (conflictsNew || [])[0];
+      const ask = (c && c.old && c.new)
+        ? this._appendConflictAsk('', question, [c])
+        : this._probe(act, question.slot);
+      const catchLine = this._rotateReply(act, FALLBACK_CATCH_POOL[0], FALLBACK_CATCH_POOL);
+      return { reply: `${catchLine}${ask}`, slot: question.slot };
+    }
+    const miss = this.missingFields(act);
+    if (!miss.length) return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_CATCH_POOL), slot: null };
+    const slot = this._nextProbeSlot(act);
+    const catchLine = this._rotateReply(act, FALLBACK_CATCH_POOL[0], FALLBACK_CATCH_POOL);
+    return { reply: `${catchLine}${this._probe(act, slot)}`, slot };
+  }
+
+  /**
+   * 检测「模型自行核实旧值」（09-30 报告 P1-2/P1-3 变体）：模型在回复里口头核实某槽旧值
+   * 却未提交 slot_updates 时，B4 预决策仍指向下一空槽 → 问句与 chips 错位。
+   * 判定（窄口径防误伤）：回复的问句分句提到某已填槽的旧值（归一化子串），且带核实口吻词
+   * （以哪个为准/刚说/又说/不一致/差别/冲突）。命中返回该槽，否则 null。
+   */
+  _detectVerifyReply(reply, act) {
+    const norm = normalizeForGround;
+    // lookbehind 切分保留终止符（？是分句依据，不能被 split 吃掉——否则问句分句恒为空）
+    const sentences = String(reply || '').split(/(?<=[。！？；;!?])/);
+    const qs = sentences.filter(s => /[?？]\s*$/.test(s));
+    if (!qs.length) return null;
+    const qText = qs.join(' ');
+    if (!/(哪个为准|以哪个|哪个对|刚说|又说|不一致|不一样|差别|冲突|为准)/.test(qText)) return null;
+    for (const s of NEEDED_FIELDS) {
+      const cur = act.needs[s];
+      const v = cur && cur.value ? norm(cur.value) : '';
+      if (v.length < 4) continue;
+      if (qs.some(q => norm(q).includes(v))) return { slot: s };
+    }
+    return null;
   }
 
   /** 自然回复去重：若与上一句助手相同则换一个备选（避免桩路径自然复读，如连发"我不知道"） */

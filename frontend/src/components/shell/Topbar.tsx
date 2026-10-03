@@ -6,6 +6,7 @@ import { TAB_LABELS } from '@/lib/constants';
 import { filledCount, progressText, progressTail } from '@/lib/needs';
 import { initial } from '@/lib/format';
 import NotificationBell from './NotificationBell';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 /** 顶栏：logo / 面包屑 / needs 进度提示 / 停发徽标 / 引擎徽标 / 模式徽章 / 登录·头像 / 重置 —— 对应 flow.html .topbar */
 export default function Topbar() {
@@ -54,9 +55,13 @@ export default function Topbar() {
     ? (SAFE_ONBOARDING_TEXTS[onboardingStep] || SAFE_ONBOARDING_TEXTS[0])
     : needsTail;
 
+  // 自定义确认弹层（09-30 报告 P2-2：原生 window.confirm 阻塞自动化点击且风格不一）：
+  // 登出 / 重置两类确认统一走 ConfirmDialog
+  const [confirmAsk, setConfirmAsk] = useState<'logout' | 'reset' | null>(null);
+
   const onUser = () => {
     if (me?.user) {
-      if (window.confirm('退出登录？')) authLogout();
+      setConfirmAsk('logout');
     } else {
       setAuthMode('login');
       setAuthOpen(true);
@@ -64,11 +69,12 @@ export default function Topbar() {
   };
 
   const onReset = () => {
-    if (window.confirm('确定重置全部数据？假种子受众会重新生成。')) resetData();
+    setConfirmAsk('reset');
   };
 
-  // demo：引导期不显示顶栏 HintPill（GuideOverlay 接管）；safe：始终显示（引导态串联）
-  const showHint = isDemoGuide ? !showOnboarding : true;
+  // F4 进度唯一口径（09-30 报告）：n/4 进度全屏仅顶栏一处——demo 引导期也显示顶栏进度，
+  // 右栏重复的 0/10 checklist 已移除（ChatView）
+  const showHint = true;
 
   return (
     <header className="topbar">
@@ -131,6 +137,25 @@ export default function Topbar() {
         </div>
       )}
       <button className="tbtn" onClick={onReset}>重置</button>
+
+      {/* 自定义确认弹层（P2-2）：登出 / 重置，ESC / 遮罩 / 取消均可关闭 */}
+      <ConfirmDialog
+        open={confirmAsk === 'logout'}
+        title="退出登录"
+        message="退出后需要重新登录才能继续使用，当前会话进度会保留在服务端。"
+        confirmLabel="退出"
+        onConfirm={() => { setConfirmAsk(null); authLogout(); }}
+        onCancel={() => setConfirmAsk(null)}
+      />
+      <ConfirmDialog
+        open={confirmAsk === 'reset'}
+        title="重置全部数据"
+        message="确定重置全部数据？对话 / 邮件 / 看板数据会被清空，假种子受众会重新生成。"
+        confirmLabel="重置"
+        danger
+        onConfirm={() => { setConfirmAsk(null); resetData(); }}
+        onCancel={() => setConfirmAsk(null)}
+      />
     </header>
   );
 }

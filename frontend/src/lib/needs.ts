@@ -68,13 +68,15 @@ export function progressText(needs?: Needs | null): string {
   const filled = filledCount(needs);
   const marks = filledMarks(needs);
   const missing = missingSlots(needs);
+  // 空列表（尚无任何 ✅）：省去「：，」连标点（09-30 报告 P2-1「0/4：，还差」瑕疵）
+  if (!marks) return missing.length ? `已收集 ${filled}/4，还差：${missing.join('、')}` : `已收集 ${filled}/4，信息齐了`;
   const tail = missing.length ? `，还差：${missing.join('、')}` : '，信息齐了';
   return `已收集 ${filled}/4：${marks}${tail}`;
 }
 
 /** 任务式进度去数字版（Topbar 展开态正文用，数字 n/4 由 hp-n 单独承担，避免重复） */
 export function progressTail(needs?: Needs | null): string {
-  return progressText(needs).replace(/^已收集 \d\/4：/, '');
+  return progressText(needs).replace(/^已收集 \d\/4[：]?/, '');
 }
 
 /**

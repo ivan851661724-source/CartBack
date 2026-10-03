@@ -441,26 +441,11 @@ export default function ChatView() {
         </div>
         </section>
 
-        {(isDemoGuide && showOnboarding) || hasOpportunities ? (
-          <aside className="opportunity-rail" aria-label={isDemoGuide && showOnboarding ? '需求收集进度' : '待处理机会'}>
-            {isDemoGuide && showOnboarding ? (
-              <OnboardingChecklist
-                collected={clickedChips}
-                onAdvance={async () => {
-                  // 手动兜底（自动跳步 effect 通常先触发）：推进步骤2 + 生成草稿。
-                  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（由引导气泡指向侧栏）。
-                  const card = act?.planCard;
-                  if (!card) { toast_('需求尚未收集完整，回到对话补全四要素后再生成邮件'); return; }
-                  setOnboardingStep(1);
-                  setDraftGenerating(true);
-                  try { await createCardDraft(act.id, card); await loadState(); }
-                  catch (e: any) { toast_('草稿生成失败：' + (e?.message || e)); }
-                  setDraftGenerating(false);
-                }}
-              />
-            ) : (
-              <OpportunityCard />
-            )}
+        {/* F4 进度唯一口径（09-30 报告）：进度全屏仅顶栏 HintPill 一处（n/4）；
+            右栏只承载待处理机会，demo 引导期不再渲染重复的 0/10 checklist */}
+        {hasOpportunities ? (
+          <aside className="opportunity-rail" aria-label="待处理机会">
+            <OpportunityCard />
           </aside>
         ) : null}
       </div>
@@ -645,68 +630,3 @@ function PendingBatchCard({ b }: { b: BatchPreview }) {
   );
 }
 
-/**
- * 初始引导右侧 checklist —— 对齐 Figma AgentPage「📋 需求收集进度」(App.tsx:352-401)。
- * 圆勾选框 + 标签 + 右侧已填短值 + 虚线分隔 + 进度条 + 底部完成按钮。
- * collected 为已点 chip 的索引集合；完成按钮推进引导下一步（引导走完才切回机会列表）。
- */
-function OnboardingChecklist({ collected, onAdvance }: { collected: Set<number>; onAdvance: () => void }) {
-  const total = BRAND_POINTS.length;
-  const done = collected.size;
-  const allDone = done >= total;
-  return (
-    <div className="opp-card" style={{ gap: 12 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <span className="disp" style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>📋 需求收集进度</span>
-        <span style={{ color: 'var(--brand)', fontWeight: 800, fontFamily: 'var(--font-disp)', fontSize: 15 }}>
-          {done}<span style={{ color: 'var(--soft)', fontWeight: 400, fontSize: 12 }}>/{total}</span>
-        </span>
-      </div>
-
-      <div style={{ height: 6, background: 'var(--bg-input)', borderRadius: 999, overflow: 'hidden' }}>
-        <div style={{
-          height: '100%', width: `${(done / total) * 100}%`, background: 'var(--brand)',
-          borderRadius: 999, transition: 'width .5s var(--ease)',
-        }} />
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column' }}>
-        {BRAND_POINTS.map((p, i) => {
-          const c = collected.has(i);
-          return (
-            <div key={p.key} style={{
-              display: 'flex', gap: 9, alignItems: 'flex-start',
-              padding: '7px 0', borderBottom: '.5px dashed var(--line)', fontSize: 12,
-            }}>
-              <div style={{
-                width: 17, height: 17, borderRadius: '50%', flexShrink: 0, marginTop: 1,
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                background: c ? 'var(--brand)' : '#fff', border: `.5px solid ${c ? 'var(--brand)' : 'var(--line)'}`,
-                color: '#fff', fontSize: 9, fontWeight: 700, transition: 'all .2s',
-              }}>{c ? '✓' : ''}</div>
-              <div style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 6 }}>
-                <span style={{ color: c ? 'var(--text)' : 'var(--muted)', flexShrink: 0 }}>{p.label}</span>
-                {c && p.val && (
-                  <span style={{
-                    color: 'var(--muted)', fontSize: 11, textAlign: 'right',
-                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                  }}>{p.val}</span>
-                )}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {allDone ? (
-        <button className="btn primary" onClick={onAdvance} style={{ width: '100%', justifyContent: 'center', border: 'none' }}>
-          设置完成！进入下一步 →
-        </button>
-      ) : (
-        <button className="btn ghost" disabled style={{ width: '100%', justifyContent: 'center', border: 'none' }}>
-          还需补全 {total - done} 个要点
-        </button>
-      )}
-    </div>
-  );
-}

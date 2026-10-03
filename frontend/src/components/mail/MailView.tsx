@@ -18,7 +18,8 @@ export default function MailView() {
     <div className="view-body">
       <div className="phead">
         <h2>邮件配置</h2>
-        <span className="desc">每封独立生命周期 · 草稿 → 发送中 → 已发送 → 回流中</span>
+        {/* P2-3（09-30 报告）：单封与批次是两套生命周期——单封四态（status 机），批次六态（campaigns） */}
+        <span className="desc">单封：草稿 → 发送中 → 已发送 → 回流中 · 批次六态见下方批次条</span>
       </div>
       <div className="stat-strip">
         <div className="stat glass-card">
