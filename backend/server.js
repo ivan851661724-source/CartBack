@@ -94,7 +94,7 @@ queue.recover();
 const RECEIPT_T24_MS = 24 * 3600 * 1000;   // F3②：发送完成 → 24h 后出回执汇总
 
 // —— F1 store_banner：audience 表聚合的店铺数据开场句数据源（无数据字段缺省）——
-async function buildStoreBanner() {
+async function buildStoreBanner(userId, opts) {
   if (!connectors) return { connected: false };
   let storeName = null;
   let currency = 'USD';
@@ -103,8 +103,9 @@ async function buildStoreBanner() {
     storeName = (meta && (meta.name || meta.shop)) || null;
     if (meta && meta.currency) currency = String(meta.currency);
   } catch (e) { /* 元数据失败不阻塞开场：仅 connected */ }
+  const audScope = userId ? store.getAudienceForUser(userId, opts) : store.getAudience();   // 安全整改：按用户隔离
   const weekAgo = Date.now() - 7 * 86400000;
-  const carts = store.getAudience().filter(a => /加购/.test(a.intent || ''));
+  const carts = audScope.filter(a => /加购/.test(a.intent || ''));
   const weekly = carts.filter(a => (a.at_risk_at || a.created_at || 0) >= weekAgo);
   const vals = weekly.map(a => Number(a.abandoned_value) || 0).filter(v => v > 0);
   const total = +vals.reduce((s, v) => s + v, 0).toFixed(2);
@@ -139,7 +140,7 @@ async function processReceiptJob({ payload }) {
   const scopeId = payload.campaignId || payload.draftId;
   const agg = notify.aggregateReceipt(store, { draftId: payload.draftId, campaignId: payload.campaignId, actId: payload.actId });
   if (!agg) return { skipped: 'no sends（无实发不产数字）' };
-  const already = store.getNotifications(payload.userId || null, 500)
+  const already = store.getNotifications(payload.userId || null, 500, { includeUnowned: isAdminUserId(payload.userId) })
     .some(n => n.type === 't24' && (n.draft_id === scopeId || n.campaign_id === scopeId));
   if (already) return { skipped: 't24 already emitted', scope_id: scopeId };
   store.addNotification({ user_id: payload.userId || null, ...notify.buildT24Notification({ name: payload.name, agg }) });
@@ -179,8 +180,8 @@ function emitRecoverReceipt({ draftId, campaignId, audience, audienceId, coupon,
 }
 
 // —— A3②：新会话复用意图的 prefs 数据源（该商家最近一个确认沉淀过 prefs 的 act，排除当前会话）——
-function latestPrefsFor(userId, excludeActId) {
-  const acts = store.getActsByUser(userId).filter(a => a.id !== excludeActId);
+function latestPrefsFor(userId, excludeActId, opts) {
+  const acts = store.getActsByUser(userId, opts).filter(a => a.id !== excludeActId);
   for (const a of acts) {   // getActsByUser 已按 updated_at 降序
     const p = a.memory && a.memory.prefs;
     if (p && typeof p === 'object' && String(p.audience || '').trim()) return p;
@@ -189,8 +190,8 @@ function latestPrefsFor(userId, excludeActId) {
 }
 
 // —— A3④ / 接口契约①：GET /api/state 顶层 welcome / prefs / last_plan / todos ——
-function buildStateExtras(userId) {
-  const acts = store.getActsByUser(userId);
+function buildStateExtras(userId, opts) {
+  const acts = store.getActsByUser(userId, opts);
   // F1：欢迎语资格 = 该商家名下不存在任何 act（含 closed）
   const welcome = { eligible: acts.length === 0 };
   // A3：prefs = 最近 act 的 memory.prefs（确认沉淀 / 复用标记），否则 agent profile
@@ -476,8 +477,13 @@ function resolveBrand(card) {
 // —— M4 发件人名链：显式 espSenderName（非默认 CartBack）> 草稿固化品牌 > 兜底 ——
 // espSenderName 的配置默认值就是 'CartBack'（含已持久化的旧配置），须视为「未设置」走品牌链
 function senderNameFor(c, draft) {
-  if (c && c.espSenderName && c.espSenderName !== 'CartBack') return c.espSenderName;
-  return (draft && draft.brand) || config.shopBrand || 'CartBack';
+  const raw = (c && c.espSenderName && c.espSenderName !== 'CartBack')
+    ? c.espSenderName
+    : ((draft && draft.brand) || config.shopBrand || 'CartBack');
+  // 安全整改：draft.brand 来自商家对话输入（resolveMerchantBrand），含 CR/LF 可注入 SMTP 头（如 Bcc），
+  // 也会污染 Resend/Brevo 的 from 字段——统一剥离控制字符。
+  const safe = String(raw).replace(/[\r\n\x00-\x1f\x7f]+/g, ' ').trim();
+  return safe || 'CartBack';
 }
 
 // —— M5 主题口径护栏：加购未付/弃购人群（从未完成订单）禁 order/purchase 措辞，一律 cart（保留首字母大写） ——
@@ -504,7 +510,8 @@ function productFallbackFor(draft) {
 // —— M10 standard 档称呼注入：共享 draft.html 的通用称呼 → 逐收件人称呼（变体档本就逐人渲染） ——
 function personalizeHtml(html, msg) {
   if (!html || !msg) return html;
-  const name = render.safeName(msg.recipient || {}, msg.locale || 'en');
+  // 安全整改：name 来自 CSV 导入/店铺同步等不可信数据，原样内插曾构成邮件 HTML 注入（发件域被当钓鱼跳板）
+  const name = escapeHtml(render.safeName(msg.recipient || {}, msg.locale || 'en'));
   if (!name || name === 'there') return html;
   return html
     .replace(/Hi there,?\s*/i, 'Hi ' + name + ', ')
@@ -531,8 +538,30 @@ function regRateOk(ip) {
   b.count++; regBuckets[ip] = b;
   return b.count <= 10;
 }
+// 安全整改：X-Forwarded-For 客户端可伪造（伪造首段即可无限换桶绕过注册限流）。
+// 仅在显式声明 TRUST_PROXY=1（部署在可信反代后）时采信 XFF，且取【最后一跳】（反代追加的真实来源）；
+// 默认直连场景一律取 TCP 对端地址，不可被请求头伪造。
+const TRUST_PROXY = process.env.TRUST_PROXY === '1';
 function clientIp(req) {
-  return (req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket.remoteAddress || '?';
+  if (TRUST_PROXY) {
+    const parts = String(req.headers['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return req.socket.remoteAddress || '?';
+}
+
+// —— 普通用户每日 AI 额度（安全整改：免费账号不得无限烧 Token Plan；管理员不受限；0 = 不限）——
+// 计量口径：1 次 agent 对话轮 = 1 次；1 次竞品邮件拆解 = 1 次（一次轮内最多 aiMaxCallsPerTurn 次模型调用）。
+const llmQuota = {}; // userId -> { day: 'YYYY-MM-DD', used }
+function llmQuotaTry(userId, cost = 1) {
+  const limit = Number(config.userLlmDailyLimit) || 0;
+  if (!limit || !userId) return true;
+  const day = new Date().toISOString().slice(0, 10);
+  let q = llmQuota[userId];
+  if (!q || q.day !== day) { q = { day, used: 0 }; llmQuota[userId] = q; }
+  if (q.used + cost > limit) return false;
+  q.used += cost;
+  return true;
 }
 
 // —— AI 适配器（lib/llm 的 LLMClient，服务端代理保密钥） ——
@@ -703,9 +732,37 @@ async function fetchSmtp(draft, messages, c) {
   return { id: ids.join(','), ids, batches: messages.length };
 }
 
+/* ===================== 安全整改：账号可见域（多租户隔离） =====================
+ * 规则（与 lib/store 过滤口径一致）：
+ *  - 行 user_id === 当前用户 → 可见；
+ *  - 空 user_id（历史/种子数据）→ 仅管理员可见（本地模式 / config.adminEmails 命中）；
+ *  - 其余（他人数据）→ 不可见。
+ */
+// 历史无归属数据的锚点账号（本地管理员 admin@local）。本地模式所有请求都挂它名下，
+// 引擎按数据归属（draft.user_id）取受众时，命中锚点 = 历史数据可见域。
+function legacyAnchorId() { return authMod.ensureLocalOwner(store).id; }
+function isAdminUserId(userId) { return userId != null && userId === legacyAnchorId(); }
+function isAdminReq(req) {
+  if (req.authMode === 'local') return true;
+  if (!req.userId) return false;
+  if (isAdminUserId(req.userId)) return true;
+  const u = store.getUserById(req.userId);
+  if (!u) return false;
+  const admins = Array.isArray(config.adminEmails) ? config.adminEmails : [];
+  return admins.map(s => String(s).toLowerCase()).includes(String(u.email || '').toLowerCase());
+}
+function scopeOpts(req) { return { userId: req.userId, includeUnowned: isAdminReq(req) }; }
+function canSeeRow(row, req) {
+  if (!row) return false;
+  return row.user_id ? row.user_id === req.userId : isAdminReq(req);
+}
+/** 引擎路径作用域：按数据归属人（act/draft 的 user_id）取名单；空归属或本地锚点 = 历史数据可见域 */
+function ownerScope(user_id) { return { userId: user_id || null, includeUnowned: !user_id || isAdminUserId(user_id) }; }
+
 // 依据方案卡受众描述解析真实收件人（P0 真实源未接前用假种子/导入名单）
-function matchAudienceByDesc(desc) {
-  const all = store.getAudience();
+// 安全整改：第二参为【已按用户隔离】的受众列表；缺省时按 draft 归属域解析。
+function matchAudienceByDesc(desc, aud) {
+  const all = aud || store.getAudience();
   const d = (desc || '').toLowerCase();
   let list = all;
   if (/弃购|未付/.test(d)) list = all.filter(a => /弃购|未付|下单未付/.test(a.intent));
@@ -716,11 +773,13 @@ function matchAudienceByDesc(desc) {
   return list;
 }
 function resolveRecipients(draft) {
-  return filterTargetable(matchAudienceByDesc(draft.audience)).slice(0, 200);
+  const scope = ownerScope(draft.user_id);
+  return filterTargetable(matchAudienceByDesc(draft.audience, store.getAudienceForUser(scope.userId, scope))).slice(0, 200);
 }
 // Wave 2 D3：净名单唯一口径（可发送上限 200 与 reach_count / matchedCount / holdout 圈定同源）
-function audienceNetList(desc) {
-  return filterTargetable(matchAudienceByDesc(desc)).slice(0, 200)
+function audienceNetList(desc, scope) {
+  const aud = scope ? store.getAudienceForUser(scope.userId, scope) : store.getAudience();
+  return filterTargetable(matchAudienceByDesc(desc, aud)).slice(0, 200)
     .filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
 }
 
@@ -742,7 +801,7 @@ function filterTargetable(list) {
 }
 
 // —— ② 受众圈选条件（确认卡展示用）：需求关键词 → 结构化过滤条件 + 命中概览 ——
-function audienceConditions(desc) {
+function audienceConditions(desc, scope) {
   const d = (desc || '').toLowerCase();
   const filters = [];
   if (/弃购|未付/.test(d)) filters.push({ field: 'intent', op: 'includes', value: '弃购/下单未付' });
@@ -753,7 +812,8 @@ function audienceConditions(desc) {
   filters.push({ field: 'email', op: 'valid', value: '邮箱有效' });
   filters.push({ field: 'email_status', op: 'not_equals', value: '排除无效邮箱' });
   filters.push({ field: 'window', op: 'within_days', value: '30 天内互动' });
-  const matched = filterTargetable(matchAudienceByDesc(desc));   // 与发送端同一口径
+  const aud = scope ? store.getAudienceForUser(scope.userId, scope) : store.getAudience();   // 安全整改：命中概览按用户域
+  const matched = filterTargetable(matchAudienceByDesc(desc, aud));   // 与发送端同一口径
   return {
     desc: desc || '全部受众',
     filters,
@@ -829,17 +889,17 @@ async function renderForDraft(draft, recipients) {
   });
 }
 
-// 仿真归因事件（演示模式驱动看板；真实模式仅在有回执时写入）
+// 仿真归因事件（演示模式驱动看板；真实模式仅在有回执时写入）——事件打上 draft 归属（安全整改）
 function scheduleSimEvents(draft, recipients) {
   const now = Date.now();
   recipients.forEach((r, i) => {
     const base = now + i * 1200;
-    store.addEvent({ type: 'emailed', draft_id: draft.id, audience_id: r.id, ts: base });
-    if (Math.random() < 0.72) store.addEvent({ type: 'open', draft_id: draft.id, audience_id: r.id, ts: base });
-    if (Math.random() < 0.34) store.addEvent({ type: 'click', draft_id: draft.id, audience_id: r.id, ts: base + 3000 });
+    store.addEvent({ type: 'emailed', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base });
+    if (Math.random() < 0.72) store.addEvent({ type: 'open', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base });
+    if (Math.random() < 0.34) store.addEvent({ type: 'click', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base + 3000 });
     if (Math.random() < 0.14) {
       const value = +(r.abandoned_value * (0.1 + Math.random() * 0.2)).toFixed(2);
-      store.addEvent({ type: 'convert', draft_id: draft.id, audience_id: r.id, value, ts: base + 9000 });
+      store.addEvent({ type: 'convert', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, value, ts: base + 9000 });
       tagsMod.weightForConversion(store, r.id);   // ⑤ 标签反哺（演示模式同步演示加权）
     }
   });
@@ -993,6 +1053,7 @@ async function sendDraft(draft, opts = {}) {
         store.addEvent({
           type: 'emailed', draft_id: draft.id,
           audience_id: (m.recipient || {}).id || null,
+          user_id: draft.user_id || null,
           esp_id: espIds[i] || null, ts: Date.now()
         });
         // Wave 2：sends 实发流水（幂等键 campaign+recipient，重试不追加新行）
@@ -1078,15 +1139,17 @@ async function processSendJob({ job, payload }) {
 
 // 批次圈人口径：与单方案同源（matchAudienceByDesc + filterTargetable），但拆批语义要求更细的意图切分——
 // 「加购未付」「下单未付」必须拆成两批不同人群（I1），故先按最具体意图匹配，再回落 matchAudienceByDesc。
-function campaignMatcher(desc) {
-  const all = store.getAudience();
+// 安全整改：scope = { userId, includeUnowned }，圈人只在归属域内（buildCampaignMatcher 绑定）。
+function campaignMatcher(desc, scope) {
+  const all = scope ? store.getAudienceForUser(scope.userId, scope) : store.getAudience();
   const d = (desc || '').toLowerCase();
   let list;
   if (/加购/.test(d)) list = all.filter(a => /加购/.test(a.intent));                       // 加购未付（不含弃购/下单未付）
   else if (/下单未付|弃购/.test(d)) list = all.filter(a => /弃购|下单未付/.test(a.intent)); // 下单未付/弃购
-  else list = matchAudienceByDesc(desc);                                                    // 其余回落单方案口径
+  else list = matchAudienceByDesc(desc, all);                                              // 其余回落单方案口径
   return filterTargetable(list).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
 }
+function buildCampaignMatcher(scope) { return (desc) => campaignMatcher(desc, scope); }
 
 // I2 日历契约（GET /api/state / GET /api/blackout 共用）：active + 区间列表（并集判定在 sendBlocker 内）
 function blackoutContract() {
@@ -1096,13 +1159,15 @@ function blackoutContract() {
   return { active: campaignsMod.activeBlackoutRange(store) != null, ranges };
 }
 
-// —— I3/I1 对话执行器（IGDE 注入缝；userId 按请求作用域）——
+// —— I3/I1 对话执行器（IGDE 注入缝；userId 按请求作用域；opts = { includeUnowned } 管理员可见域）——
 // 返回结构化结果，人话组装在引擎侧（确定性边界声明/逐批复述不进模型话术层）。
-function makeCampaignExecutor(userId) {
+function makeCampaignExecutor(userId, opts) {
+  const scope = { userId: userId || null, includeUnowned: Boolean(opts && opts.includeUnowned) };
+  const matcher = buildCampaignMatcher(scope);
   return {
     // —— Wave 4 F2：算账口径的人数/客单（audience 表聚合；客单缺省行业默认并标注 demo）——
     audienceStats(desc) {
-      const list = campaignMatcher(desc || '');
+      const list = matcher(desc || '');
       const vals = list.map(a => Number(a.abandoned_value) || 0).filter(v => v > 0);
       if (vals.length) {
         const total = vals.reduce((s, v) => s + v, 0);
@@ -1111,7 +1176,7 @@ function makeCampaignExecutor(userId) {
       return { count: list.length, aov: cfg.INDUSTRY_DEFAULT_AOV, aov_source: 'demo', currency: 'USD' };
     },
     previewBatches(batches) {
-      const { plans } = campaignsMod.planBatches(store, batches, { matcher: campaignMatcher, userId });
+      const { plans } = campaignsMod.planBatches(store, batches, { matcher, userId });
       return plans.map(p => ({
         name: p.name, audience_desc: p.audience_desc, offer_text: p.offer_text,
         percent_off: p.percent_off, reach_count: p.reach_count, excluded: p.excluded
@@ -1119,7 +1184,7 @@ function makeCampaignExecutor(userId) {
     },
     async createBatches(batches, { exclusionOverride } = {}) {
       const r = await campaignsMod.createCampaigns(store, {
-        batches, userId, matcher: campaignMatcher, connector: connectors,
+        batches, userId, matcher, connector: connectors,
         brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack',
         exclusionOverride: Boolean(exclusionOverride)
       });
@@ -1139,7 +1204,7 @@ function makeCampaignExecutor(userId) {
       const camp = campaign_id
         ? store.getCampaign(campaign_id)
         : campaignsMod.resolveCampaignRef(store, target, userId);
-      if (!camp || (camp.user_id && userId && camp.user_id !== userId)) return { ok: false, reason: '没有找到这个批次（用「批次 A」或人话名指一下）', reason_not_found: true };
+      if (!camp || (camp.user_id ? camp.user_id !== userId : !(opts && opts.includeUnowned))) return { ok: false, reason: '没有找到这个批次（用「批次 A」或人话名指一下）', reason_not_found: true };
       if (op === 'pause') {
         const r = campaignsMod.pauseCampaign(store, camp, { scope: 'user' });
         if (!r.ok) return r;
@@ -1185,6 +1250,7 @@ function makeCampaignExecutor(userId) {
     audit({ kind, act_id, note } = {}) {
       return store.addEvent({
         type: 'audit', draft_id: act_id || null, audience_id: null,
+        user_id: userId || null,
         value: 0, order_id: `${kind || 'e1'}:${String(note || '').slice(0, 120)}`, ts: Date.now()
       });
     },
@@ -1299,6 +1365,7 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
       store.addEvent({
         type: 'emailed', draft_id: camp.id,
         audience_id: (sendable[i].recipient || {}).id || null,
+        user_id: camp.user_id || null,
         esp_id: espIds[i] || null, ts: Date.now()
       });
     }
@@ -1362,10 +1429,11 @@ async function processCampaignSendJob({ job, payload }) {
 // authoritative=true：card 来自 act.execution_snapshot/confirm 权威序列化，estGmv/matchedCount 直接取卡上口径，
 // 保证「卡 ↔ 草稿」四字段（audience/discount/count/estGmv）逐字段相等（闸门⑤ diff=0 的前提）。
 async function createDraftFromCard(card, { actId = null, userId = null, authoritative = false, draftId = null } = {}) {
-  const net = audienceNetList(card.audience);
+  const scope = ownerScope(userId);
+  const net = audienceNetList(card.audience, scope);
   const estGmv = authoritative && card.estGmv ? card.estGmv.amount : +net.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
   const matchedCount = authoritative ? (Number(card.reach_count) || net.length) : net.length;
-  const conditions = audienceConditions(card.audience);
+  const conditions = audienceConditions(card.audience, scope);
   // ⑥ 竞品套路卡检索（G6：只出结构卡，raw_email 绝不外发）+ 基准库 Top-3
   const refCards = competitorsMod.topCards(store, userId, { audience: card.audience, discount: card.discount, k: 3 });
   const benchLib = benchmarkMod.getBenchmark(store);
@@ -1453,7 +1521,7 @@ function withAuthoritativePreview(act, planCard) {
   if (!planCard || (planCard.discount && typeof planCard.discount === 'object')) return planCard;
   const wrapped = execution.buildPlanCard({
     base: planCard, code: null, codeStatus: 'pending',
-    reachCount: audienceNetList(planCard.audience).length,
+    reachCount: audienceNetList(planCard.audience, ownerScope(act.user_id)).length,
     extras: (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [],
     brand: resolveMerchantBrand(act),
     unsubscribeOk: Boolean(config.publicBaseUrl)
@@ -1472,7 +1540,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   if (act.stage === 'S3' && act.execution_snapshot && act.plan_card && !(body && (body.nohook || body.reuse_code))) {
     const existing = act.plan_card.draft_id ? store.getDraft(act.plan_card.draft_id) : null;
     if (existing) {
-      const raw = await execution.evaluateChecklist({ act, draft: existing, store, config, connector: connectors, recipients: audienceNetList(existing.audience) });
+      const raw = await execution.evaluateChecklist({ act, draft: existing, store, config, connector: connectors, recipients: audienceNetList(existing.audience, ownerScope(act.user_id)) });
       const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') });
       return { ok: true, repeated: true, act, planCard: act.plan_card, checklist: cc, holdout: cc.holdout, draft_id: existing.id, draft: existing };
     }
@@ -1552,7 +1620,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   const base = igde.producePlanCard(act, { locale, code, codeStatus });
   base.discountNum = effectivePercent;
   const brand = resolveMerchantBrand(act);
-  const reachCount = audienceNetList(base.audience).length;
+  const reachCount = audienceNetList(base.audience, ownerScope(act.user_id)).length;
   const draftId = uid('dr_');
   const planCard = execution.buildPlanCard({
     base, code, codeStatus, reachCount, extras, brand,
@@ -1589,7 +1657,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   const draft = created.draft;
 
   // confirm 时闸门预检一次返回；holdout 先圈定展示但不落库（真正落库冻结在 send 放行时）
-  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: audienceNetList(draft.audience) });
+  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: audienceNetList(draft.audience, ownerScope(act.user_id)) });
   const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') + '；确认后名单变动不影响，冻结以放行时刻为准' });
   return { ok: true, act, planCard, checklist: cc, holdout: cc.holdout, draft_id: draft.id, draft };
 }
@@ -1672,6 +1740,12 @@ function sendJson(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(body);
+}
+// 邮件 HTML 内插转义（收件人名等来自不可信导入数据；personalizeHtml 对最终 HTML 做原串替换）
+function escapeHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 function readBody(req, limit = 1e6) {
   return new Promise((resolve, reject) => {
@@ -1786,17 +1860,18 @@ const server = http.createServer(async (req, res) => {
       // Wave 3 I2：读点对账停发日历（窗口已过 → 日历冻结批次自动顺延恢复 + resume_note 提示）
       campaignsMod.reconcileBlackout(store);
       // Wave 4（契约①）：welcome（F1 欢迎语资格）/ prefs（A3）/ last_plan（A3④）/ store_banner（F1 数据开场句）
-      const extras = buildStateExtras(req.userId);
-      const storeBanner = await buildStoreBanner();
+      const extras = buildStateExtras(req.userId, scopeOpts(req));
+      const storeBanner = await buildStoreBanner(req.userId, scopeOpts(req));
+      const so = scopeOpts(req);
       return sendJson(res, 200, {
         status: cfg.status(config),
         engine: engineOnline() ? 'online' : 'degraded',   // PRD v2：llm 熔断 closed→online，open/half-open→degraded
-        acts: store.getActsByUser(req.userId),
-        drafts: store.getDraftsByUser(req.userId),
-        audience: store.getAudience(),
-        kpis: store.getKpis(config.mode, req.userId),
-        week: store.getKpisWeek(config.mode, req.userId),   // UI v4 整改 2：叙事条本周口径
-        trend: store.getTrend(req.userId),
+        acts: store.getActsByUser(req.userId, so),
+        drafts: store.getDraftsByUser(req.userId, so),
+        audience: store.getAudienceForUser(req.userId, so),   // 安全整改：受众含客户邮箱，按账号隔离
+        kpis: store.getKpis(config.mode, req.userId, so),
+        week: store.getKpisWeek(config.mode, req.userId, 7 * 86400000, so),   // UI v4 整改 2：叙事条本周口径
+        trend: store.getTrend(req.userId, so),
         metrics: loadMetrics(),
         demoAnchorRoi: 24.9,
         // —— Wave 3 批次域契约③ ——
@@ -1823,34 +1898,34 @@ const server = http.createServer(async (req, res) => {
 
     // —— Wave 4 F3④：通知中心（回执气泡由前端从通知拉取渲染，不写 act.messages，无需改 SSE）——
     if (pathname === '/api/notifications' && method === 'GET') {
+      const so = scopeOpts(req);
       return sendJson(res, 200, {
         ok: true,
-        items: store.getNotifications(req.userId, 50),   // created_at 倒序，≤50
-        unread: store.unreadNotificationCount(req.userId)
+        items: store.getNotifications(req.userId, 50, so),   // created_at 倒序，≤50
+        unread: store.unreadNotificationCount(req.userId, so)
       });
     }
     if (pathname === '/api/notifications/read' && method === 'POST') {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
       const ids = Array.isArray(body.ids) ? body.ids.map(String) : null;   // 缺省全标已读
-      const marked = store.markNotificationsRead(req.userId, ids);
-      return sendJson(res, 200, { ok: true, marked, unread: store.unreadNotificationCount(req.userId) });
+      const marked = store.markNotificationsRead(req.userId, ids, scopeOpts(req));
+      return sendJson(res, 200, { ok: true, marked, unread: store.unreadNotificationCount(req.userId, scopeOpts(req)) });
     }
 
     // —— Wave 5 A4 契约②：点待办 → 用原 act 数据开新会话预填（{ok, act}；幂等：已 done → 409）——
     const todoRe = pathname.match(/^\/api\/todos\/([\w-]+)\/resume$/);
     if (todoRe && method === 'POST') {
       const todo = store.getTodo(todoRe[1]);
-      if (!todo) return sendJson(res, 404, { error: 'todo not found' });
-      if (todo.user_id && req.userId && todo.user_id !== req.userId) return sendJson(res, 404, { error: 'todo not found' });
+      if (!todo || !canSeeRow(todo, req)) return sendJson(res, 404, { error: 'todo not found' });
       if (todo.done) return sendJson(res, 409, { ok: false, error: '该待办已恢复过（幂等：不重复开新会话）' });
       const src = todo.act_id ? store.getAct(todo.act_id) : null;
-      if (!src) return sendJson(res, 404, { error: '原会话已不存在，无法恢复' });
+      if (!src || !canSeeRow(src, req)) return sendJson(res, 404, { error: '原会话已不存在，无法恢复' });
       const now = Date.now();
       const newAct = zombie.buildResumedAct(src, { now });
       if (req.userId) newAct.user_id = req.userId;
       // 新建会话语义：该用户其它未收口会话置 closed（原 act 已 closed 保持）
-      store.closeOpenActs(newAct.user_id || null, newAct.id);
+      store.closeOpenActs(newAct.user_id || null, newAct.id, scopeOpts(req));
       store.upsertAct(newAct);
       store.markTodoDone(todo.id);
       logEvent('todo_resumed', { todo_id: todo.id, from_act: src.id, to_act: newAct.id });
@@ -1862,8 +1937,8 @@ const server = http.createServer(async (req, res) => {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
       // Wave 4 F1：欢迎语资格在新建前判定（该商家名下不存在任何 act，含 closed）——一生只出现一次
-      const hasAnyAct = store.getActsByUser(req.userId).length > 0;
-      const storeBanner = await buildStoreBanner();
+      const hasAnyAct = store.getActsByUser(req.userId, scopeOpts(req)).length > 0;
+      const storeBanner = await buildStoreBanner(req.userId, scopeOpts(req));
       const act = {
         id: uid('act_'), stage: 'S0', needs: needsMod.emptyNeeds(), messages: [],
         memory: { facts: [], decisions: [], corrections: [], extras: [], prefs: {}, ask_count: needsMod.emptyAskCount() },
@@ -1876,7 +1951,7 @@ const server = http.createServer(async (req, res) => {
       const op = igde.opening({ hasAnyAct, storeBanner });
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
       // Wave 2 closed 触发点（Wave 1 遗留补齐）：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）
-      store.closeOpenActs(req.userId || null, act.id);
+      store.closeOpenActs(req.userId || null, act.id, scopeOpts(req));
       // 注入防御：preset.audience 是不可信输入 —— 收口（去控制符/折叠空白/限长），
       // 疑似注入话术（忽略指令/角色切换/索要系统提示词）直接忽略该预选，走正常开场。
       if (body.preset && typeof body.preset.audience === 'string' && body.preset.audience.trim()) {
@@ -1892,11 +1967,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { act, chips: op.chips || [], welcome: Boolean(op.welcome), store_banner: storeBanner });
     }
 
-    // —— 新流失主动提醒（环节⑥：监控新弃购/高意向，主动冒给 agent；整改 1c：按当前用户 drafts 判定已覆盖）——
+    // —— 新流失主动提醒（环节⑥：监控新弃购/高意向，主动冒给 agent；安全整改：受众按账号隔离）——
     if (pathname === '/api/opportunities' && method === 'GET') {
-      const aud = store.getAudience();
+      const so = scopeOpts(req);
+      const aud = store.getAudienceForUser(req.userId, so);
       const high = aud.filter(a => (a.score || 0) >= 0.7);
-      const sent = store.getDraftsByUser(req.userId).filter(d => ['sent', 'recovering'].includes(d.status));
+      const sent = store.getDraftsByUser(req.userId, so).filter(d => ['sent', 'recovering'].includes(d.status));
       const targeted = new Set(sent.map(d => (d.audience || '').toLowerCase()));
       const untargeted = high.filter(a => !targeted.has((a.intent || '').toLowerCase()));
       // 「新流失」计数按用户隔离（audience 为店铺级共享，但上次看过的基数是各用户自己的）
@@ -1917,8 +1993,11 @@ const server = http.createServer(async (req, res) => {
     const m = pathname.match(/^\/api\/act\/([\w-]+)\/message$/);
     if (m && method === 'POST') {
       const act = store.getAct(m[1]);
-      if (!act) return sendJson(res, 404, { error: 'act not found' });
-      if (act.user_id && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+      if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
+      // 安全整改：普通用户每日 AI 额度（防免费账号无限烧 Token Plan；管理员不受限）
+      if (!isAdminReq(req) && !llmQuotaTry(req.userId, 1)) {
+        return sendJson(res, 429, { error: '今日 AI 使用额度已用完（每用户每日 ' + (config.userLlmDailyLimit || 0) + ' 轮），请明天再试或联系管理员。' });
+      }
       const body = await readBody(req);
       igde.aiEnabled = !!config.aiKey; // 动态：配了 key 走真模型，否则桩
       syncAgentConfig();
@@ -1928,8 +2007,8 @@ const server = http.createServer(async (req, res) => {
         const r = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
-          executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
-          reusePrefs: latestPrefsFor(req.userId, act.id),   // Wave 4 A3②：复用意图的 prefs 数据源
+          executors: makeCampaignExecutor(req.userId, scopeOpts(req)),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
+          reusePrefs: latestPrefsFor(req.userId, act.id, scopeOpts(req)),   // Wave 4 A3②：复用意图的 prefs 数据源
           persist: () => store.upsertAct(act)
         });
         persistAgentProfile(r, req.userId);
@@ -1956,8 +2035,11 @@ const server = http.createServer(async (req, res) => {
     const sm2 = pathname.match(/^\/api\/act\/([\w-]+)\/message\/stream$/);
     if (sm2 && method === 'POST') {
       const act = store.getAct(sm2[1]);
-      if (!act) return sendJson(res, 404, { error: 'act not found' });
-      if (act.user_id && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+      if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
+      // 安全整改：普通用户每日 AI 额度（同非流式口径；SSE 头在门禁之后才写，错误仍走 JSON 429）
+      if (!isAdminReq(req) && !llmQuotaTry(req.userId, 1)) {
+        return sendJson(res, 429, { error: '今日 AI 使用额度已用完（每用户每日 ' + (config.userLlmDailyLimit || 0) + ' 轮），请明天再试或联系管理员。' });
+      }
       const body = await readBody(req);
       igde.aiEnabled = !!config.aiKey;
       syncAgentConfig();
@@ -1978,8 +2060,8 @@ const server = http.createServer(async (req, res) => {
         result = await igde.handle(act, (body.message || '').toString().slice(0, 2000), {
           locale: config.shopDefaultLocale || 'en',
           agentProfile: store.getAgentProfile(req.userId),
-          executors: makeCampaignExecutor(req.userId),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
-          reusePrefs: latestPrefsFor(req.userId, act.id),   // Wave 4 A3②：复用意图的 prefs 数据源
+          executors: makeCampaignExecutor(req.userId, scopeOpts(req)),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
+          reusePrefs: latestPrefsFor(req.userId, act.id, scopeOpts(req)),   // Wave 4 A3②：复用意图的 prefs 数据源
           onReplyToken,
           persist: () => store.upsertAct(act)
         });
@@ -2042,8 +2124,7 @@ const server = http.createServer(async (req, res) => {
       let authoritative = false;
       if (actId) {
         const act = store.getAct(actId);
-        if (!act) return sendJson(res, 404, { error: 'act not found' });
-        if (act.user_id && req.userId && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+        if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
         if (act.execution_snapshot && act.plan_card) {
           card = act.plan_card;             // confirm 产出的权威卡（同源 JSON，含真实码）
           authoritative = true;
@@ -2052,7 +2133,7 @@ const server = http.createServer(async (req, res) => {
           const base = igde.producePlanCard(act, { locale: config.shopDefaultLocale || 'en' });
           card = execution.buildPlanCard({
             base, code: null, codeStatus: 'pending',
-            reachCount: audienceNetList(base.audience).length,
+            reachCount: audienceNetList(base.audience, ownerScope(act.user_id)).length,
             extras: (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [],
             brand: resolveMerchantBrand(act),
             unsubscribeOk: Boolean(config.publicBaseUrl)
@@ -2086,8 +2167,7 @@ const server = http.createServer(async (req, res) => {
     const cm = pathname.match(/^\/api\/act\/([\w-]+)\/confirm$/);
     if (cm && method === 'POST') {
       const act = store.getAct(cm[1]);
-      if (!act) return sendJson(res, 404, { error: 'act not found' });
-      if (act.user_id && req.userId && act.user_id !== req.userId) return sendJson(res, 404, { error: 'act not found' });
+      if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
       const r = await confirmActToStage3(act, body, req.userId);
@@ -2120,7 +2200,7 @@ const server = http.createServer(async (req, res) => {
     if (dm && method === 'DELETE') {
       const draft = store.getDraft(dm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
-      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
       if (['sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件正在发送，不能删除' });
       }
@@ -2134,7 +2214,7 @@ const server = http.createServer(async (req, res) => {
     if (im && method === 'POST') {
       const draft = store.getDraft(im[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
-      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
       if (['sent', 'sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，不能再修改' });
       }
@@ -2167,7 +2247,7 @@ const server = http.createServer(async (req, res) => {
     if (sm && method === 'POST') {
       const draft = store.getDraft(sm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
-      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
       // 状态检查前置：已发送/发送中的草稿不接受编辑落库（避免 409 前把编辑内容写进已发出的邮件）
       if (['sent', 'sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
@@ -2212,7 +2292,7 @@ const server = http.createServer(async (req, res) => {
       // —— D4 五道闸门（服务端重跑；前端按钮本就该被禁用，这里是兜底）——
       //    仅时段闸不过 → 缓发（重新入队带 scheduled_at，202）；其余任一不过 → 409 {ok:false, checklist}
       const act = draft.act_id ? store.getAct(draft.act_id) : null;
-      const recipients = audienceNetList(draft.audience);
+      const recipients = audienceNetList(draft.audience, ownerScope(draft.user_id));
       const gateCheck = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients });
       const failing = gateCheck.items.filter(i => !i.pass);
       if (failing.length) {
@@ -2287,7 +2367,7 @@ const server = http.createServer(async (req, res) => {
           percent_off: Number(b.percent_off) || undefined,
           scheduled_at: Number(b.scheduled_at) || 0
         })),
-        userId: req.userId, matcher: campaignMatcher, connector: connectors,
+        userId: req.userId, matcher: buildCampaignMatcher(scopeOpts(req)), connector: connectors,
         brand: (config.shopBrand && config.shopBrand !== 'CartBack') ? config.shopBrand : 'CartBack',
         exclusionOverride: Boolean(body.exclusion_override)
       });
@@ -2311,11 +2391,10 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 批次归属校验 + 加载（404 语义与 drafts 一致）
+    // 批次归属校验 + 加载（404 语义与 drafts 一致；安全整改：空归属历史批次仅管理员可见）
     function loadCampaignForRequest(id) {
       const camp = store.getCampaign(id);
-      if (!camp) return { error: [404, 'campaign not found'] };
-      if (camp.user_id && req.userId && camp.user_id !== req.userId) return { error: [404, 'campaign not found'] };
+      if (!canSeeRow(camp, req)) return { error: [404, 'campaign not found'] };
       return { camp };
     }
 
@@ -2507,17 +2586,17 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true, global_paused: false, resumed: r.resumed, resumed_count: r.resumed_count });
     }
 
-    // —— 受众 ——
+    // —— 受众（安全整改：含客户邮箱 PII，按账号隔离；空 user_id 历史数据仅管理员可见）——
     if (pathname === '/api/audience' && method === 'GET') {
-      return sendJson(res, 200, { audience: store.getAudience() });
+      return sendJson(res, 200, { audience: store.getAudienceForUser(req.userId, scopeOpts(req)) });
     }
     if (pathname === '/api/audience/import' && method === 'POST') {
       const body = await readBody(req);
       const list = parseCsv(body.csv || '');
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
-      store.addAudience(list);
+      store.addAudience(list, req.userId);   // 安全整改：导入名单归属当前用户
       tagsMod.scoreAudience(store, list);   // ① 同步时打分（source=scoring；manual 不被覆盖）
-      return sendJson(res, 200, { imported: list.length, audience: store.getAudience() });
+      return sendJson(res, 200, { imported: list.length, audience: store.getAudienceForUser(req.userId, scopeOpts(req)) });
     }
 
     // —— Store Connector：店铺事件 webhook 同步（架构 §2 B1：店铺 API / webhook / CSV 导入）——
@@ -2540,10 +2619,10 @@ const server = http.createServer(async (req, res) => {
         }))
         .filter(e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e.email || ''));
       if (!list.length) return sendJson(res, 400, { error: '未解析到有效邮箱' });
-      store.addAudience(list);
+      store.addAudience(list, req.userId);   // 安全整改：同步名单归属当前用户
       tagsMod.scoreAudience(store, list);   // ① 店铺事件同步打分
-      logEvent('store_sync', { imported: list.length });
-      return sendJson(res, 200, { imported: list.length, audience: store.getAudience().length });
+      logEvent('store_sync', { imported: list.length, userId: req.userId });
+      return sendJson(res, 200, { imported: list.length, audience: store.getAudienceForUser(req.userId, scopeOpts(req)).length });
     }
 
     // —— 店后台连接器：把【收件人 + 行为】映射进现有受众 schema ——
@@ -2585,23 +2664,47 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { configured: true, types: connectors.type === 'multi' ? connectors.connectors.map(c => c.type) : [connectors.type], health, shop: meta });
     }
 
-    // —— 拉取：从已配置店后台读取【用户信息 + 行为】并写入受众（替换种子）——
+    // —— 拉取：从已配置店后台读取【用户信息 + 行为】并写入受众（安全整改：连接器是服务端全局配置，
+    //        任意注册用户拉取 = 把店主客户 PII 拖进自己租户再导出，故仅管理员可用；名单替换只清管理员域）——
     if (pathname === '/api/store/pull' && method === 'POST') {
+      if (!isAdminReq(req)) return sendJson(res, 403, { error: '店后台拉取仅管理员可用（连接器为服务端全局配置）' });
       if (!connectors) return sendJson(res, 400, { configured: false, error: '未接入任何店后台；请在 config.json 配置 shopify 或 stores' });
       const recipients = await connectors.listCustomers({}).catch(e => { throw new Error('拉取用户失败: ' + e.message); });
       const events = await connectors.listBehaviorEvents({}).catch(() => []);
       const audience = recipients.map(r => recipientToAudience(r, events));
-      store.replaceAudience(audience);
+      store.replaceAudienceForUser(audience, req.userId, scopeOpts(req));
       tagsMod.scoreAudience(store, audience);   // ① 拉取同步时打分（PRD §0.3：同步时 scoring）
-      // 行为事件落库（供后续归因/KPI）
-      for (const e of events) store.addEvent({ type: e.type, audience_id: (audience.find(a => a.email === e.email) || {}).id || null, value: e.value, ts: e.ts });
-      logEvent('store_pull', { recipients: audience.length, events: events.length });
+      // 行为事件落库（供后续归因/KPI；事件同样打归属）
+      for (const e of events) store.addEvent({ type: e.type, audience_id: (audience.find(a => a.email === e.email) || {}).id || null, user_id: req.userId || null, value: e.value, ts: e.ts });
+      logEvent('store_pull', { recipients: audience.length, events: events.length, userId: req.userId });
       return sendJson(res, 200, { pulled: audience.length, events: events.length, recipients: audience.slice(0, 20), configured: true });
     }
 
     // —— 配置（密钥只存服务端 .server，绝不回传） ——
+    // 安全整改：全局服务端配置（密钥 / AI·ESP 端点 / 发信模式 / 引擎参数）仅管理员可写——
+    // 此前任意注册用户可改全局 aiBaseUrl/espApiUrl 指向自己的服务器窃取真实 AI key / SMTP 授权码
+    //（密钥外送），或把 mode 改成 real 用全局 ESP 群发。普通登录用户只能写自己的 user 级 prefs。
+    function applyUserPrefs(body, req) {
+      if (!(body.prefs && typeof body.prefs === 'object' && !Array.isArray(body.prefs))) return false;
+      const cur = store.getUserPrefs(req.userId);
+      const merged = { ...cur };
+      for (const [k, v] of Object.entries(body.prefs).slice(0, 16)) {
+        const key = String(k || '').trim().slice(0, 40);
+        if (!key) continue;
+        const val = String(v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v))).trim().slice(0, 200);
+        if (val === '') delete merged[key];
+        else merged[key] = val;
+      }
+      store.setUserPrefs(req.userId, merged);
+      return true;
+    }
     if (pathname === '/api/config' && method === 'POST') {
       const body = await readBody(req);
+      if (!isAdminReq(req)) {
+        const saved = applyUserPrefs(body, req);
+        if (saved) logEvent('user_prefs_saved', { userId: req.userId, scope: 'user' });
+        return sendJson(res, 200, { status: cfg.status(config), scope: 'user' });
+      }
       if (typeof body.mode === 'string') config.mode = body.mode === 'real' ? 'real' : 'demo';
       if (typeof body.aiKey === 'string') config.aiKey = body.aiKey.trim();
       if (typeof body.espKey === 'string') config.espKey = body.espKey.trim();
@@ -2638,19 +2741,9 @@ const server = http.createServer(async (req, res) => {
       }
       // Wave 5 偏好写入：body.prefs（{tone, discount_habit, signature, ...}）→ user 级持久化，
       // GET /api/state 顶层 prefs 合并返回（与 g0Whitelist 等全局键并列，互不影响）。
-      // 语义：键级合并更新；value 置空串 = 删除该键；≤16 键、键名 ≤40 字、值 ≤200 字。
-      if (body.prefs && typeof body.prefs === 'object' && !Array.isArray(body.prefs)) {
-        const cur = store.getUserPrefs(req.userId);
-        const merged = { ...cur };
-        for (const [k, v] of Object.entries(body.prefs).slice(0, 16)) {
-          const key = String(k || '').trim().slice(0, 40);
-          if (!key) continue;
-          const val = String(v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v))).trim().slice(0, 200);
-          if (val === '') delete merged[key];
-          else merged[key] = val;
-        }
-        store.setUserPrefs(req.userId, merged);
-        logEvent('user_prefs_saved', { userId: req.userId, keys: Object.keys(merged).length });
+      // 语义：键级合并更新；value 置空串 = 删除该键；≤16 键、键名 ≤40 字、值 ≤200 字。（管理员路径复用同一实现）
+      if (applyUserPrefs(body, req)) {
+        logEvent('user_prefs_saved', { userId: req.userId, scope: 'admin' });
       }
       if (Number.isFinite(body.aiContextWindowTokens)) config.aiContextWindowTokens = Math.max(2048, Math.min(1000000, body.aiContextWindowTokens | 0));
       if (Number.isFinite(body.aiMaxOutputTokens)) config.aiMaxOutputTokens = Math.max(64, Math.min(32768, body.aiMaxOutputTokens | 0));
@@ -2698,6 +2791,20 @@ const server = http.createServer(async (req, res) => {
       if (!config.webhookSecret || !authMod.secretEqual(whSecret, config.webhookSecret)) {
         return sendJson(res, 401, { error: 'bad webhook secret' });
       }
+      // 安全整改：webhook 写入的事件按 draft/campaign/audience 反查归属，避免产生无归属数据
+      function resolveEventOwner(draftId, audienceId) {
+        if (draftId) {
+          const d = store.getDraft(draftId);
+          if (d && d.user_id != null) return d.user_id;
+          const c = store.getCampaign(draftId);
+          if (c && c.user_id != null) return c.user_id;
+        }
+        if (audienceId) {
+          const a = store.getAudience().find(x => x.id === audienceId);
+          if (a && a.user_id != null) return a.user_id;
+        }
+        return null;
+      }
       const body = await readBody(req);
       const rawType = String(body.type || body.event || '');
 
@@ -2714,7 +2821,7 @@ const server = http.createServer(async (req, res) => {
           metricsInc('attr_bounced');
           logEvent('attribution_bounced', { draft_id: draftId, audience_id: audienceId });
         }
-        store.addEvent({ type: mapped, draft_id: draftId, audience_id: audienceId, value: body.value || 0, esp_id: data.message_id || null });
+        store.addEvent({ type: mapped, draft_id: draftId, audience_id: audienceId, user_id: resolveEventOwner(draftId, audienceId), value: body.value || 0, esp_id: data.message_id || null });
         metricsInc('attr_' + mapped);
         logEvent('attribution', { source: 'resend', type: mapped, draft_id: draftId, audience_id: audienceId });
         return sendJson(res, 200, { ok: true });
@@ -2753,7 +2860,7 @@ const server = http.createServer(async (req, res) => {
         const aud = resolveAudienceByEmail(order.email);
         const value = parseFloat(order.total_price) || 0;
         const couponHit = hitDraft ? hitDraft.coupon : hitCamp.discount.code;
-        store.addEvent({ type: 'convert', draft_id: hitDraft ? hitDraft.id : hitCamp.id, audience_id: (aud || {}).id || null, value, order_id: orderId || null });
+        store.addEvent({ type: 'convert', draft_id: hitDraft ? hitDraft.id : hitCamp.id, audience_id: (aud || {}).id || null, user_id: resolveEventOwner(hitDraft ? hitDraft.id : hitCamp.id, (aud || {}).id || null), value, order_id: orderId || null });
         if (aud) tagsMod.weightForConversion(store, aud.id);   // ⑤ 标签加权：convert → w += 2
         benchmarkMod.rebuildBenchmark(store);
         emitRecoverReceipt({
@@ -2781,7 +2888,7 @@ const server = http.createServer(async (req, res) => {
       if (type === 'convert' && body.order_id && store.findEventByOrderId(String(body.order_id))) {
         return sendJson(res, 200, { ok: true, deduped: true });
       }
-      const ev = store.addEvent({ type, draft_id: draftId, audience_id: body.audience_id || null, value: body.value || 0, order_id: body.order_id ? String(body.order_id) : null });
+      const ev = store.addEvent({ type, draft_id: draftId, audience_id: body.audience_id || null, user_id: resolveEventOwner(draftId, body.audience_id || null), value: body.value || 0, order_id: body.order_id ? String(body.order_id) : null });
       if (type === 'convert' && body.audience_id) tagsMod.weightForConversion(store, body.audience_id);
       if (type === 'convert' && draftId) {
         // Wave 4 F3③：conversion 到达 → 回流报喜 + estGmv 翻转写回（draft_id 也可能是批次 scope id）
@@ -2821,11 +2928,12 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
 
-    // —— 导出（整改 1c：只导当前用户 acts/drafts，防泄露他人；audience/events 店铺级共享含店铺数据）——
+    // —— 导出（安全整改：acts/drafts/audience/events 全部按当前用户域导出，防任意账号拖走全部客户 PII）——
     if (pathname === '/api/export' && method === 'GET') {
+      const so = scopeOpts(req);
       return sendJson(res, 200, {
-        acts: store.getActsByUser(req.userId), drafts: store.getDraftsByUser(req.userId),
-        audience: store.getAudience(), events: store.getEvents(), kpis: store.getKpis(config.mode, req.userId)
+        acts: store.getActsByUser(req.userId, so), drafts: store.getDraftsByUser(req.userId, so),
+        audience: store.getAudienceForUser(req.userId, so), events: store.getEventsForUser(req.userId, so), kpis: store.getKpis(config.mode, req.userId, so)
       });
     }
 
@@ -2842,11 +2950,17 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // 异步任务轮询（前端 202 入队后查进度）
+    // 异步任务轮询（前端 202 入队后查进度；安全整改：任务按归属可见——payload 反查 draft/campaign 归属，系统任务仅管理员）
     const jm = pathname.match(/^\/api\/jobs\/([\w-]+)$/);
     if (jm && method === 'GET') {
       const job = store.getJob(jm[1]);
       if (!job) return sendJson(res, 404, { error: 'job not found' });
+      const p = job.payload || {};
+      let jobOwner = p.user_id != null ? p.user_id : (p.userId != null ? p.userId : null);
+      if (jobOwner == null && p.draftId) { const d = store.getDraft(p.draftId); jobOwner = d ? (d.user_id != null ? d.user_id : null) : null; }
+      if (jobOwner == null && p.campaignId) { const c = store.getCampaign(p.campaignId); jobOwner = c ? (c.user_id != null ? c.user_id : null) : null; }
+      const jobVisible = jobOwner != null ? jobOwner === req.userId : isAdminReq(req);
+      if (!jobVisible) return sendJson(res, 404, { error: 'job not found' });
       return sendJson(res, 200, {
         id: job.id, type: job.type, status: job.status, retry_count: job.retry_count,
         result: job.result || null, error: job.error || null,
@@ -2858,25 +2972,27 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/posters' && method === 'POST') {
       const body = await readBody(req);
       const draft = store.getDraft(body.draftId);
-      if (!draft) return sendJson(res, 404, { error: 'draft not found' });
-      const { job } = queue.enqueue({ type: 'posters', payload: { draftId: draft.id, regenerate: Boolean(body.regenerate) }, dedupeKey: 'posters:' + draft.id + ':' + (body.regenerate ? Date.now() : 'base') });
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
+      const { job } = queue.enqueue({ type: 'posters', payload: { draftId: draft.id, user_id: draft.user_id != null ? draft.user_id : req.userId, regenerate: Boolean(body.regenerate) }, dedupeKey: 'posters:' + draft.id + ':' + (body.regenerate ? Date.now() : 'base') });
       return sendJson(res, 202, { job_id: job.id, queued: true });
     }
 
-    // 受众圈选条件预览（确认卡展示：条件 + 命中人数 + 预估 GMV）
+    // 受众圈选条件预览（确认卡展示：条件 + 命中人数 + 预估 GMV；安全整改：命中概览按用户域）
     if (pathname === '/api/audience/preview' && method === 'POST') {
       const body = await readBody(req);
-      return sendJson(res, 200, audienceConditions(String(body.audience || '').slice(0, 200)));
+      return sendJson(res, 200, audienceConditions(String(body.audience || '').slice(0, 200), scopeOpts(req)));
     }
 
-    // 消费者标签读取 / 手动维护（manual 来源不被 scoring/attribution 覆盖）
+    // 消费者标签读取 / 手动维护（manual 来源不被 scoring/attribution 覆盖；安全整改：仅本人受众可读写）
     const tm = pathname.match(/^\/api\/audience\/([\w-]+)\/tags$/);
     if (tm && method === 'GET') {
+      const aud = store.getAudienceForUser(req.userId, scopeOpts(req)).find(a => a.id === tm[1]);
+      if (!aud) return sendJson(res, 404, { error: 'audience not found' });
       return sendJson(res, 200, { audience_id: tm[1], tags: store.getAudienceTags(tm[1]) });
     }
     if (tm && method === 'PUT') {
       const body = await readBody(req);
-      const aud = store.getAudience().find(a => a.id === tm[1]);
+      const aud = store.getAudienceForUser(req.userId, scopeOpts(req)).find(a => a.id === tm[1]);
       if (!aud) return sendJson(res, 404, { error: 'audience not found' });
       const list = Array.isArray(body.tags) ? body.tags.slice(0, 20) : [];
       const ALLOWED = ['price_sensitivity', 'intent', 'category_like', 'style_preference', 'gender', 'age_range', 'device', 'customer_segment', 'language'];
@@ -2912,9 +3028,10 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { audience_id: tm[1], tags: store.getAudienceTags(tm[1]) });
     }
 
-    // 标签效果聚合（数据页「标签效果」区块：Top5 + 样本数）
+    // 标签效果聚合（数据页「标签效果」区块：Top5 + 样本数；安全整改：只在本人受众域内聚合）
     if (pathname === '/api/tags/effect' && method === 'GET') {
-      return sendJson(res, 200, { effect: tagsMod.tagEffect(store, { minSample: 1 }).slice(0, 10) });
+      const ids = new Set(store.getAudienceForUser(req.userId, scopeOpts(req)).map(a => a.id));
+      return sendJson(res, 200, { effect: tagsMod.tagEffect(store, { minSample: 1, audienceIds: ids }).slice(0, 10) });
     }
 
     // —— ⑥ 竞品雷达：源管理（user_id 隔离）——
@@ -2956,6 +3073,10 @@ const server = http.createServer(async (req, res) => {
       const rawEmail = String(body.raw_email || body.raw || '').slice(0, 50000);
       const competitorName = String(body.competitor_name || body.name || '').trim().slice(0, 60);
       if (!rawEmail) return sendJson(res, 400, { error: '缺少邮件原文（raw_email）' });
+      // 安全整改：普通用户每日 AI 额度（竞品拆解一次 = 1 次；inbound webhook 走 secret 不受此限）
+      if (req.userId && !isAdminReq(req) && !llmQuotaTry(req.userId, 1)) {
+        return sendJson(res, 429, { error: '今日 AI 使用额度已用完（每用户每日 ' + (config.userLlmDailyLimit || 0) + ' 次），请明天再试或联系管理员。' });
+      }
       // 预过滤（规则）：退订链接 AND 促销词 → 营销邮件；订单/物流通知 → 丢弃
       const pf = competitorsMod.prefilter(rawEmail);
       metricsInc(pf.keep ? 'competitor_kept' : 'competitor_dropped');
@@ -3007,7 +3128,7 @@ const server = http.createServer(async (req, res) => {
     if (pm && method === 'GET') {
       const draft = store.getDraft(pm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
-      if (draft.user_id && req.userId && draft.user_id !== req.userId) return sendJson(res, 404, { error: 'draft not found' });
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
       const recipients = resolveRecipients(draft).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
       const rendered = await renderForDraft(draft, recipients);
       const tiers = render.TIERS.map(tier => {
@@ -3019,7 +3140,7 @@ const server = http.createServer(async (req, res) => {
       });
       return sendJson(res, 200, {
         draft_id: draft.id,
-        audience_conditions: draft.audience_conditions || audienceConditions(draft.audience),
+        audience_conditions: draft.audience_conditions || audienceConditions(draft.audience, ownerScope(draft.user_id)),
         tiers,                                   // 「按人群预览」：每档一条样例（{{}} 已按样例收件人展开）
         languages: render.languageDistribution(recipients),   // 「语言预览」：分布
         g0_blocked: draft.g0_blocked || [],      // 被拦截邮件（标红 + 原因）
@@ -3035,7 +3156,13 @@ const server = http.createServer(async (req, res) => {
       if (!d || !d.html || String(d.html).startsWith('ERROR')) {
         return sendJson(res, 404, { error: 'draft not found' });
       }
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      // 安全整改：html 由 LLM 生成链路产出（会参考竞品邮件原文，存在提示注入面），且本端点无鉴权、
+      // 与 API 同源——同 EditModal 预览 iframe 的 sandbox 思路，用 CSP 禁脚本/表单/内嵌，保留图片样式与链接。
+      res.writeHead(200, {
+        'Content-Type': 'text/html; charset=utf-8',
+        'Content-Security-Policy': "default-src 'self' https: http: data:; script-src 'none'; object-src 'none'; form-action 'none'; frame-ancestors 'none'; base-uri 'none'",
+        'X-Content-Type-Options': 'nosniff'
+      });
       res.end(applyFooterLinks(d.html, evm[1]));
       return;
     }
@@ -3087,6 +3214,16 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     return sendJson(res, 500, { error: String(e && e.message || e) });
   }
+});
+
+// —— 安全整改：进程兜底（公网部署的可用性）——
+// async 处理器里任何未被路由内 try 捕获的异常（如早前的畸形 cookie URIError）会变成
+// unhandledRejection，Node 默认直接退出 = 单请求远程 DoS。此处记录并保持存活；根因仍须逐个修复。
+process.on('unhandledRejection', (reason) => {
+  console.error(JSON.stringify({ t: 'ey', ts: Date.now(), type: 'unhandled_rejection', error: String(reason && reason.message || reason) }));
+});
+process.on('uncaughtException', (err) => {
+  console.error(JSON.stringify({ t: 'ey', ts: Date.now(), type: 'uncaught_exception', error: String(err && err.message || err) }));
 });
 
 const PORT = process.env.PORT || 4173;

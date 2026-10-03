@@ -135,14 +135,18 @@ function tagDistribution(store, recipients) {
 // —— ⑤「标签效果」聚合（数据页 Top5 + 样本数）：标签 → 转化率 ——
 function tagEffect(store, opts = {}) {
   const minSample = opts.minSample || 1;
+  // 安全整改：可传 audienceIds（Set）限定聚合域；缺省全量（兼容单租户/本地模式与既有测试）
+  const onlyIds = (opts.audienceIds instanceof Set) ? opts.audienceIds : null;
   const events = store.getEvents();
   const convertsByAudience = new Map();
   for (const e of events) {
     if (e.type !== 'convert' || !e.audience_id) continue;
+    if (onlyIds && !onlyIds.has(e.audience_id)) continue;
     convertsByAudience.set(e.audience_id, (convertsByAudience.get(e.audience_id) || 0) + (e.value || 0));
   }
   const agg = {};
   for (const t of store.getAllAudienceTags()) {
+    if (onlyIds && !onlyIds.has(t.audience_id)) continue;
     const key = `${t.tag_type}=${t.tag_value}`;
     if (!agg[key]) agg[key] = { tag_type: t.tag_type, tag_value: t.tag_value, sample: 0, converts: 0, gmv: 0 };
     agg[key].sample++;

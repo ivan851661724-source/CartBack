@@ -44,15 +44,15 @@ const SCHEMA = {
     gender: 'TEXT',                    // 性别 female/male/other（gender 标签来源）
     age_range: 'TEXT',                 // 年龄段原样 18-24/25-34/35-44/45-54（age_range 标签来源）
     device: 'TEXT',                    // 设备原样如 iPhone 15（device 标签来源）
-    customer_segment: 'TEXT'           // 客户分层 new/returning/vip（customer_segment 标签来源）
-    // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
+    customer_segment: 'TEXT',          // 客户分层 new/returning/vip（customer_segment 标签来源）
+    user_id: 'TEXT'                    // 安全整改：归属商家；null = 历史/种子数据（仅管理员可见）
   },
   events: {
-    id: 'TEXT', type: 'TEXT', draft_id: 'TEXT', audience_id: 'TEXT', value: 'REAL', ts: 'INTEGER',
+    id: 'TEXT', type: 'TEXT', draft_id: 'TEXT', audience_id: 'TEXT', user_id: 'TEXT', value: 'REAL', ts: 'INTEGER',
     order_id: 'TEXT',        // ⑤ 订单归因幂等键（Shopify order id；同单只归因一次）
     refunded: 'INTEGER',     // ⑤ orders/update 退款标记：1 = 已扣减，防重复扣
     esp_id: 'TEXT'           // ⑤ Resend message_id → 收件人映射（回执定位 / bounced 剔除）
-    // 店铺级共享数据，不做 per-user 隔离（整改 1c 决策）
+    // 安全整改：user_id 归属商家（webhook 写入时按 draft/campaign/audience 反查打归属）
   },
   // —— PRD v5 新增 4 表（§0.5）——
   audience_tags: {
@@ -287,9 +287,13 @@ class Store {
   // 读取即惰性迁移（PRD v2 契约）：旧 act（needs 纯字符串 / pain 槽名 / memory 缺 extras）
   // 在读出时统一为 {value, source, at} 三态 + pain→reason + 新 memory 字段 + code_status/filled_count 兜底。
   getActs() { return this._read('acts').map(a => migrateAct(a)).sort((a, b) => b.updated_at - a.updated_at); }
-  getActsByUser(userId) {   // 整改 1c：按归属过滤；兼容历史 null（本地模式旧数据所有账号可见，认领语义）
+  // 安全整改：user_id 归属过滤收紧——空 user_id 的历史数据默认【不再对普通用户可见】，
+  // 仅 opts.includeUnowned（管理员/本地模式）可见；其余行严格按 user_id === userId。
+  // userId 为 null（系统/引擎上下文）时默认全域可见，保持历史调用方语义。
+  getActsByUser(userId, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
     return this._read('acts')
-      .filter(a => !a.user_id || a.user_id === userId)
+      .filter(a => a.user_id ? a.user_id === userId : incUn)
       .map(a => migrateAct(a))
       .sort((a, b) => b.updated_at - a.updated_at);
   }
@@ -310,13 +314,13 @@ class Store {
   }
 
   // —— Wave 2 closed 触发点：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）——
-  // 可见性同 getActsByUser 口径：本用户的 act + 无归属的历史 act（本地模式共享语义）。
-  closeOpenActs(userId, exceptId) {
+  // 可见性同 getActsByUser 口径：本用户的 act；空归属历史 act 仅在 opts.includeUnowned（管理员）时收口。
+  closeOpenActs(userId, exceptId, opts) {
     const rows = this._read('acts');
     let n = 0;
     for (const a of rows) {
       if (a.id === exceptId || a.stage === 'closed') continue;
-      if (a.user_id && a.user_id !== userId) continue;
+      if (a.user_id ? a.user_id !== userId : !(opts && opts.includeUnowned)) continue;
       a.stage = 'closed';
       a.updated_at = Date.now();
       n++;
@@ -344,9 +348,10 @@ class Store {
 
   // —— drafts ——
   getDrafts() { return this._read('drafts').sort((a, b) => b.created_at - a.created_at); }
-  getDraftsByUser(userId) {   // 整改 1c
+  getDraftsByUser(userId, opts) {   // 安全整改：可见性收紧（同 getActsByUser 口径）
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
     return this._read('drafts')
-      .filter(d => !d.user_id || d.user_id === userId)
+      .filter(d => d.user_id ? d.user_id === userId : incUn)
       .sort((a, b) => b.created_at - a.created_at);
   }
   getDraft(id) { return this._read('drafts').find(d => d.id === id) || null; }
@@ -381,13 +386,15 @@ class Store {
       })
       .sort((a, b) => b.estGmv - a.estGmv);   // UI v4 整改 3：按预估回流价值降序（「谁最值得捞一眼可见」）
   }
-  addAudience(list) {
+  addAudience(list, userId) {
     const rows = this._read('audience');
     for (const a of list) {
       a.id = a.id || uid('aud_');
       a.created_at = a.created_at || Date.now();
       a.at_risk_at = a.at_risk_at || a.created_at;
       a.source = a.source || 'import';
+      // 安全整改：归属一律以服务端传入为准（不可信输入不得自带 user_id 认领他人租户）
+      a.user_id = userId || null;
       rows.push(a);
     }
     this._write('audience', rows);
@@ -395,6 +402,13 @@ class Store {
   }
   clearImportedAudience() {
     this._write('audience', this._read('audience').filter(a => a.source === 'seed'));
+  }
+
+  /** 用户可见受众（安全整改：按账号隔离；空 user_id 历史行仅 opts.includeUnowned 管理员可见） */
+  getAudienceForUser(userId, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
+    const all = this.getAudience();
+    return all.filter(a => a.user_id ? a.user_id === userId : incUn);
   }
 
   /** 全量替换受众（拉到真实店后台数据后调用，清掉种子/旧导入）；同步清理孤儿标签 */
@@ -405,6 +419,21 @@ class Store {
     // 被替换掉的用户不再有归属，其标签若留在表里会灌水 tagEffect/benchmark 样本
     const tags = this._read('audience_tags');
     const keptTags = tags.filter(t => ids.has(t.audience_id));
+    if (keptTags.length !== tags.length) this._write('audience_tags', keptTags);
+    return kept;
+  }
+
+  /** 用户域受众替换（安全整改：只替换该用户自己的名单，他账号/历史数据不动） */
+  replaceAudienceForUser(list, userId, opts) {
+    const kept = Array.isArray(list) ? list : [];
+    for (const a of kept) a.user_id = userId || null;   // 归属以服务端为准
+    const rows = this._read('audience');
+    const others = rows.filter(a => a.user_id ? a.user_id !== userId : !(opts && opts.includeUnowned));
+    const next = [...others, ...kept];
+    const ids = new Set(kept.map(a => a.id).filter(Boolean));
+    this._write('audience', next);
+    const tags = this._read('audience_tags');
+    const keptTags = tags.filter(t => ids.has(t.audience_id) || others.some(a => a.id === t.audience_id));
     if (keptTags.length !== tags.length) this._write('audience_tags', keptTags);
     return kept;
   }
@@ -420,6 +449,17 @@ class Store {
     let rows = this._read('events');
     if (filter && filter.draft_id) rows = rows.filter(r => r.draft_id === filter.draft_id);
     return rows;
+  }
+  /** 用户可见事件（安全整改：按归属隔离；无归属历史事件先按本人 draft/campaign 反查，兜底仅管理员可见） */
+  getEventsForUser(userId, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
+    const ownDraftIds = new Set(
+      this._read('drafts').filter(d => d.user_id === userId).map(d => d.id)
+        .concat(this._read('campaigns').filter(c => c.user_id === userId).map(c => c.id))
+    );
+    return this._read('events').filter(e =>
+      e.user_id ? e.user_id === userId
+        : (e.draft_id ? ownDraftIds.has(e.draft_id) : incUn));
   }
   findEventByOrderId(orderId) {
     if (!orderId) return null;
@@ -702,22 +742,24 @@ class Store {
     return n;
   }
   /** 某商家的通知列表（created_at 倒序；limit 缺省 50，与 GET /api/notifications 契约一致） */
-  getNotifications(userId, limit = 50) {
+  getNotifications(userId, limit = 50, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
     return this._read('notifications')
-      .filter(n => !n.user_id || n.user_id === userId)   // 归属口径与 getActsByUser 一致（历史 null 共享）
+      .filter(n => n.user_id ? n.user_id === userId : incUn)   // 安全整改：空归属仅管理员可见
       .sort((a, b) => (b.created_at || 0) - (a.created_at || 0))
       .slice(0, Math.max(1, limit));
   }
-  unreadNotificationCount(userId) {
-    return this.getNotifications(userId, Infinity).filter(n => !n.read).length;
+  unreadNotificationCount(userId, opts) {
+    return this.getNotifications(userId, Infinity, opts).filter(n => !n.read).length;
   }
-  /** 标记已读：ids 缺省 = 全部标已读；返回本次标记数 */
-  markNotificationsRead(userId, ids) {
+  /** 标记已读：ids 缺省 = 全部标已读；返回本次标记数（安全整改：只能标自己的；空归属仅管理员可达） */
+  markNotificationsRead(userId, ids, opts) {
+    const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
     const rows = this._read('notifications');
     const want = Array.isArray(ids) && ids.length ? new Set(ids.map(String)) : null;
     let n = 0;
     for (const r of rows) {
-      if (r.user_id && userId && r.user_id !== userId) continue;
+      if (r.user_id ? r.user_id !== userId : !incUn) continue;
       if (want && !want.has(String(r.id))) continue;
       if (!r.read) { r.read = 1; n++; }
     }
@@ -869,11 +911,11 @@ class Store {
     return changed;
   }
 
-  getKpis(mode, userId) {
-    this.refreshDraftStates(userId); // FSM 超时态写回（sent → recovering/timeout）
-    const drafts = userId ? this.getDraftsByUser(userId) : this.getDrafts();
+  getKpis(mode, userId, opts) {
+    this.refreshDraftStates(userId, opts); // FSM 超时态写回（sent → recovering/timeout）
+    const drafts = userId ? this.getDraftsByUser(userId, opts) : this.getDrafts();
     const events = this.getEvents();
-    const audience = this.getAudience();
+    const audience = userId ? this.getAudienceForUser(userId, opts) : this.getAudience();   // 安全整改：受众口径按用户隔离
     const windowDays = (appCfg().attributionWindowDays) || 7;
     const windowMs = windowDays * 86400000;
     const sent = drafts.filter(d => ['sent', 'recovering'].includes(d.status));
@@ -908,9 +950,9 @@ class Store {
   }
 
   /** 本周聚合（UI v4 整改 2：叙事条「本周回流营收/ROI/花费/净赚」）；口径=近 windowMs 内发送的草稿 */
-  getKpisWeek(mode, userId, windowMs = 7 * 86400000) {
+  getKpisWeek(mode, userId, windowMs = 7 * 86400000, opts) {
     const now = Date.now();
-    const drafts = (userId ? this.getDraftsByUser(userId) : this.getDrafts())
+    const drafts = (userId ? this.getDraftsByUser(userId, opts) : this.getDrafts())
       .filter(d => d.sent_at && now - d.sent_at <= windowMs);
     const sent = drafts.length;
     const cost = +drafts.reduce((s, d) => s + (+d.cost || 0), 0).toFixed(2);
@@ -919,10 +961,10 @@ class Store {
   }
 
   /** 邮件生命周期 FSM 超时态写回：sent → recovering（有转化）/ timeout（超窗口未打开）；整改 1c：按用户范围 */
-  refreshDraftStates(userId) {
+  refreshDraftStates(userId, opts) {
     const now = Date.now();
     const timeoutMs = ((appCfg().emailTimeoutDays) || 3) * 86400000;
-    const list = userId ? this.getDraftsByUser(userId) : this.getDrafts();
+    const list = userId ? this.getDraftsByUser(userId, opts) : this.getDrafts();
     for (const d of list) {
       if (d.status !== 'sent') continue;
       const evs = this.getEvents({ draft_id: d.id });
@@ -936,9 +978,9 @@ class Store {
     }
   }
 
-  /** 7 日趋势：按发送日聚合 gmv / sent；整改 1c：按用户范围 */
-  getTrend(userId) {
-    const drafts = (userId ? this.getDraftsByUser(userId) : this.getDrafts()).filter(d => d.sent_at);
+  /** 7 日趋势：按发送日聚合 gmv / sent；整改 1c：按用户范围；安全整改：convert 事件不再全库取（跨用户 GMV 泄露） */
+  getTrend(userId, opts) {
+    const drafts = (userId ? this.getDraftsByUser(userId, opts) : this.getDrafts()).filter(d => d.sent_at);
     const days = {};
     for (let i = 6; i >= 0; i--) {
       const d = new Date(); d.setDate(d.getDate() - i);
@@ -949,7 +991,7 @@ class Store {
       const key = new Date(dr.sent_at).toISOString().slice(0, 10);
       if (days[key]) days[key].sent++;
     }
-    const events = this.getEvents().filter(e => e.type === 'convert');
+    const events = this.getEventsForUser(userId, opts).filter(e => e.type === 'convert');
     for (const e of events) {
       const key = new Date(e.ts).toISOString().slice(0, 10);
       if (days[key]) days[key].gmv += (e.value || 0);

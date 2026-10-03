@@ -131,6 +131,7 @@ export default function EditModal() {
         <iframe
           className="em-iframe"
           srcDoc={previewHtml}
+          sandbox=""
           style={{ width: '100%', height: mode === 'edit' ? '860px' : '600px', border: '1px solid #DDE2E8', borderRadius: '10px', background: '#fff' }}
           title="邮件预览"
         />

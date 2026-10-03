@@ -11,6 +11,11 @@ const tls = require('tls');
 
 function b64(s) { return Buffer.from(String(s), 'utf8').toString('base64'); }
 
+/** 头部注入防护：显示名/地址等自由文本字段剥离 CR/LF 与控制字符（SMTP 头按行解析，一次换行即可注入 Bcc 等） */
+function headerSafe(s) {
+  return String(s == null ? '' : s).replace(/[\r\n\x00-\x1f\x7f]+/g, ' ').trim();
+}
+
 /** 主题按 RFC2047 B 编码（中文安全） */
 function encSubject(subject) {
   return '=?UTF-8?B?' + b64(String(subject || '')).replace(/(.{76})/g, '$1\r\n ') + '?=';
@@ -21,8 +26,8 @@ function b64Wrap(s) { return b64(s).replace(/(.{76})/g, '$1\r\n'); }
 
 function buildMime({ from, senderName, to, subject, text, html, extraHeaders }) {
   const headers = [
-    'From: ' + (senderName ? senderName + ' ' : '') + '<' + from + '>',
-    'To: <' + to + '>',
+    'From: ' + (senderName ? headerSafe(senderName) + ' ' : '') + '<' + headerSafe(from) + '>',
+    'To: <' + headerSafe(to) + '>',
     'Subject: ' + encSubject(subject),
     'MIME-Version: 1.0',
     'Date: ' + new Date().toUTCString(),

@@ -60,7 +60,14 @@ function parseCookies(req) {
   const h = req.headers.cookie || '';
   for (const part of h.split(';')) {
     const i = part.indexOf('=');
-    if (i > 0) out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    if (i > 0) {
+      // 安全整改：畸形 cookie（如含裸 %）曾让 decodeURIComponent 抛 URIError——
+      // 该调用位于鉴权中间件（全局 try 之外），单个未鉴权请求即可打崩整个服务（已实测复现）。
+      // 解码失败按原值处理，不中断请求。
+      const v = part.slice(i + 1).trim();
+      try { out[part.slice(0, i).trim()] = decodeURIComponent(v); }
+      catch (e) { out[part.slice(0, i).trim()] = v; }
+    }
   }
   return out;
 }

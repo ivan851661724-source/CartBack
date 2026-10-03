@@ -48,6 +48,8 @@ const DEFAULTS = {
   smtpPass: '',                 // SMTP 授权码（非登录密码），仅服务端持有
   localToken: '',               // 端点鉴权令牌（本地生成）
   webhookSecret: '',            // /api/attribution webhook 校验密钥（本地生成；整改 2）
+  adminEmails: [],              // 安全整改：全局配置管理员邮箱白名单（仅这些账号可写 /api/config 全局段）
+  userLlmDailyLimit: 200,       // 安全整改：普通用户每日 AI 轮次/调用额度（0 = 不限；管理员不受限）
   attributionWindowDays: 7,
   emailTimeoutDays: 3,              // 已发送超此时长且无打开 → 超时态（异常条）
   sendRateLimitPerMin: 20,
@@ -111,8 +113,11 @@ function applyEnvOverlay(cfg) {
   const str = (k) => { const v = process.env[k]; return (v && v.trim()) ? v.trim() : null; };
   const int = (k) => { const v = str(k); return v && /^\d+$/.test(v) ? parseInt(v, 10) : null; };
   const json = (k) => { const v = str(k); if (!v) return null; try { return JSON.parse(v); } catch (e) { return null; } };
+  const csv = (k) => { const v = str(k); return v ? v.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : null; };
   const m = {
     mode: str('CARTBACK_MODE'),
+    adminEmails: csv('CARTBACK_ADMIN_EMAILS'),
+    userLlmDailyLimit: int('CARTBACK_USER_LLM_DAILY_LIMIT'),
     aiProvider: str('CARTBACK_AI_PROVIDER'),
     aiKey: str('CARTBACK_AI_KEY'),
     aiBaseUrl: str('CARTBACK_AI_BASE_URL'),
@@ -167,6 +172,7 @@ function status(cfg) {
     attributionWindowDays: cfg.attributionWindowDays,
     emailTimeoutDays: cfg.emailTimeoutDays,
     sendRateLimitPerMin: cfg.sendRateLimitPerMin,
+    userLlmDailyLimit: cfg.userLlmDailyLimit,   // 安全整改：设置页/前端提示每用户日额度（非敏感）
     shopDefaultLocale: cfg.shopDefaultLocale || 'en',
     shopBrand: cfg.shopBrand || '',      // M4：设置页品牌名回显（非敏感；空串 = 未配置，邮件品牌走兜底链）
     g0Whitelist: Array.isArray(cfg.g0Whitelist) ? cfg.g0Whitelist : [],   // 设置页回显白名单（非敏感）
