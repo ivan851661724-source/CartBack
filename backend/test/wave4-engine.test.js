@@ -51,7 +51,7 @@ test('F1 opening：无任何 act → 欢迎语一次性拼接；老用户/新会
   assert.ok(first.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语在首条气泡开头');
   assert.equal(first.welcome, true);
   assert.equal(first.stage, 'S0');
-  assert.ok(first.reply.includes('捞回来'), '无店铺数据 → 问一句话开场');
+  assert.ok(first.reply.includes('召回谁'), '无店铺数据 → 问一句话开场（C1 定稿话术）');
   assert.deepEqual(first.chips, ['加购未付', '浏览未买', '我自己说'], '未连接 chips 契约');
   // 第二个 act（名下已有 act，含 closed）→ 不拼欢迎语
   const second = e.opening({ hasAnyAct: true, storeBanner: { connected: false } });
@@ -72,7 +72,7 @@ test('F1 opening：已连接店铺 → 数据先于提问 + 数据式 chips（�
   assert.ok(op.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语仍在开头');
   const idxWelcome = op.reply.indexOf('欢迎使用百客');
   const idxData = op.reply.indexOf('已连接LunaGlow');
-  const idxQ = op.reply.indexOf('想先把这拨人捞回来吗');
+  const idxQ = op.reply.indexOf('发给谁');
   assert.ok(idxWelcome < idxData && idxData < idxQ, '数据先于提问');
   assert.ok(op.reply.includes('本周214个加购未付（客单$45，弃购总额$9630）'), '数据开场句按 PRD 句式');
   assert.ok(op.chips.length <= 3, '开场 chips ≤3');

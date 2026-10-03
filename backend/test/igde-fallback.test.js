@@ -47,7 +47,7 @@ test('P1-3: 护栏 L2 替换后——兜底句按 B4 缺口追问 goal，chips �
 
   assert.ok(r.guardrailHits.includes('L2'), `应命中 L2 兜底: ${r.guardrailHits}`);
   // 问句必须是 goal 探问（B4 唯一缺失槽），而不是 FALLBACK_POOL 的「问受众」完整句
-  assert.ok(r.reply.includes('回来干啥'), `兜底句应追问 goal: ${r.reply}`);
+  assert.ok(r.reply.includes('拿到什么结果'), `兜底句应追问 goal: ${r.reply}`);
   assert.ok(!r.reply.includes('你最想先捞哪拨客人'), '不得复用旧 FALLBACK_POOL 问受众句');
   assert.deepEqual(r.chips, SLOT_CHIPS.goal, `chips 与追问槽同源: ${JSON.stringify(r.chips)}`);
   assert.equal(r.askedSlot, 'goal');

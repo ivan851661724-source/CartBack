@@ -464,13 +464,15 @@ class IGDE {
     return missingSlots(act.needs);
   }
 
-  /** 缺失字段的引导问句（教练式：问多于说、极简） */
+  /** 缺失字段的引导问句（教练式：问多于说、极简）。
+   *  话术口径 = PRD C1–C4 定稿（2026-09-30）：选项由 SLOT_CHIPS 下发、不写进问句；
+   *  C1/C3 的「有店铺数据 / 有历史数据」变体由 opening() 数据式开场与 F2 历史建议承载。 */
   probeFor(field) {
     const map = {
-      audience: '先说最想挽回哪拨人？弃购的、加购没付的，还是好久没来的老客？',
-      reason: '他们为啥快丢了？太久没动静、被竞品勾走，还是单纯忘了？',
-      goal: '你希望他们回来干啥？再下一单、回来逛逛，还是唤醒沉睡的？',
-      offer: '想给点什么钩子？折扣、专属优惠码，还是包邮 / 限时？'
+      audience: '这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。',
+      reason: '你认为顾客流失的原因是哪一个',
+      goal: '你希望拿到什么结果？挽回多少单、多少金额，还是先跑通流程？',
+      offer: '这封给客人什么钩子？'
     };
     return map[field];
   }
@@ -502,13 +504,13 @@ class IGDE {
         const fmt = (n) => (Number.isInteger(n) ? String(n) : String(+n.toFixed(2)));
         parts.push(`本周${count}个加购未付（客单${cur}${fmt(aov)}，弃购总额${cur}${fmt(total)}）。`);
       }
-      parts.push('想先把这拨人捞回来吗？还是先聊别的客群？');
+      parts.push('咱们先把「发给谁」定了，先捞这拨？');
       chips = [];
       if (count > 0) chips.push(`加购未付 ${count} 人`);
       if (chips.length < 2) chips.push('浏览未买');
       chips.push('我自己说');
     } else {
-      parts.push('想先把哪拨客人捞回来？加购没付的、逛了没买的，还是好久没来的老客？');
+      parts.push('这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。');
       chips = ['加购未付', '浏览未买', '我自己说'];
     }
     return { reply: parts.join(''), stage: 'S0', chips, welcome: !opts.hasAnyAct };

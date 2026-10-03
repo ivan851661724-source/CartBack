@@ -255,7 +255,7 @@ test('Wave 4 #1 零配置开场：欢迎语只在首个 act 拼一次；数据�
   });
   const iW = data.reply.indexOf('欢迎使用百客');
   const iD = data.reply.indexOf('已连接LunaGlow');
-  const iQ = data.reply.indexOf('想先把这拨人捞回来吗');
+  const iQ = data.reply.indexOf('发给谁');
   assert.ok(iW < iD && iD < iQ, '数据先于提问');
   assert.ok(data.reply.includes('本周214个加购未付'), '数据开场句');
   assert.ok(data.chips.length <= 3 && data.chips.includes('我自己说'), 'chips ≤3 且含「我自己说」');
