@@ -3,7 +3,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
-import { BRAND_POINTS, INTENT_POINTS } from '@/lib/constants';
 import { filledCount, needsValue, needsSource } from '@/lib/needs';
 import { fmtTime } from '@/lib/format';
 import { api } from '@/lib/api';
@@ -31,7 +30,7 @@ export default function ChatView() {
     setPlanShown, setPlanPushed, createCardDraft, switchTab, setHistoryOpen, loadState,
     setDraftGenerating, toast_,
     confirmState, confirmFailed, confirmBusy, confirmPlan,
-    onboardingStep, onboardingSkipped, skipOnboarding, setOnboardingStep, guideStyle,
+    onboardingStep, onboardingSkipped, setOnboardingStep, guideStyle,
     campaigns, pendingBatches,
     lastPlan, notifications,
     todos, resumeTodo,
@@ -39,7 +38,6 @@ export default function ChatView() {
 
   const areaRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const [clickedChips, setClickedChips] = useState<Set<number>>(new Set());
   // confirm 409 三出口：「改用店内现成码」的输入行展开 + 码值
   const [reuseOpen, setReuseOpen] = useState(false);
   const [reuseCode, setReuseCode] = useState('');
@@ -56,11 +54,8 @@ export default function ChatView() {
     && typeof lastAssistant?.content === 'string' && lastAssistant.content.includes('建议')
     ? '建议' : undefined;
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
-  // 初始态（引导期）：右侧显示需求收集 checklist；引导走完/跳过后切回机会列表
-  const showOnboarding = !onboardingSkipped && onboardingStep < 4;
-  // 引导风格开关：demo=硬编码品牌词+浮层引导+checklist；safe=纯意图词+顶栏串联引导
+  // 引导风格开关：demo=硬编码品牌词（快捷词行已移除）；safe=纯意图词+顶栏串联引导
   const isDemoGuide = guideStyle === 'demo';
-  const guideChips = isDemoGuide ? BRAND_POINTS : INTENT_POINTS;
   // 本会话是否已发过邮件（确认卡据此隐藏「可以，去发」）
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
@@ -357,71 +352,6 @@ export default function ChatView() {
           </div>
 
           <div data-guide-target="guide-compose" style={{display:'flex',flexDirection:'column',flexShrink:0}}>
-          {/* 初始引导快捷描述词（与右侧 checklist 共用 BRAND_POINTS） */}
-          {showOnboarding && (
-            <div style={{display:'flex',gap:'8px',padding:'8px 16px',flexWrap:'wrap',flexShrink:0}}>
-              {guideChips.map((chip, i) => {
-                const clicked = clickedChips.has(i);
-                return (
-                  <button
-                    key={i}
-                    type="button"
-                    disabled={streaming}
-                    onClick={() => {
-                      const next = new Set(clickedChips);
-                      next.add(i);
-                      setClickedChips(next);
-                      // demo：点击即发（驱动 LLM 对话 + 攒齐自动跳步）
-                      // safe（P0-4）：全新会话首条直发，已有上下文只填入输入框待商家确认，
-                      //               防止快捷词把已聊的品牌信息带走
-                      if (isDemoGuide) {
-                        sendMsg(chip.msg);
-                      } else {
-                        const fresh = messages.filter((m) => m.role === 'user').length === 0 && n === 0;
-                        if (fresh) sendMsg(chip.msg);
-                        else { setChatInput(chip.msg); inputRef.current?.focus(); }
-                      }
-                    }}
-                    style={{
-                      display:'inline-flex',alignItems:'center',gap:'6px',
-                      padding:'7px 13px',borderRadius:'9px',
-                      border: clicked ? '0.5px solid transparent' : '0.5px solid #DDE2E8',
-                      background: clicked ? 'var(--brand-soft)' : '#fff',
-                      color: clicked ? 'var(--brand)' : 'var(--text)',
-                      fontSize:'12.5px',fontWeight:500,
-                      cursor: streaming ? 'not-allowed' : 'pointer',
-                      opacity: streaming && !clicked ? 0.45 : 1,
-                      whiteSpace:'nowrap',transition:'all .15s',
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!clicked && !streaming) {
-                        e.currentTarget.style.borderColor = '#FF7F4D';
-                        e.currentTarget.style.background = 'var(--brand-soft)';
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      if (!clicked && !streaming) {
-                        e.currentTarget.style.borderColor = '#DDE2E8';
-                        e.currentTarget.style.background = '#fff';
-                      }
-                    }}
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      {clicked
-                        ? <path d="M20 6L9 17l-5-5" />
-                        : i === 0 ? <><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="9" y1="9" x2="15" y2="9" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="12" y2="17" /></>
-                        : i === 1 ? <><rect x="2" y="7" width="20" height="14" rx="2" /><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" /></>
-                        : i === 2 ? <><circle cx="12" cy="12" r="10" /><path d="M16 8h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2v-4a2 2 0 0 0-2-2Z" /></>
-                        : i === 3 ? <><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></>
-                        : <><circle cx="9" cy="21" r="1" /><circle cx="20" cy="21" r="1" /><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6" /></>
-                      }
-                    </svg>
-                    {chip.label}
-                  </button>
-                );
-              })}
-            </div>
-          )}
 
           <div className="compose">
             <input
