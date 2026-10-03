@@ -436,7 +436,6 @@ export default function ChatView() {
               <Arrow /> 发送
             </button>
           </div>
-          <div className="compose-hint">开放式对话 · 信息后台静默采集 · 齐了才弹确认</div>
           </div>
         </div>
         </section>
