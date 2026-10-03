@@ -430,11 +430,8 @@ input,textarea{font-family:inherit}
 .status-badge.recovered{background:var(--ok-bg);color:var(--ok2)}
 
 /* ============================ 数据 ============================ */
-.narrative{background:linear-gradient(135deg,#FFF7F2,#FFEFE4);border:.5px solid rgba(255,127,77,.25);border-radius:16px;
+.narrative{background:#FFF3EB;border-radius:16px;
   padding:18px 22px;display:flex;align-items:center;gap:16px;margin-bottom:18px}
-.narrative .nv-ic{width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,var(--brand),var(--brand2));
-  display:flex;align-items:center;justify-content:center;flex-shrink:0;box-shadow:var(--shadow-btn)}
-.narrative .nv-ic svg{width:20px;height:20px;stroke:#fff;fill:none;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
 .narrative .nv-t{font-size:14px;font-weight:600;color:var(--text)}
 .narrative .nv-t .big{font-size:26px;font-weight:800;color:var(--brand);margin:0 2px;font-family:var(--font-disp)}
 .narrative .nv-s{font-size:11.5px;color:var(--muted);margin-top:2px}
@@ -451,17 +448,16 @@ input,textarea{font-family:inherit}
 .kpi .k-d.down{color:var(--danger)}
 .kpi .spark{position:absolute;right:9px;bottom:8px;opacity:.85}
 .charts-row{display:grid;grid-template-columns:1fr 1.15fr;gap:13px;margin-bottom:13px}
-.funnel{display:flex;flex-direction:column;gap:9px}
-.funnel .f-row{display:flex;align-items:center;gap:11px}
-.funnel .f-label{width:52px;font-size:11.5px;color:var(--muted);font-weight:500;flex-shrink:0}
-.funnel .f-track{flex:1;height:24px;background:var(--bg-input);border:.5px solid var(--line);border-radius:7px;position:relative;overflow:hidden}
-.funnel .f-fill{height:100%;background:linear-gradient(180deg,#FF9668 0%,var(--brand) 60%,#F96F3A 100%);
-  border-radius:6px 2px 2px 6px;animation:fillInW .7s var(--ease);display:flex;align-items:center;justify-content:flex-end;
-  padding-right:8px;box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 1px 3px rgba(255,127,77,.18);min-width:14px}
-@keyframes fillInW{from{width:0}}
-.funnel .f-fill span{font-size:9.5px;font-weight:700;color:#fff}
-.funnel .f-val{width:42px;text-align:right;font-size:12px;font-weight:700;color:var(--text);flex-shrink:0;font-family:var(--font-disp)}
-.funnel .f-pct{width:36px;text-align:right;font-size:10.5px;color:var(--soft);flex-shrink:0}
+/* 转化漏斗：真梯形（对齐 Figma 406:397 FunnelChart）—— 4 层居中梯形 + 右侧标签列 + 层间虚线分割 */
+.funnel{display:flex;flex-direction:column}
+.funnel .f-tier{display:flex;align-items:stretch;gap:10px}
+.funnel .f-stage{flex:1;height:44px;position:relative}
+.funnel .f-trap{position:absolute;left:50%;top:0;height:100%;transform:translateX(-50%);animation:tierIn .5s var(--ease)}
+.funnel .f-meta{width:76px;flex-shrink:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:flex-end;gap:1px;padding-bottom:2px}
+.funnel .f-name{font-size:10px;font-weight:400;color:rgba(30,41,59,.56);white-space:nowrap}
+.funnel .f-pctv{font-size:14px;line-height:1.25;font-weight:500;color:var(--text);font-family:var(--font-disp)}
+.funnel .f-divider{height:1px;margin:3px 0;background:repeating-linear-gradient(90deg,#DDE2E8 0 2.5px,transparent 2.5px 4.4px)}
+@keyframes tierIn{from{opacity:0;transform:translateX(-50%) translateY(-5px)}}
 .trend-chart{height:170px;position:relative}
 .trend-chart svg{width:100%;height:100%;display:block}
 .legend{display:flex;gap:15px;font-size:10.5px;color:var(--muted);margin-top:7px}

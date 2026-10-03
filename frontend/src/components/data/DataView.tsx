@@ -30,11 +30,11 @@ export default function DataView() {
       <KpiGrid k={k} />
       <div className="charts-row">
         <div className="glass-card" style={{ padding: '17px 19px' }}>
-          <div className="card-title"><span className="tline" />转化漏斗</div>
+          <div className="card-title">转化漏斗</div>
           <Funnel k={k} />
         </div>
         <div className="glass-card" style={{ padding: '17px 19px' }}>
-          <div className="card-title"><span className="tline" />7 日趋势 · 回流 GMV</div>
+          <div className="card-title">近 7 日 GMV 趋势</div>
           <TrendChart trend={trend} />
           <div className="legend">
             <span className="lg"><span className="sw" style={{ background: 'linear-gradient(90deg,#FF7F4D,#FFB380)' }} />回流 GMV</span>
