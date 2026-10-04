@@ -214,10 +214,11 @@ function buildStateExtras(userId, opts) {
   if (userPrefs && Object.keys(userPrefs).length) {
     prefs = { ...(prefs || {}), ...userPrefs };
   }
-  // A3④：last_plan = 最近一个确认过的 act（有 plan_card/execution_snapshot 或名下 campaign）
+  // A3④：last_plan = 最近一个确认过的 act（有 plan_card/execution_snapshot 或名下 campaign）。
+  // S2 无码预览卡（preview 标记，A2 刷新续卡用）不算确认过——跳过，未确认会话不得污染「上次方案」
   let last_plan = null;
   for (const a of acts) {
-    const pc = a.plan_card;
+    const pc = (a.plan_card && a.plan_card.preview) ? null : a.plan_card;
     const snap = a.execution_snapshot;
     const camps = store.getCampaignsByAct(a.id);
     if (!pc && !snap && !camps.length) continue;
@@ -1535,6 +1536,16 @@ function withAuthoritativePreview(act, planCard) {
   return wrapped;
 }
 
+// —— A2/D1（复测 10-03 P0-N2 配套）：S2 无码预览卡落库（打 preview 标记）——
+// 满 4/4 当轮的确认卡此前只随 done 帧下发、不落库，刷新后 /api/state 无卡可召回，
+// 商家走完采集却找不到确认入口。落库后前端刷新即可按 act.plan_card 重现确认卡（A2「刷新不丢方案卡」）。
+// Z4 last_plan 只认确认过的卡（preview 标记被跳过，未确认会话不污染「上次方案」摘要）。
+function persistPreviewCard(act, result) {
+  if (!result || !result.planCard || act.stage !== 'S2') return;
+  act.plan_card = { ...result.planCard, preview: true };
+  store.upsertAct(act);
+}
+
 async function confirmActToStage3(act, body = {}, userId = null) {
   needsMod.migrateAct(act);
   const locale = config.shopDefaultLocale || 'en';
@@ -2018,6 +2029,7 @@ const server = http.createServer(async (req, res) => {
         persistAgentProfile(r, req.userId);
         consumeAgentMeta(r);
         if (r.planCard) r.planCard = withAuthoritativePreview(act, r.planCard); // S2 预览卡升级为权威形状（无码）
+        persistPreviewCard(act, r);   // A2：S2 预览卡落库，刷新后可召回确认卡
         if (r.guardrailHits && r.guardrailHits.length) {
           r.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
           logEvent('guardrail', { hits: r.guardrailHits });
@@ -2079,6 +2091,7 @@ const server = http.createServer(async (req, res) => {
       persistAgentProfile(result, req.userId);
       consumeAgentMeta(result);
       if (result.planCard) result.planCard = withAuthoritativePreview(act, result.planCard); // S2 预览卡升级为权威形状（无码）
+      persistPreviewCard(act, result);   // A2：S2 预览卡落库，刷新后可召回确认卡
       if (result.guardrailHits && result.guardrailHits.length) {
         result.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
         logEvent('guardrail', { hits: result.guardrailHits });

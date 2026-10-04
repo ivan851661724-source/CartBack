@@ -7,7 +7,7 @@
  *
  * React 文本默认转义，来自后端/LLM/CSV 的字符串直接 {value}，无需 esc()。
  */
-import type { Act, BatchPreview, Chips, Checklist, Engine, PlanCard, Stage, Needs } from './types';
+import type { Act, BatchPreview, Chips, Checklist, Engine, PlanCard, Stage, Needs, StoreBanner } from './types';
 
 /** 本地令牌（bootstrap 下发；与 cb_session cookie 并存，cookie 优先鉴权） */
 let authToken: string | null = null;
@@ -47,6 +47,7 @@ export interface StreamDone {
   planCard?: PlanCard | null;
   engine?: Engine;   // 引擎健康态（旧 done 帧无此字段 → undefined，由调用方保持现值）
   chips?: Chips;     // 回复快捷 chips，针对最新一条 agent 回复；[] 或缺省 = 无 chips
+  askedSlot?: string | null;  // B4 本轮实际追问的槽位（与 chips 同源）；goal 槽 chips 需要输入框复合形态（C4）
   batches?: BatchPreview[];  // Wave3：agent 提出的建批方案（待确认，尚未创建）；缺省 = 本轮无待确认批次
 }
 
@@ -119,12 +120,26 @@ export async function streamMessage(
   }
 }
 
-/** 构造一个新 act（可带 preset 预选受众） */
-export async function createAct(preset?: { audience?: string }): Promise<Act> {
-  return api<Act & { act?: Act }>('/api/act', {
+/** POST /api/act 的完整响应（P0-N4 复测 10-03）：chips/welcome/store_banner 与 act 同级下发，
+ *  旧实现 .then(r => r.act ?? r) 把同级字段全部丢弃 → 开场白永远不带 chips（F1 出口丢失） */
+export interface CreateActResult {
+  act: Act;
+  chips: Chips;
+  welcome: boolean;
+  store_banner: StoreBanner | null;
+}
+
+/** 构造一个新 act（可带 preset 预选受众）。响应含同级 chips（开场快捷选项）/ welcome（一次性欢迎语标记） */
+export async function createAct(preset?: { audience?: string }): Promise<CreateActResult> {
+  return api<Record<string, unknown>>('/api/act', {
     method: 'POST',
     body: JSON.stringify(preset ? { preset } : {}),
-  }).then((r: any) => r.act ?? r);
+  }).then((r): CreateActResult => ({
+    act: ((r && (r as { act?: Act }).act) ?? r) as Act,
+    chips: Array.isArray(r?.chips) ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string') : [],
+    welcome: Boolean(r?.welcome),
+    store_banner: ((r?.store_banner ?? null) as StoreBanner | null) || null,
+  }));
 }
 
 /** POST /api/act/:id/confirm 的三种结局：ok=确认成功 / conflict=建码失败(409) / unsupported=旧后端无此接口(404) */

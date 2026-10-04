@@ -5,6 +5,7 @@ import { useApp } from '@/state/AppProvider';
 import { NavChat, Arrow } from '@/components/ui/icons';
 import { filledCount, needsValue, needsSource } from '@/lib/needs';
 import { fmtTime } from '@/lib/format';
+import { CHAT_PLACEHOLDER } from '@/lib/constants';
 import { api } from '@/lib/api';
 import type { Draft, LastPlan, NotificationItem, TodoItem } from '@/lib/types';
 import MessageBubble from './MessageBubble';
@@ -26,9 +27,8 @@ const E1_CHIPS = ['换成替代方案', '就要这个折扣', '换主题行再�
 export default function ChatView() {
   const {
     act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
-    chatInput, chatPlaceholder, chips, sendMsg, setChatInput, setChatPlaceholder,
-    setPlanShown, setPlanPushed, createCardDraft, switchTab, setHistoryOpen, loadState,
-    setDraftGenerating, toast_,
+    chatInput, chatPlaceholder, chips, askedSlot, engine, sendMsg, setChatInput, setChatPlaceholder,
+    setPlanShown, setPlanPushed, switchTab, setHistoryOpen,
     confirmState, confirmFailed, confirmBusy, confirmPlan,
     onboardingStep, onboardingSkipped, setOnboardingStep, guideStyle,
     campaigns, pendingBatches,
@@ -89,23 +89,19 @@ export default function ChatView() {
 
   // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
   // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
-  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（引导浮层已移除，进度由顶栏 HintPill 承载）
+  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（引导浮层已移除，进度由顶栏 HintPill 承载）。
+  // 不再预建草稿（复测 10-03）：草稿唯一创建入口 = 「可以，去发」→ /confirm 服务端权威建稿——
+  // 预建稿会在 confirm 后被当作僵尸稿删除（变体生成白跑一遍），且让刷新后的确认卡召回
+  // 被 P1-9「有草稿不反推」规则压制（A2 刷新续卡失效）。旧后端 404 回退路径保留预建（AppProvider）。
   const advanced0Ref = useRef(false);
   useEffect(() => { if (!act?.planCard) advanced0Ref.current = false; }, [act?.planCard]);
   useEffect(() => {
     if (!isDemoGuide || onboardingStep !== 0 || advanced0Ref.current) return;
     if (planShown === 'confirm' && act?.planCard && !streaming) {
       advanced0Ref.current = true;
-      const card = act.planCard;
-      (async () => {
-        setOnboardingStep(1);
-        setDraftGenerating(true);
-        try { await createCardDraft(act.id, card); await loadState(); }
-        catch (e: any) { toast_('草稿生成失败：' + (e?.message || e)); }
-        setDraftGenerating(false);
-      })();
+      setOnboardingStep(1);
     }
-  }, [isDemoGuide, onboardingStep, planShown, streaming, act, setOnboardingStep, createCardDraft, loadState, setDraftGenerating, toast_]);
+  }, [isDemoGuide, onboardingStep, planShown, streaming, act, setOnboardingStep]);
 
   const focusInput = () => {
     const i = inputRef.current;
@@ -114,6 +110,19 @@ export default function ChatView() {
   const onReconsider = () => { setPlanShown(null); setPlanPushed(false); focusInput(); setChatPlaceholder(EDIT_HINT); };
 
   const onSend = () => sendMsg(chatInput);
+
+  // C4 goal 槽位级例外（P2-N4 复测 10-03）：goal 的 chips 是「要一个值」的类别入口而非答案本身——
+  // 点击把类别词预填进输入框，商家补上具体值（多少单/多少金额）再发送；「我自己定」只聚焦输入框。
+  // 其余槽位的 chips 仍是完整答案，点击即按原文发送。
+  const onChipClick = (c: string) => {
+    if (askedSlot === 'goal') {
+      setChatInput(c === '我自己定' ? '' : `${c} `);
+      setChatPlaceholder(c === '我自己定' ? '说说你要的结果，比如「本月挽回 100 单」' : CHAT_PLACEHOLDER);
+      if (inputRef.current) inputRef.current.focus();
+      return;
+    }
+    sendMsg(c);
+  };
 
   // 确认卡（新契约）：四槽优先读 act.needs（三态对象走 needsValue），planCard 字段兜底；
   // source==='inferred' 的槽在该行显示「（我推断的，可改）」小标。
@@ -153,7 +162,11 @@ export default function ChatView() {
                             <span className="ch-kicker">当前会话</span>
                             <span className="ch-t">{!onboardingSkipped && onboardingStep < 4 ? '运营助手' : '挽回策略助手'}</span>
                           </div>
-                          <span className="ch-s"><span className="dot"></span><span>在线</span></span>
+                          <span className="ch-s" style={engine === 'degraded' ? { color: 'var(--warn2)' } : undefined}>
+                            <span className="dot"></span>
+                            {/* G2 诚实三件套①（P2-N3）：头部状态必须与实际引擎档位一致——降级期不得谎报在线 */}
+                            <span>{engine === 'degraded' ? '降级模式 · AI 未连接' : '在线'}</span>
+                          </span>
             <button
               className="btn ghost sm ch-hist"
               onClick={() => setHistoryOpen(true)}
@@ -204,16 +217,18 @@ export default function ChatView() {
             )}
 
             {/* 常驻回复 chips：最新一条 agent 回复的后续快捷操作。
-                来源：SSE done 帧 chips（AppProvider 存 state，发送新消息即清空）；
-                旧 done 帧无此字段 / 空数组 → 不渲染。点击 chip = 以该文案作为用户消息发送（走 sendMsg）。 */}
+                来源：SSE done 帧 chips + 建会话响应的开场 chips（AppProvider 存 state，发送新消息即清空）；
+                空 → 不渲染。数量以后端下发为准、不再前端截断（P2-N1：goal 槽 4 项是 C4 槽位级例外，
+                slice(0,3) 会把「我自己定」自由输入出口永久截掉）。
+                goal 槽 chips 走「chips+输入框」复合形态（P2-N4）：点击预填输入框补值，其余点击即发送。 */}
             {!streaming && chips.length > 0 && (
               <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
-                {chips.slice(0, 3).map((c, i) => (
+                {chips.map((c, i) => (
                   <button
                     key={`${i}-${c}`}
                     type="button"
                     disabled={streaming}
-                    onClick={() => sendMsg(c)}
+                    onClick={() => onChipClick(c)}
                     style={{
                       display: 'inline-flex', alignItems: 'center', gap: '6px',
                       padding: '7px 13px', borderRadius: '9px',
@@ -499,7 +514,7 @@ function ReceiptBubble({ nt, chipsEnabled }: { nt: NotificationItem; chipsEnable
         </div>
         {chips.length > 0 && (
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            {chips.slice(0, 3).map((c, i) => (
+            {chips.map((c, i) => (
               <button
                 key={`${i}-${c}`}
                 type="button"

@@ -119,8 +119,9 @@ function parseTodos(raw: unknown): TodoItem[] {
   );
 }
 
-// 确认卡预建草稿暂存（单用户本地应用，模块级即可）：旧后端回退路径 / demo 引导跳步可能预建，
-// confirm 新接口成功后若存在暂存草稿则删除（confirm 由后端建稿），避免同卡出现僵尸草稿
+// 确认卡预建草稿暂存（单用户本地应用，模块级即可）：仅旧后端回退路径（/confirm 404）会预建，
+// demo 引导跳步不再预建（复测 10-03：预建稿让刷新后的确认卡召回被 P1-9「有草稿不反推」压制，
+// 且 confirm 建权威稿后此稿被当僵尸稿删除）。confirm 新接口成功后若存在暂存草稿则删除，兜底防重
 let pendingCardDraft: { actId: string; draft: Draft } | null = null;
 
 /** act 局部合并：后端 act 增量（confirm/send 响应）并入本地 act；messages 空值不覆盖本地 */
@@ -132,6 +133,16 @@ function mergeAct(base: Act, inc?: Partial<Act>): Act {
     messages: inc.messages && inc.messages.length ? inc.messages : base.messages,
   };
 }
+
+/** 后端 act 序列化的方案卡键是 plan_card（snake）——统一映射为前端 planCard。
+ *  S2 无码预览卡（preview 标记）与 S3 权威卡都随 /api/state 下发，刷新后可召回（A2/P0-N2） */
+function withPlanCard(a: any): Act {
+  if (!a || typeof a !== 'object') return a;
+  return { ...a, planCard: a.planCard ?? a.plan_card ?? null };
+}
+
+/** B4 合法槽位（done 帧 askedSlot 白名单） */
+const ASKED_SLOTS = ['audience', 'reason', 'offer', 'goal'];
 
 interface ToastState { msg: string; shown: boolean; }
 
@@ -154,6 +165,7 @@ interface AppState {
   me: Me | null;
   engine: Engine;   // 引擎健康态：done 帧与 GET /api/state 都可能更新；初始缺省 online
   chips: Chips;     // 最新一条 agent 回复的快捷 chips（发送新消息即清空；旧 done 帧无此字段则保持空）
+  askedSlot: string | null;  // B4 本轮追问的槽位（done 帧下发，与 chips 同源同生命周期）；goal 槽 chips 走输入框复合形态（C4）
   // Wave2 confirm 流：confirm 200 的方案卡/核对单（留在对话页渲染 PlanCard 卡）+ 409 三出口 + 忙态
   confirmState: ConfirmState | null;
   confirmFailed: ConfirmFailed | null;
@@ -216,7 +228,7 @@ interface AppContextValue extends AppState {
   jumpToConfig: (intent: string, aud?: Audience) => Promise<void>;
   confirmPlan: (body?: { reuse_code?: string; nohook?: boolean }) => Promise<void>;  // 确认卡「可以，去发」/ 409 三出口（带 body 重调）
   sendConfirmedPlan: () => Promise<boolean>;   // 方案卡「确认发送」：POST /api/draft/:id/send，409 时刷新核对单
-  createCardDraft: (actId: string, card: PlanCard) => Promise<Draft>;   // 确认卡预建草稿（旧后端回退路径 / 引导跳步复用）
+  createCardDraft: (actId: string, card: PlanCard) => Promise<Draft>;   // 确认卡预建草稿（仅旧后端回退路径用）
   sendEditedDraft: (subject: string, body: string) => Promise<boolean>;
   sendDraft: (d: Draft) => Promise<boolean>;        // 卡片操作行「发送」：按存储原稿直接发送（Figma 406:2955）
   deleteDraft: (d: Draft) => Promise<boolean>;      // 卡片操作行「删除」
@@ -256,7 +268,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     token: null, status: null, act: null, acts: [], kpis: null, trend: null, metrics: {},
     drafts: [], audience: [], opportunities: null,
     planPushed: false, planShown: null, lastSent: null, me: null,
-    engine: 'online', chips: [],
+    engine: 'online', chips: [], askedSlot: null,
     confirmState: null, confirmFailed: null, confirmBusy: false,
     campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],
     welcome: null, storeBanner: null, prefs: {}, lastPlan: null,
@@ -272,6 +284,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // 多会话 #2 性能：act 索引 Map（O(1) 查找，避免 O(n) scans on every loadState）
   const actIndexRef = useRef<Map<string, Act>>(new Map());
+  // P0-N1（复测 10-03）：loadState 刚锚定的会话（A1「打开面板取最近未完结 act」的权威结果）。
+  // boot 旧闭包里 state.act 恒为 null，ensureAct 读闭包每次刷新都去 createAct → 后端建新会话时把
+  // 未完结 act 全部置 closed，进度与上下文全丢。有锚点绝不新建；新建只由「新会话」按钮触发（A1-5）。
+  const anchoredActRef = useRef<Act | null>(null);
   // P1-9 方案卡召回只做一次/会话：用户点「再聊聊」关掉确认卡后，后续 loadState 不得强行弹回
   const planRestoredRef = useRef<Set<string>>(new Set());
   const buildActIndex = useCallback((acts: Act[]) => {
@@ -318,64 +334,98 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // —— 数据加载 ——
+  // P0-N2（复测 10-03）：整个锚定/合并逻辑放进函数式 setState 读「当下最新」的 state——
+  // 旧实现读渲染闭包里的 state.act，sendMsg 的 done 帧刚写入的 planCard 会被紧随其后的
+  // loadState 用无卡的服务端 act 覆盖（满 4/4 当轮确认卡不弹的第三处清空点）。
   const loadState = useCallback(async (opts?: { preferActId?: string }) => {
     const s = await api<any>('/api/state');
-    const acts: Act[] = (s.acts || []) as Act[];
+    const acts: Act[] = ((s.acts || []) as any[]).map(withPlanCard);
     const actIndex = buildActIndex(acts);
-    // 多会话 #2：O(1) Map 查找当前选中；不存在才取第一个（?.id 可能 undefined，兜底空串查不到走 fallback）。
-    // preferActId（resumeTodo）：刚恢复的新会话优先锚定——闭包里的 state.act 还是旧会话，不传会被旧会话抢回。
-    const preferId = opts?.preferActId ?? state.act?.id ?? '';
-    // /api/state 不返回 planCard（后端不持久化）——同一会话沿用内存值，否则确认发送/预览后 loadState 把卡片冲掉
-    const nextAct = actIndex.get(preferId) || acts[0] || state.act;
-    patch({
-      status: s.status, kpis: s.kpis, trend: s.trend,
-      metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
-      drafts: s.drafts, audience: s.audience,
-      acts,
-      // Wave3 批次域：campaigns/blackout/global_paused（缺省安全值；pendingBatches 是 done 帧专属，不在此触碰）
-      ...parseBatchDomain(s),
-      // Wave4 Z4/C5/Z6 + Wave5 Z5：welcome/store_banner/prefs/last_plan/todos（均可缺省，安全降级）
-      welcome: parseWelcome(s.welcome),
-      storeBanner: parseStoreBanner(s.store_banner),
-      prefs: parsePrefs(s.prefs),
-      lastPlan: parseLastPlan(s.last_plan),
-      todos: parseTodos(s.todos),
-      // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
-      ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
-      act: nextAct && state.act && nextAct.id === state.act.id && state.act.planCard && !nextAct.planCard
-        ? { ...nextAct, planCard: state.act.planCard }
-        : nextAct,
-    });
     // Z7 顺带刷新通知（内部已吞错，不阻塞 loadState 主流程）
     refreshNotifications();
-    // 会话重建后若消息为空，复位 planPushed
+    // 同步锚点（P0-N1）：boot 在 loadState 之后立刻 ensureAct，而 setState updater 是异步冲刷的——
+    // 锚点必须同步写入 ref，ensureAct 才不会误判「无会话」而新建。job 只有一个：名下存在未完结 act
+    // 时禁止新建（A1）；updater 里的精细锚点（含 planCard 合并）冲刷后接管。
+    anchoredActRef.current = (opts?.preferActId ? actIndex.get(opts.preferActId) || null : null)
+      || acts.find(a => a.stage !== 'closed') || null;
     setState(prev => {
-      let next = prev;
-      if (prev.act && (!prev.act.messages || !prev.act.messages.length) && !s.acts?.[0]) {
-        next = { ...next, planPushed: false };
-      }
-      // 刷新后方案卡召回（走查 P1-9）：后端 act.planCard 还在、本会话又没有草稿 → 重现确认卡（每会话仅一次）。
-      // 已有草稿的会话不反推（「可以，去发」复用暂存草稿防僵尸草稿；刷新后暂存丢失，再去发会走邮件页）。
-      if (!next.planShown && next.act?.planCard && !((s.drafts || []) as Draft[]).some(d => d.act_id === next.act!.id)
-          && !planRestoredRef.current.has(next.act.id)) {
-        planRestoredRef.current.add(next.act.id);
-        next = { ...next, planShown: 'confirm', planPushed: true };
-      }
+      // 多会话 #2：当前选中优先（O(1) Map 查找）；缺位时按 A1 锚定「最近未完结 act」——
+      // 绝不锚 closed act（closeOpenActs 会刷新 closed act 的 updated_at 使其排到首位），
+      // 也绝不因锚定失败而新建（新建只由「新会话」按钮触发，后端建新会话会关闭其它未收口会话）
+      const preferId = opts?.preferActId ?? prev.act?.id ?? '';
+      const nextActRaw = actIndex.get(preferId) || acts.find(a => a.stage !== 'closed') || null;
+      // 同会话沿用内存 planCard：S2 预览卡仅随 done 帧下发、/api/state 可能滞后一拍
+      const nextAct = nextActRaw && prev.act && nextActRaw.id === prev.act.id && prev.act.planCard && !nextActRaw.planCard
+        ? { ...nextActRaw, planCard: prev.act.planCard }
+        : nextActRaw;
+      anchoredActRef.current = nextAct;   // ensureAct 的权威依据：有锚点绝不新建（A1/P0-N1）
+      // 锚定结果与会话切换同口径：卡片/chips/confirm 状态属于上一会话，切会话即失效
+      const actChanged = (nextAct?.id || null) !== (prev.act?.id || null);
+      let next: AppState = {
+        ...prev,
+        status: s.status, kpis: s.kpis, trend: s.trend,
+        metrics: s.metrics || {}, demoAnchorRoi: s.demoAnchorRoi,
+        drafts: s.drafts, audience: s.audience,
+        acts,
+        // Wave3 批次域：campaigns/blackout/global_paused（缺省安全值；pendingBatches 是 done 帧专属，不在此触碰）
+        ...parseBatchDomain(s),
+        // Wave4 Z4/C5/Z6 + Wave5 Z5：welcome/store_banner/prefs/last_plan/todos（均可缺省，安全降级）
+        welcome: parseWelcome(s.welcome),
+        storeBanner: parseStoreBanner(s.store_banner),
+        prefs: parsePrefs(s.prefs),
+        lastPlan: parseLastPlan(s.last_plan),
+        todos: parseTodos(s.todos),
+        // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
+        ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
+        act: nextAct,
+        ...(actChanged ? {
+          planPushed: false, planShown: null,
+          confirmState: null, confirmFailed: null,
+          chips: [], askedSlot: null, pendingBatches: [],
+        } : {}),
+      };
+      // 刷新后方案卡召回移到独立的纯 effect（见下方 planCardRestore effect）——
+      // 不能放进 setState updater：updater 必须纯净，StrictMode 开发态双调用会让
+      // planRestoredRef 的副作用泄漏进第二次计算（第一次已 add → 第二次跳过 → 恢复永远不生效）
       return next;
     });
-  }, [patch, state.act, buildActIndex, refreshNotifications]);
+  }, [buildActIndex, refreshNotifications]);
+
+  // 刷新后方案卡召回（走查 P1-9 + 复测 10-03 A2）：act 带 planCard（S2 预览卡已落库 / S3 权威卡）、
+  // 本会话没有草稿、且本页未召回过 → 重现确认卡（每会话仅一次）。effect 写法对 StrictMode 幂等：
+  // 判断全部来自已提交 state，副作用只有 planRestoredRef.add + 一次 patch。
+  // 已有草稿的会话不反推（「可以，去发」的草稿说明商家已在邮件页流程中，卡片不再强行弹回）。
+  useEffect(() => {
+    const a = state.act;
+    if (!a || !a.planCard || state.planShown) return;
+    if ((state.drafts || []).some(d => d.act_id === a.id)) return;
+    if (planRestoredRef.current.has(a.id)) return;
+    planRestoredRef.current.add(a.id);
+    patch({ planShown: 'confirm', planPushed: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.act?.id, state.act?.planCard, state.planShown, state.drafts, patch]);
 
   const ensureAct = useCallback(async (): Promise<Act | null> => {
-    if (state.act) return state.act;
+    // P0-N1：有锚点（loadState 刚恢复的未完结会话）绝不新建——旧实现读首帧闭包 state.act（恒 null），
+    // 每次刷新都 createAct，后端建新会话时 closeOpenActs 把未完结 act 全部置 closed，进度全丢
+    if (anchoredActRef.current) return anchoredActRef.current;
     try {
-      const act = await createAct();
-      patch({ act, acts: [act, ...state.acts] });
-      return act;
+      const r = await createAct();
+      anchoredActRef.current = r.act;
+      actIndexRef.current.set(r.act.id, r.act);
+      setState(prev => ({
+        ...prev,
+        act: r.act,
+        acts: [r.act, ...prev.acts.filter(a => a.id !== r.act.id)],
+        chips: r.chips,   // P0-N4：开场白 chips 随建会话响应下发，不再丢弃
+        ...(r.store_banner ? { storeBanner: parseStoreBanner(r.store_banner) } : {}),
+      }));
+      return r.act;
     } catch {
       // 未登录/网络失败等导致建不了会话：返回 null，由调用方决定引导方式（不再静默丢消息）
       return null;
     }
-  }, [state.act, state.acts, patch]);
+  }, []);
 
   const loadOpportunities = useCallback(async () => {
     try {
@@ -435,11 +485,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
     const next = actIndexRef.current.get(id);
     if (!next || next.id === state.act?.id) { patch({ historyOpen: false }); return; }
+    anchoredActRef.current = next;
     patch({
       act: next, historyOpen: false, activeTab: 'chat',
       planPushed: false, planShown: null,
       confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
       chips: [],   // chips 属于上一会话的最新回复，切会话即失效
+      askedSlot: null,   // 追问槽位同属上一会话
       pendingBatches: [],   // done 帧待确认批次同属上一会话的最新回复，一并失效
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     });
@@ -448,13 +500,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 多会话 #2：新建会话（新建 act 置顶并直接进入对话） ——
   const newConversation = useCallback(async () => {
     try {
-      const act = await createAct();
+      const r = await createAct();
+      actIndexRef.current.set(r.act.id, r.act);
+      anchoredActRef.current = r.act;
       patch({
-        act, acts: [act, ...state.acts],
+        act: r.act, acts: [r.act, ...state.acts.filter(a => a.id !== r.act.id)],
         historyOpen: false, activeTab: 'chat',
         planPushed: false, planShown: null,
         confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
-        chips: [],   // 新会话无历史回复，chips 清空
+        chips: r.chips,   // P0-N4：开场白 chips 随建会话响应下发（服务端 opening 同源），不再置空丢失
+        askedSlot: null,   // 新会话尚无追问
         pendingBatches: [],   // 新会话无待确认批次
         chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
       });
@@ -485,11 +540,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       // 预填的新会话置为当前；不在本地列表时并入头部，并登记 actIndex（loadState 的 O(1) 查找要用）
       const acts = [nextAct, ...state.acts.filter((a) => a.id !== nextAct.id)];
       actIndexRef.current.set(nextAct.id, nextAct);
+      anchoredActRef.current = nextAct;
       patch({
         act: nextAct, acts, activeTab: 'chat',
         planPushed: false, planShown: null,
         confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
         chips: [],   // chips 属于上一会话的最新回复，切会话即失效
+        askedSlot: null,   // 追问槽位同属上一会话
         pendingBatches: [],   // 待确认批次同属上一会话的最新回复，一并失效
         chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
       });
@@ -514,11 +571,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
     const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
-    // 发送新消息即清空上一回复的 chips 与待确认批次（新值由本轮 done 帧重新下发；
+    // 发送新消息即清空上一回复的 chips、追问槽位与待确认批次（新值由本轮 done 帧重新下发；
     // 用户点「确认建批」chip 后后端真正建批，本轮 done 帧无 batches → pendingBatches 随之清空）
-    patch({ act: actWithUser, streaming: true, streamingText: '', chips: [], pendingBatches: [] });
+    patch({ act: actWithUser, streaming: true, streamingText: '', chips: [], askedSlot: null, pendingBatches: [] });
 
-    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; engine?: unknown; batches?: unknown }) => {
+    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; askedSlot?: unknown; engine?: unknown; batches?: unknown }) => {
       setState(prev => {
         if (!prev.act) return prev;
         const assistantMsg = { role: 'assistant' as const, content: r.reply };
@@ -539,13 +596,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         const chips: Chips = Array.isArray(r.chips)
           ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string')
           : [];
+        // B4 追问槽位（与 chips 同源；goal 槽 chips 走输入框复合形态）：仅接受合法槽名
+        const askedSlot = ASKED_SLOTS.includes(r.askedSlot as string) ? (r.askedSlot as string) : null;
         // Wave3：done 帧 batches（待确认建批方案）——只收结构完整项；缺省/空 → 清空（与 chips 同生命周期）
         const pendingBatches = parseBatches(r.batches);
         // engine：仅接受合法值，否则保持现值
         const engine = r.engine === 'online' || r.engine === 'degraded' ? r.engine : prev.engine;
         return {
           ...prev, act: nextAct, streaming: false, streamingText: '',
-          engine, chips, pendingBatches,
+          engine, chips, askedSlot, pendingBatches,
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
           acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
@@ -612,7 +671,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // —— 重置 ——
   const resetData = useCallback(async () => {
     await api('/api/reset', { method: 'POST' });
-    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [], confirmState: null, confirmFailed: null, pendingBatches: [] });
+    anchoredActRef.current = null;
+    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [], askedSlot: null, confirmState: null, confirmFailed: null, pendingBatches: [] });
     await loadState();
     await ensureAct();
     toast_('数据已重置');
@@ -659,9 +719,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 会话级数据一并清空：否则登出后 UI 仍揣着上一账号的 act/受众，换账号登录后
     // loadState 的 `|| state.act` 兜底会把幻影 act 带回来，所有消息 404（线上 selftest 实锤）
     planRestoredRef.current.clear();
+    anchoredActRef.current = null;   // 锚点属账号数据，登出即失效（否则换号登录会锚到上一账号会话）
     patch({
       me: null, act: null, acts: [], drafts: [], audience: [], opportunities: null,
-      planPushed: false, planShown: null, lastSent: null, chips: [],
+      planPushed: false, planShown: null, lastSent: null, chips: [], askedSlot: null,
       confirmState: null, confirmFailed: null,
       campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],   // 批次域属账号数据，登出一并清空
       welcome: null, storeBanner: null, prefs: {}, lastPlan: null,   // Wave4 新域同属账号数据
@@ -692,10 +753,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // —— 受众「去聊这拨人」→ 新建 act（预选受众）+ 切对话 + 预填输入 ——
   const jumpToConfig = useCallback(async (intent: string, aud?: Audience) => {
-    const act = await createAct({ audience: intentToAudience(intent) });
+    const r = await createAct({ audience: intentToAudience(intent) });
+    actIndexRef.current.set(r.act.id, r.act);
+    anchoredActRef.current = r.act;
     patch({
-      act, acts: [act, ...state.acts], planPushed: false, planShown: null, activeTab: 'chat',
+      act: r.act, acts: [r.act, ...state.acts.filter(a => a.id !== r.act.id)], planPushed: false, planShown: null, activeTab: 'chat',
       confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
+      chips: [],   // preset 会话开场已定向受众，opening chips（受众三项）与下一问不同源，等首轮 done 帧
+      askedSlot: null,
       pendingBatches: [],   // 新会话无待确认批次
       chatInput: aud ? `帮我挽回 ${aud.intent || ''} 的人，弃购额约 ¥${+aud.abandoned_value || 0}` : '',
       chatPlaceholder: CHAT_PLACEHOLDER,
@@ -716,7 +781,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     return { ok: false, error: '任务超时，请稍后在邮件页查看状态' };
   }, []);
 
-  // —— 确认卡预建草稿（旧后端回退路径 / demo 引导跳步用）：重活（变体/海报入队）提前跑，暂存给确认发送复用 ——
+  // —— 确认卡预建草稿（仅旧后端回退路径用）：/confirm 404（部署窗口期）时兜底建稿；新后端流程草稿一律由 confirm 服务端权威创建 ——
   const createCardDraft = useCallback(async (actId: string, card: PlanCard): Promise<Draft> => {
     const r = await api<{ draft: Draft; error?: string }>('/api/draft', {
       method: 'POST', body: JSON.stringify({ actId, planCard: card }),

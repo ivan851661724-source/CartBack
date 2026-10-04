@@ -96,7 +96,10 @@ const FALLBACK_CATCH_POOL = [
 // Wave 3：批次域动作词（批次/停发/全停/暂停/恢复/重发）也是业务词 —— 运维话术不得被离题路由劫持
 // Wave 4：算账问句 / 复用意图（F2/A3）同为业务词，桩模式下不得被离题兜底吞掉
 // Wave 5：I5 批次状态问句（都在跑啥/批次状态/几个批次）同上
-const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发|值多少|值不值|划不划算|能赚|能回多少|算账|照上次|跟上次|和上次|上个月那套|上次那套|按上次|照旧|都在跑啥|在跑啥|批次状态|几个批次|批次怎么样)/i;
+// P0-N3（复测 10-03）：引擎自家词表（SLOT_CHIPS/CONFLICT_CHIPS 全部选项）必须在白名单里——
+// 商家点自己刚拿到的 chip（挽回订单/具体金额/忘记结账/免邮/小赠品/我自己定…）被 _offTopicWeak
+// 判成离题拒答（「挽回」二字都不在表内），降级窗口期主链当场卡死。年龄段短答（25-34）一并放行。
+const BIZ_RE = /(店铺|网店|开店|店|生意|电商|卖货|卖东西|客户|邮件|营销|弃购|转化|下单|加购|购物车|浏览|老客|老顾客|会员|vip|优惠|折扣|包邮|限时|复购|回流|唤醒|沉睡|流失|挽回|订单|金额|目标|结账|价格|对比|免邮|赠品|跑通|我来说|我自己定|钩子|客群|gmv|销量|库存|发货|物流|退款|售后|批次|停发|全停|暂停|恢复|重发|值多少|值不值|划不划算|能赚|能回多少|算账|照上次|跟上次|和上次|上个月那套|上次那套|按上次|照旧|都在跑啥|在跑啥|批次状态|几个批次|批次怎么样|\d{1,3}\s*[-~到至]\s*\d{1,3})/i;
 
 // —— 离题/元问题/身份询问 的温和接住池（桩与模型降级共用，_rotateReply 轮换防复读；guardrailHits 记空，非边界拒绝）——
 const OFFTOPIC_POOL = [
@@ -162,7 +165,15 @@ function extractNeeds(text) {
   // goal（中英文双匹配）。PRD C4：禁止罐头默认值、宁缺不编——裸动词「付款/结账/结算」
   // 撤出匹配（GUI 联调 Bug-1：chip 文案「忘记结账」的「结账」曾把用户没说的 goal 填成罐头），
   // 只认完成式意图语境；降级路径抓不到就留空等 B4 追问
-  if (/完成付款|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
+  // P0-N3/G-6（复测 10-03）：降级轮也要能接住可验收目标——「本月挽回 100 单」「挽回 500 美金」
+  // 原话截取入槽（带数值 = 可验收）；裸 chip「挽回订单」不含数值，留空等 B4 追问具体值。
+  // 两个正则分开跑、挽回锚定优先：合并 alternation 会让左扫描先命中「目标是…」分支，前缀剥离吃掉动词
+  const goalRecoverM = t.match(/挽回[^。；;！!?？,，]{0,8}?\d+\s*(?:单|美金|美元|元)/);
+  const goalTargetM = goalRecoverM ? null : t.match(/(?:目标|希望|想要|结果)[^。；;！!?？,，]{0,10}?\d+\s*(?:单|美金|美元|元)/);
+  if (goalRecoverM) out.goal = goalRecoverM[0];
+  else if (goalTargetM) out.goal = goalTargetM[0].replace(/^(?:目标|希望|想要|结果)(?:是|就是|就|要|想)?/, '').trim();
+  else if (/完成付款|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
+  else if (/跑通/.test(t)) out.goal = '先跑通流程';
   else if (/复购|再买|再下一单|回购|reorder|buy\s+again|repeat\s+purchase|repeat\s+order/i.test(t)) out.goal = '促成复购 / 再下一单';
   else if (/回流|回来|唤?醒|召回|拉回/.test(t)) out.goal = '唤醒回流';
   else if (/转化|成交|下单|购买/.test(t)) out.goal = '提升到转化 / 成交';
@@ -532,12 +543,12 @@ class IGDE {
     return variants.find(v => !assistantMsgs.includes(v)) || variants[variants.length - 1];
   }
 
-  /** 字段追问示例（第 4 次仍未采集到时给例子引导，避免无限复读） */
+  /** 字段追问示例（第 4 次仍未采集到时给例子引导，避免无限复读）。口径 = PRD C1–C4 定稿（2026-09-30） */
   _probeExample(field) {
     const map = {
       audience: '加购没付款的、浏览没买的、还是很久没来的老客',
       reason: '忘了结账、被别家勾走、还是单纯没需求',
-      goal: '回来下单、领券复购、还是先回店铺逛逛',
+      goal: '挽回多少单、多少金额，还是先跑通流程',
       offer: '9 折、满减、还是免邮'
     };
     return map[field] || '加购未付的客户';
@@ -562,7 +573,9 @@ class IGDE {
     return fresh || miss[0];
   }
 
-  /** B4 决策（B2 合并后调用）：冲突澄清优先于常规追问；无缺失 → 不问（转 S2 由 _advanceStage 处理） */
+  /** B4 决策（B2 合并后调用）：冲突澄清优先于常规追问；无缺失 → 不问（转 S2 由 _advanceStage 处理）。
+   *  注意：S2 四槽全满态不挂冲突追问（p13 验收基线：确认阶段的复述/看卡话术不反问），冲突候选
+   *  交由 C6 兜底与显式 correction 通道消化——若 PRD 后续裁决 S2 冲突也需当面核实，再改此处次序 */
   _decideQuestion(act, turnResult) {
     const miss = this.missingFields(act);
     if (!miss.length) return { slot: null, chips: [], kind: 'none' };
@@ -710,10 +723,24 @@ class IGDE {
       const bm = String(userText || '').match(/品牌(?:叫|是|名为|name\s*is)\s*([A-Za-z0-9\u4e00-\u9fa5]{1,24})/i);
       if (bm) turnExtras.unshift({ key: 'brand', value: bm[1] });
     }
-    // ② C6 澄清轮后的数字分段短答（「25 到 34 吧」）→ audience 回答（chips 选项的输入框等价物）
+    // ② C6 澄清轮后的数字分段短答（「25 到 34 吧」「按 25-34 吧」）→ audience 回答（chips 选项的输入框等价物）。
+    //    P1-N1（复测 10-03）：允许 ≤3 个非数字引导字（按/就/选…）与语气尾字，否则口头决议抓不到、账本滞后一轮
     if (!bySlot.audience) {
-      const segM = String(userText || '').trim().match(/^(\d{1,3})\s*(?:到|[-~～])\s*(\d{1,3})\s*(?:岁)?\s*(?:的|吧|这个|人群|客户)?$/);
+      const segM = String(userText || '').trim().match(/^[^\d]{0,3}(\d{1,3})\s*(?:到|[-~～])\s*(\d{1,3})\s*(?:岁)?\s*(?:的|吧|这个|人群|客户|之间)?[\s。！?？!~，,]*$/);
       if (segM) bySlot.audience = { slot: 'audience', value: `${segM[1]}-${segM[2]}岁`, inferred: false, kw: true };
+    }
+    // ③ C6 决议桥（P0-N3/G-1）：上一轮冲突追问的 chips 被商家原样点选/复述 → 映射为该槽显式更新。
+    //    chips 的提交契约就是「把标签当文本发回」（点击 = sendMsg(文案)），降级轮没有模型兜底抽取，
+    //    必须在此桥接成 slot update；「维持/我自己说/我来说原因」类出口不映射（维持走 C6 保旧值口径，
+    //    自由输入出口等商家打字），文本明确保旧值时整段跳过。
+    const askedCf = (act.memory && Array.isArray(act.memory.conflicts) ? act.memory.conflicts : [])
+      .find(c => c && c.asked === true && c.slot);
+    if (askedCf && !bySlot[askedCf.slot] && !/维持|保持|原来的|之前的|按旧|不换/.test(String(userText || ''))) {
+      const chip = (conflictChips(askedCf.slot) || []).find(ch => ch && String(userText || '').includes(ch));
+      if (chip && !/维持|保持|原来的|之前的|我自己|我来说/.test(chip)) {
+        const chipVal = askedCf.slot === 'audience' && /^\d/.test(chip) ? `${chip}岁` : chip;
+        bySlot[askedCf.slot] = { slot: askedCf.slot, value: chipVal, inferred: false, kw: true };
+      }
     }
     const turn = {
       userText,
@@ -1470,6 +1497,9 @@ class IGDE {
       if (!NEEDED_FIELDS.includes(slot)) continue;
       const value = clampNeedValue(u.value);
       if (!value) continue;
+      // C4 禁止罐头默认值（P2-N4 配套）：goal 的 chips 类别词本身不是可验收目标——
+      // 模型照抄 chip 文案交槽（goal=「挽回订单/具体金额」）时丢弃，等商家补上具体值再收
+      if (slot === 'goal' && /^(挽回订单|具体金额)$/.test(value)) continue;
       let inferred = u.inferred === true;
       const confidence = Number(u.confidence);
       if (Number.isFinite(confidence) && confidence < 0.6) inferred = true;
@@ -1545,16 +1575,22 @@ class IGDE {
       const prev = needs[slot];
       if (prev && prev.value === value) continue; // 同值忽略
       const kwTouched = u.kw === true;
-      // 挂着的已追问冲突的两向决议（矩阵 m10/m11 实测）：
-      //  「维持/保持/原来的」→ 保留旧值（候选丢弃）；新值 === 候选值 → 用户确认候选，explicit 入槽
+      // 挂着的已追问冲突的决议（矩阵 m10/m11 实测 + 复测 10-03 P1-N1）：
+      //  「维持/保持/原来的」→ 保留旧值（候选丢弃）；用户当面给出了任何新值 = 冲突的答案——
+      //  同轮 explicit 入槽 + corrections 记账，绝不再产出新冲突候选（旧行为只认「新值===候选值」，
+      //  答 chips 的其它选项会再挂一轮冲突：账本滞后一轮 + B4 反问刚解决的冲突，一轮两问）
       const askedCf = (mem.conflicts || []).find(c => c.slot === slot && c.asked === true);
       if (askedCf) {
         if (/维持|保持|原来的|之前的|按旧|不换/.test(turn.userText || '')) continue;
-        if (value === askedCf.new) {
-          needs[slot] = { value, source: 'explicit', at: now };
-          corrected.add(slot);
-          continue;
+        const cfOld = prev ? prev.value : '';
+        needs[slot] = { value, source: 'explicit', at: now };
+        corrected.add(slot);
+        if (cfOld && cfOld !== value) {
+          mem.corrections.push({ slot, old: cfOld, new: value, at: now });
+          mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
+          correctionsAdded++;
         }
+        continue;
       }
       if (prev && !hasTone) {
         // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清。
