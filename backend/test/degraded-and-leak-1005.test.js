@@ -9,6 +9,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { IGDE } = require('../lib/igde');
+const { countFilled } = require('../lib/needs');
 
 const CANNED_RE = /卡了一下|断片|没接稳/;
 
@@ -133,4 +134,116 @@ test('② 正常回复不受吸收影响（无 JSON 前缀时原样通过）', a
   const r = await igde.handle(act, '我想挽回加购未付的客户', { persist: async () => {} });
   assert.ok(/收到，加购未付的客户/.test(r.reply), '正常回复原样');
   assert.equal(act.needs.audience.value, '加购未付客户', '槽位照常入账');
+});
+
+/* ---------- 循环压测（2026-10-05 强制兜底）：四类对抗场景最大连续近似 ≤2（S1） ---------- */
+
+function similarEnough(a, b) {
+  const norm = (x) => String(x || '').toLowerCase().replace(/[\s\p{P}\p{S}]+|[的了吗呢吧啊嘛哦呀哈是]/gu, '');
+  const x = norm(a), y = norm(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return (x.length >= 12 && y.includes(x)) || (y.length >= 12 && x.includes(y));
+}
+
+function maxConsecutiveRun(replies) {
+  let max = 0, run = 1;
+  for (let i = 1; i < replies.length; i++) {
+    if (similarEnough(replies[i - 1], replies[i])) { run++; max = Math.max(max, run); } else run = 1;
+  }
+  return replies.length ? Math.max(max, 1) : 0;
+}
+
+async function runStress(engine, inputs) {
+  const act = mkAct('stress');
+  const outs = [];
+  for (const input of inputs) {
+    const r = await engine.handle(act, input, { persist: async () => {} });
+    outs.push(String(r.reply || ''));
+  }
+  return { replies: outs, act };
+}
+
+const STRESS_SEQ = ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '挽回订单', '挽回订单', '挽回订单', '挽回订单', '跑通流程', '可以', '可以', '嗯', '嗯'];
+
+test('压测 A：全宕机 + 复读机用户 —— 0 罐头、最大连续近似 ≤2、追问话术轮换', async () => {
+  const { replies, act } = await runStress(deadEngine(), STRESS_SEQ);
+  assert.equal(maxConsecutiveRun(replies.slice(0, 8)) <= 2, true, 'S1 阶段最大连续近似 ≤2');
+  assert.equal(replies.filter(t => CANNED_RE.test(t)).length, 0, '0 罐头（强制兜底 + 轮换）');
+  assert.equal(act.needs.goal.value, '先跑通流程', 'goal 经合法 chip 入槽');
+});
+
+test('压测 D：空回复模型（json_mode 空白缺陷）——熔断器在第 3 次近似前强制换装', async () => {
+  let calls = 0;
+  const igde = new IGDE({
+    aiEnabled: true,
+    callAI: async () => { calls++; return { reply: '   ', slotUpdates: [], extras: [], corrections: [] }; },
+    criticMode: 'off'
+  });
+  const { replies } = await runStress(igde, STRESS_SEQ.slice(0, 8));
+  assert.equal(maxConsecutiveRun(replies.slice(0, 8)) <= 2, true, 'S1 最大连续近似 ≤2（含 L0 罐头路径）');
+  assert.ok(replies.some(t => /对下账/.test(t)), '强制兜底话术（账本复述）出现');
+});
+
+test('压测 C：恒定回复模型（隔轮交替型循环）——窗口熔断在第 3 次近似前换装', async () => {
+  const igde = new IGDE({
+    aiEnabled: true,
+    callAI: async () => ({ reply: '收到哦。那咱们继续——你想让这批客人回来做点什么呢？', slotUpdates: [], extras: [], corrections: [] }),
+    criticMode: 'off'
+  });
+  const { replies } = await runStress(igde, ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '挽回订单', '挽回订单', '跑通流程']);
+  // S1 五轮内：交替型（模型文/罐头）不得出现 3 连近似；且熔断话术出现
+  assert.equal(maxConsecutiveRun(replies.slice(0, 5)) <= 2, true, 'S1 交替型循环被熔断');
+  assert.ok(replies.some(t => /对下账/.test(t)), '强制兜底话术出现');
+});
+
+test('压测 E：复读机用户（同一句连发）——S1 阶段最大连续近似 ≤2', async () => {
+  const igde = new IGDE({
+    aiEnabled: true,
+    callAI: async () => ({ reply: '收到哦。那咱们继续——你想让这批客人回来做点什么呢？', slotUpdates: [], extras: [], corrections: [] }),
+    criticMode: 'off'
+  });
+  const { replies } = await runStress(igde, ['我想挽回加购未付的客户', '我想挽回加购未付的客户', '我想挽回加购未付的客户', '他们忘记结账了', '他们忘记结账了', '折扣给 10% off']);
+  assert.equal(maxConsecutiveRun(replies) <= 2, true, 'S1 最大连续近似 ≤2');
+});
+
+/* ---------- 防呆与强制弹确认卡（2026-10-05）：超轮数 / 不耐烦关键词 / 熔断计数 ---------- */
+
+test('防呆①：不耐烦关键词（别问了直接生成）→ 缺槽推断补满、强制弹确认卡', async () => {
+  const igde = new IGDE({
+    aiEnabled: true,
+    callAI: async () => ({ reply: 'x', slotUpdates: [], extras: [], corrections: [] }),
+    criticMode: 'off'
+  });
+  const act = mkAct('fs1');
+  await igde.handle(act, '我想挽回加购未付的客户', { persist: async () => {} });
+  const r = await igde.handle(act, '别问了，直接生成', { persist: async () => {}, storeBanner: { connected: true, weekly_abandoned_count: 86 } });
+  assert.equal(act.stage, 'S2', '强制进 S2');
+  assert.equal(countFilled(act.needs), 4, '缺槽全部补满');
+  assert.equal(act.needs.offer.value, '待定', 'offer 无数值不编造（C3）');
+  assert.equal(r.planCard !== null, true, '在线档位弹预览卡（D1 确认卡）');
+  assert.equal(act.needs.audience.source, 'explicit', '用户亲口说的受众保持 explicit');
+  for (const slot of ['reason', 'offer', 'goal']) {
+    assert.equal(act.needs[slot].source, 'inferred', `${slot} 推断补满可改`);
+  }
+});
+
+test('防呆②：S1 超轮数（≥12）——离题输入也触发强制弹卡（防呆前置到离题拦截之前）', async () => {
+  const igde = new IGDE({ aiEnabled: false, criticMode: 'off' });
+  const act = mkAct('fs2');
+  act.stage = 'S1';
+  act.memory.s1_turns = 11;
+  await igde.handle(act, '嗯', { persist: async () => {} });
+  assert.equal(act.memory.s1_turns, 12, 'S1 轮数计数');
+  assert.equal(act.stage, 'S2', '超轮数 → 强制进 S2');
+  assert.equal(countFilled(act.needs), 4, '缺槽全补');
+});
+
+test('防呆③：不耐烦句内带修正（受众改成老客，别问了）——先落修正账再补满', async () => {
+  const igde = new IGDE({ aiEnabled: false, criticMode: 'off' });
+  const act = mkAct('fs3');
+  await igde.handle(act, '我想挽回加购未付的客户', { persist: async () => {} });
+  await igde.handle(act, '受众改成老客，别问了直接生成', { persist: async () => {} });
+  assert.ok(/老客|沉睡/.test(String(act.needs.audience.value)), '同句修正先落账（不被推断覆盖）');
+  assert.equal(act.stage, 'S2', '强制进 S2');
 });

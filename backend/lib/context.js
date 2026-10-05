@@ -129,6 +129,8 @@ function createEmptyMemory() {
     prefs: {},
     ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
     clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    s1_turns: 0,        // 防呆：S1 采集已用轮数（超阈值 → 推断补满强制弹确认卡）
+    loop_breaks: 0,     // 防呆：循环熔断触发次数（≥2 → 强制弹确认卡）
     conflicts: []
   };
 }
@@ -273,6 +275,9 @@ function normalizeMemory(memory) {
       out.clarif_count[slot] = Math.max(0, Math.trunc(Number(memory.clarif_count[slot]) || 0));
     }
   }
+  // 防呆计数透传（2026-10-05）：S1 轮数 / 循环熔断次数
+  out.s1_turns = Math.max(0, Math.trunc(Number(memory.s1_turns) || 0));
+  out.loop_breaks = Math.max(0, Math.trunc(Number(memory.loop_breaks) || 0));
   return out;
 }
 

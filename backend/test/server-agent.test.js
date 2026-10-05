@@ -99,6 +99,7 @@ test('agent context configuration and metrics work through the HTTP API', async 
     extras: [], prefs: {},
     ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
     clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    s1_turns: 0, loop_breaks: 0,
     conflicts: []
   });
   assert.equal(act.code_status, 'none');
@@ -130,6 +131,7 @@ test('agent context configuration and metrics work through the HTTP API', async 
     extras: [], prefs: {},
     ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
     clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    s1_turns: 0, loop_breaks: 0,
     conflicts: []
   });
   assert.equal(stored.stage, 'S2', '四槽齐 → S2');

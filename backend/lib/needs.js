@@ -141,6 +141,9 @@ function ensureMemory(memory, now = Date.now()) {
     for (const s of SLOTS) cc[s] = Math.max(0, Number(m.clarif_count[s]) || 0);
   }
   m.clarif_count = cc;
+  // 防呆计数（2026-10-05）：S1 采集轮数 / 循环熔断次数
+  m.s1_turns = Math.max(0, Math.trunc(Number(m.s1_turns) || 0));
+  m.loop_breaks = Math.max(0, Math.trunc(Number(m.loop_breaks) || 0));
   if (!Array.isArray(m.conflicts)) m.conflicts = []; // 未消解的冲突候选（B2 产出 → B4 追问 → C6 兜底）
   return m;
 }

@@ -82,6 +82,15 @@ const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别�
 //    整句锚定：带业务内容的「帮我写一封…挽回邮件」不算出口意图，走正常采集。——
 const WRITE_INTENT_RE = /^(?:好[，,]?)?(?:帮我写一封|直接写一封|开始写吧|就按这些写吧)[。.！!～~\s]*$/;
 
+// —— 防呆与强制终止循环（2026-10-05）：S1 采集期触发任一条件 → 不再追问，缺槽按常见打法
+//    推断补满（全 inferred，卡上「我推断的，可改」）→ 强制弹确认卡：
+//    ① 触发不耐烦关键词（「别问了/直接生成/就这样吧…」——PRD：用户说别问了必须停止追问）
+//    ② S1 轮数超限（S1_TURN_LIMIT，防无限采集）
+//    ③ 循环熔断 ≥2 次（ _forceBreakLoop 计数，防兜底话术也兜不住的顽固循环） ——
+const IMPATIENCE_RE = /(别问了|不用问了|别啰嗦|直接生成|直接出方案|直接配一?封|直接给我出|赶紧(的|生成|发|配)|快点(的|生成|发|配)|别磨叽|确认吧|就这样(吧|定)|先这样吧)/;
+const S1_TURN_LIMIT = 12;
+const LOOP_BREAK_LIMIT = 2;
+
 // —— F5 功能导览流（2026-10-03 新增 · P1 · 独立旁路）：全程不写槽、不动 needs、不推进 stage、
 //    不触发 E5 离题判定；商家中途输入业务内容 → 导览立即让路（pending_tour 下一轮即清）。——
 //    触发收紧：「介绍…功能」必须带「其他/其它」（PRD 触发语「介绍一下其他功能」），
@@ -590,6 +599,30 @@ class IGDE {
     return { reply: parts.join('\n'), stage: 'S0', chips, welcome: !opts.hasAnyAct };
   }
 
+  /** 防呆强制确认卡（2026-10-05）：缺槽推断补满（复用出口意图的 C6 补满）→ 进 S2。
+   *  reason 仅用于话术分型；与 WRITE_INTENT 共用补满口径（0 编造数值，全 inferred 可改）。 */
+  _forceConfirmTurn(act, opts = {}, reason = 'impatient') {
+    const now = Date.now();
+    act.memory = ensureMemory(act.memory, now);
+    const banner = (opts.storeBanner && typeof opts.storeBanner === 'object') ? opts.storeBanner : null;
+    const count = Math.max(0, Number(banner && banner.weekly_abandoned_count) || 0);
+    const put = (slot, value) => {
+      if (!value || act.needs[slot]) return;
+      act.needs[slot] = { value: clampNeedValue(value), source: 'inferred', at: now };
+    };
+    put('audience', count > 0 ? `加购未付客户（约 ${count} 人）` : '加购未付客户');
+    put('reason', '忘记结账');
+    put('offer', '待定');
+    put('goal', '先跑通流程');
+    this._advanceStage(act, '');
+    const lines = {
+      impatient: '好，不磨叽了——缺的几样我按常见打法先补上（都是我推断的，可改），你直接在下面的确认卡里核对、改完点确认。',
+      overflow: '咱聊了不少轮啦，剩下几样我先按常见打法补齐（推断的，可改），你直接在确认卡上核对，哪样不对点哪样改。',
+      loop: '咱俩想法对上了，就是说法绕了点——缺的我先补齐（推断的，可改），你看下面的确认卡，不行在上面改。'
+    };
+    return { reply: lines[reason] || lines.impatient };
+  }
+
   /** F5 功能导览（独立旁路，2026-10-03 新增 P1 可裁）。
    *  返回 null = 本轮无导览语义（含让路：pending_tour 挂起但输入非菜单项 → 清挂起、回正常流水线）。
    *  剧本 #22：菜单 chips ≤5 且与导航同源；讲解含操作路径；needs / stage / 清单零变化；
@@ -727,6 +760,8 @@ class IGDE {
     act.memory = normalizeMemory(act.memory || createEmptyMemory());
     act.summary_cursor = Number(act.summary_cursor) || 0;
     act.context_version = Number(act.context_version) || 1;
+    // 防呆计数：S1 采集期每轮 +1（超阈值触发强制确认卡）
+    if (act.stage === 'S1') act.memory.s1_turns = (Number(act.memory.s1_turns) || 0) + 1;
     if (act.code_status == null) act.code_status = 'none';
     const nowMs = Date.now();
     const runtime = {
@@ -808,6 +843,36 @@ class IGDE {
         guardrailHits: [], engine: this._engineOf(this.aiEnabled),
         chips: writeTurn.chips, askedSlot: null, agentMeta: this._agentMeta(runtime)
       };
+    }
+
+    // —— 防呆与强制终止循环（2026-10-05）：S1 采集期触发任一条件 → 不再追问，缺槽推断
+    //    补满 → 强制弹确认卡（在线档位出预览卡，降级档位 S2 停住）。放在离题拦截之前，
+    //    否则「嗯/不知道」类消息会被离题短路、超轮数兜底永远够不着。本句内带的信息
+    //    （含修正语气）先经 applyNeeds 落账再补满，绝不丢用户刚说的话。 ——
+    if (act.stage === 'S1' && this.missingFields(act).length > 0) {
+      const impatient = IMPATIENCE_RE.test(String(userText || ''));
+      const overflow = (Number(act.memory.s1_turns) || 0) >= S1_TURN_LIMIT;
+      const loopOut = (Number(act.memory.loop_breaks) || 0) >= LOOP_BREAK_LIMIT;
+      if (impatient || overflow || loopOut) {
+        const reason = impatient ? 'impatient' : overflow ? 'overflow' : 'loop';
+        if (userText && String(userText).trim()) {
+          this.applyNeeds(act, extractNeeds(userText), userText, null); // 同句信息先落账
+        }
+        const fc = this._forceConfirmTurn(act, opts, reason);
+        act.messages.push({ role: 'user', content: userText, ts: nowMs });
+        act.messages.push({ role: 'assistant', content: fc.reply, ts: nowMs });
+        act.updated_at = nowMs;
+        let fcCard = null;
+        if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
+          fcCard = this.producePlanCard(act, { locale: opts.locale, code: null });
+        }
+        await doPersist();
+        return {
+          reply: fc.reply, stage: act.stage, needs: act.needs, planCard: fcCard,
+          guardrailHits: [], engine: this._engineOf(this.aiEnabled),
+          chips: [], askedSlot: null, agentMeta: this._agentMeta(runtime)
+        };
+      }
     }
 
     // —— 边界（负空间）：仅当用户真触发越界需求才处理 ——
@@ -1153,6 +1218,11 @@ class IGDE {
     const chips = !askedSlot ? []
       : (question.kind === 'conflict' && askedSlot === question.slot) ? question.chips
         : (SLOT_CHIPS[askedSlot] || []);
+
+    // —— 强制循环熔断（最后防线，2026-10-05 循环压测）：任何护栏组合失效后，采集期若本条
+    //    将成为连续第 3 条近似回复 → 强制换装「账本复述 + 换法提问」的结构性不同话术。
+    //    S2 确认同文属设计（剧本 #16/p13 基线），不在此列。 ——
+    reply = this._forceBreakLoop(act, reply, askedSlot);
 
     act.messages.push({ role: 'user', content: userText, ts: nowMs });
     act.messages.push({ role: 'assistant', content: reply, ts: nowMs });
@@ -1994,9 +2064,47 @@ class IGDE {
     return cand || pool[0] || primary || '';
   }
 
+  /** 强制循环熔断（最后防线）：尾部已有 2 连近似回复且本条仍近似（= 将成 3 连）时，
+   *  用「账本复述 + 该槽示例引导」重组回复——结构与探问句/罐头不同构，且随账本演进天然变化；
+   *  极端情况下仍近似则追加显著性后缀，保证绝不三连同文。仅采集期生效。 */
+  _forceBreakLoop(act, reply, askedSlot) {
+    if (this.missingFields(act).length === 0) return reply; // S2 确认同文属设计
+    // 窗口计数（2026-10-05 压测修正）：邻接比对抓不住「隔轮交替」型循环
+    //（模型回复 X 与罐头/探问交替，相邻恒不同文、窗口 3 数不到 2 次近似）。
+    // 改按窗口 4：最近 4 条助手中与本条近似 ≥2 且上一条也近似 → 强制换装。
+    const assistants = [];
+    for (let i = act.messages.length - 1; i >= 0 && assistants.length < 4; i--) {
+      const m = act.messages[i];
+      if (m.role === 'assistant') assistants.unshift(String(m.content || ''));
+    }
+    if (assistants.length < 2) return reply;
+    // 注意不加「上一条也近似」条件：交替型循环里上一条恰是异文罐头，加了就永远不触发
+    const hits = assistants.filter(a => this._similarEnough(a, reply)).length;
+    if (hits < 2) return reply;
+    act.memory.loop_breaks = (Number(act.memory.loop_breaks) || 0) + 1; // 防呆：熔断计数
+    const known = NEEDED_FIELDS.filter(f => act.needs[f] && act.needs[f].value)
+      .map(f => `「${act.needs[f].value}」`).join('、');
+    const recite = known ? `咱对下账：目前记下的是${known}。` : '目前还没记下啥，从头说也行。';
+    const slot = askedSlot && NEEDED_FIELDS.includes(askedSlot) ? askedSlot : this.missingFields(act)[0];
+    const ask = slot ? `就差${FIELD_LABEL[slot]}还没定——${this._probeExample(slot)}，挑一个或者直接打字。` : '';
+    const broken = `${recite}${ask}`;
+    if (this._similarEnough(assistants[assistants.length - 1], broken)) return `${broken}（换个方式说：你只要回我答案本身就行）`;
+    return broken;
+  }
+
   /** 兜底选择器：从 FALLBACK_POOL 轮换（用于 L0/L2/L4 兜底与异常兜底） */
   _pickFallback(act) {
     return this._rotateReply(act, null, FALLBACK_POOL);
+  }
+
+  /** 接住语轮换（2026-10-05 循环压测修复）：_rotateReply 比对的是「catch+问句」整条合成串，
+   *  池内短句永远 ≠ 合成串 → 每轮都选回同一条 → 四连同文罐头。改按前缀比对：
+   *  上一条回复以某接住语开头 → 换下一条。 */
+  _rotateCatchLine(act) {
+    const last = act.messages[act.messages.length - 1];
+    const lastContent = last && last.role === 'assistant' ? String(last.content || '') : '';
+    const hit = FALLBACK_CATCH_POOL.find(p => !lastContent.startsWith(p));
+    return hit || FALLBACK_CATCH_POOL[act.messages.length % FALLBACK_CATCH_POOL.length];
   }
 
   /**
@@ -2011,14 +2119,12 @@ class IGDE {
       const ask = (c && c.old && c.new)
         ? this._appendConflictAsk('', question, [c])
         : this._probe(act, question.slot);
-      const catchLine = this._rotateReply(act, FALLBACK_CATCH_POOL[0], FALLBACK_CATCH_POOL);
-      return { reply: `${catchLine}${ask}`, slot: question.slot };
+      return { reply: `${this._rotateCatchLine(act)}${ask}`, slot: question.slot };
     }
     const miss = this.missingFields(act);
     if (!miss.length) return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_CATCH_POOL), slot: null };
     const slot = this._nextProbeSlot(act);
-    const catchLine = this._rotateReply(act, FALLBACK_CATCH_POOL[0], FALLBACK_CATCH_POOL);
-    return { reply: `${catchLine}${this._probe(act, slot)}`, slot };
+    return { reply: `${this._rotateCatchLine(act)}${this._probe(act, slot)}`, slot };
   }
 
   /**
