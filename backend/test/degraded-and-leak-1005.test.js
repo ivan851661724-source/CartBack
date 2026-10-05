@@ -33,27 +33,28 @@ function mkAct(id) {
   };
 }
 
-const VIDEO_SEQ = ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '挽回订单', '挽回订单', '挽回订单', '跑通流程', '可以'];
+const VIDEO_SEQ = [
+  { in: '我想挽回加购未付的客户' },
+  { in: '他们忘记结账了' },
+  { in: '折扣给 10% off' },
+  { in: '挽回订单', check: (act, reply) => !act.needs.goal && /多少单/.test(reply) },
+  { in: '挽回 50 单', check: (act) => act.needs.goal && /50\s*单/.test(act.needs.goal.value) && act.stage === 'S2' },
+  { in: '可以', check: (act, reply) => /确认/.test(reply) },
+];
 
-test('① AI 全宕机重放视频序列：0 罐头、状态机持续追问、S2 收口引导不被 L4 误杀', async () => {
+test('① AI 全宕机重放视频序列（10-05 阶梯版）：0 罐头、裸 chip 收窄追问、数值入槽、S2 收口不被 L4 误杀', async () => {
   const igde = deadEngine();
   const act = mkAct('outage');
   const replies = [];
-  for (const input of VIDEO_SEQ) {
-    const r = await igde.handle(act, input, { persist: async () => {} });
-    assert.equal(CANNED_RE.test(r.reply), false, `「${input}」不得回罐头兜底，实际：${r.reply}`);
+  for (const step of VIDEO_SEQ) {
+    const r = await igde.handle(act, step.in, { persist: async () => {} });
+    assert.equal(CANNED_RE.test(r.reply), false, `「${step.in}」不得回罐头兜底，实际：${r.reply}`);
+    if (step.check) assert.ok(step.check(act, r.reply), `「${step.in}」断言失败，回复：${r.reply}`);
     replies.push(r.reply);
   }
-  // 追问轮换：连续 goal 追问（裸 chip ×3）不逐字重复（桩 _probe 变体轮换）
-  const goalAsks = replies.slice(3, 6);
-  assert.notEqual(goalAsks[0], goalAsks[1], 'goal 追问须轮换说法（防复读）');
-  // 跑通流程 → goal 入槽 + 收口引导（含「确认卡」权威话术，未被 L4 打成罐头）
-  assert.equal(act.needs.goal.value, '先跑通流程', 'goal=先跑通流程（C4 合法非数值目标）');
-  assert.ok(/确认/.test(replies[6]), '满卡收口引导照常');
-  // S2 确认轮「可以」→ 确认引导（非罐头、非空转）
-  assert.ok(/确认|核对/.test(replies[7]), 'S2「可以」得到确认引导');
-  assert.equal(act.stage, 'S2', '停留 S2（确认动作走 /confirm）');
-  // 全程降级档位诚实
+  // 裸 chip「挽回订单」首点 → 收窄追问数值（绝不再念「挽回多少单、多少金额…」菜单）
+  assert.ok(!/挽回多少单、多少金额/.test(replies[3]), '裸 chip 收窄轮不得原样重问菜单');
+  assert.equal(act.stage, 'S2', '数值目标入槽 → S2（确认动作走 /confirm）');
 });
 
 test('① AI 全宕机时引擎档位诚实（G2：降级不得谎报在线）', async () => {
@@ -78,7 +79,7 @@ test('② slot_updates JSON 泄漏：吸收进 B1、reply 只留人话；裸类�
   act.needs.audience = { value: '加购未付客户', source: 'explicit', at: 1 };
   act.needs.reason = { value: '忘记结账', source: 'explicit', at: 1 };
   act.needs.offer = { value: '10% off', source: 'explicit', at: 1 };
-  const r = await igde.handle(act, '挽回订单', { persist: async () => {} });
+  const r = await igde.handle(act, '目标还没想好', { persist: async () => {} });
   assert.equal(/\{"slot"/.test(r.reply), false, '回复不得泄漏内部 JSON');
   assert.ok(/你希望拿到什么结果/.test(r.reply), 'JSON 后的自然语言保留');
   assert.equal(act.needs.goal, null, 'goal 裸类别词不入槽（PRD C4/P2-N4：等商家补具体值）');
@@ -115,7 +116,7 @@ test('② 内容块数组泄漏（qwen3.8-flash 形态）：剥离前缀 JSON �
   act.needs.audience = { value: '加购未付客户', source: 'explicit', at: 1 };
   act.needs.reason = { value: '忘记结账', source: 'explicit', at: 1 };
   act.needs.offer = { value: '10% off', source: 'explicit', at: 1 };
-  const r = await igde.handle(act, '挽回订单', { persist: async () => {} });
+  const r = await igde.handle(act, '目标还没想好', { persist: async () => {} });
   assert.equal(/type/.test(r.reply), false, '内容块 JSON 不得直达用户');
   assert.ok(/你希望拿到什么结果/.test(r.reply), '自然语言保留');
 });
@@ -180,7 +181,9 @@ test('压测 D：空回复模型（json_mode 空白缺陷）——熔断器在�
     callAI: async () => { calls++; return { reply: '   ', slotUpdates: [], extras: [], corrections: [] }; },
     criticMode: 'off'
   });
-  const { replies } = await runStress(igde, STRESS_SEQ.slice(0, 8));
+  // 10-05 起「挽回订单/跑通流程」裸 chip 走确定性阶梯（不到断路器）；压断路器改用
+  // 业务词但不可提取的输入（目标定高点：BIZ 命中、无数值不落槽）
+  const { replies } = await runStress(igde, ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '目标定高点', '目标定高点', '目标定高点', '目标定高点', '挽回 50 单']);
   assert.equal(maxConsecutiveRun(replies.slice(0, 8)) <= 2, true, 'S1 最大连续近似 ≤2（含 L0 罐头路径）');
   assert.ok(replies.some(t => /对下账/.test(t)), '强制兜底话术（账本复述）出现');
 });
@@ -191,7 +194,7 @@ test('压测 C：恒定回复模型（隔轮交替型循环）——窗口熔断
     callAI: async () => ({ reply: '收到哦。那咱们继续——你想让这批客人回来做点什么呢？', slotUpdates: [], extras: [], corrections: [] }),
     criticMode: 'off'
   });
-  const { replies } = await runStress(igde, ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '挽回订单', '挽回订单', '跑通流程']);
+  const { replies } = await runStress(igde, ['我想挽回加购未付的客户', '他们忘记结账了', '折扣给 10% off', '目标定高点', '目标定高点', '挽回 50 单']);
   // S1 五轮内：交替型（模型文/罐头）不得出现 3 连近似；且熔断话术出现
   assert.equal(maxConsecutiveRun(replies.slice(0, 5)) <= 2, true, 'S1 交替型循环被熔断');
   assert.ok(replies.some(t => /对下账/.test(t)), '强制兜底话术出现');

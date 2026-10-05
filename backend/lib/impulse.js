@@ -77,6 +77,10 @@ function detectImpulse(text, { offerRaw = '', saleWindow = false, threshold = nu
   const sale = Number(saleThreshold) > 0 ? Number(saleThreshold) : E1_THRESHOLD_SALE;
   const thresholdUsed = saleWindow ? sale : base;
   const overThreshold = percent != null && percent >= thresholdUsed;
+  // 语境守卫（10-05 batch3 S22）：「你能保证挽回 50% 吗」是效果承诺问句不是让利请求——
+  // 带保证/承诺措辞的百分比不触发拦截（MASS_RE 清仓/大甩卖词仍权威，「保证五折清仓」照拦）
+  const assurance = /(保证|承诺|确保|能不能|可以达到|恢复到|挽回率|打开率|转化率)/.test(t);
+  if (overThreshold && assurance && !mass) return { hit: false, kind: null, percent, offerRaw: offerRaw || '', threshold: thresholdUsed, saleRelaxed: saleWindow, assured: true };
   if (!mass && !overThreshold) return { hit: false, kind: null, percent, offerRaw: offerRaw || '', threshold: thresholdUsed, saleRelaxed: saleWindow };
   return {
     hit: true,

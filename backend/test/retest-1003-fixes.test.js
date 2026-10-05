@@ -26,14 +26,16 @@ function newAct() {
 
 const igde = new IGDE({ aiEnabled: false });
 
-test('P0-N3: 降级轮点自家 chip「挽回订单」（goal 需补值）不再被判离题拒答', async () => {
+test('P0-N3: 降级轮点自家 chip「挽回订单」→ 收窄追问具体数值（不离题拒答、不原样重问）', async () => {
   const act = newAct();
   // 先把 audience/reason/offer 采满，本轮引擎在问 goal
   igde.applyNeeds(act, { audience: '加购未付客户', reason: '忘记结账', offer: '10% off' });
   act.stage = 'S1';
   const r = await igde.handle(act, '挽回订单', {});
   assert.ok(!/我帮不上|接不住/.test(r.reply), `降级轮不得拒答 chip，实际回复：${r.reply}`);
-  assert.equal(r.askedSlot, 'goal', 'chip 无数值 → 继续追问 goal');
+  assert.ok(/多少单/.test(r.reply), `裸 chip 首点 → 收窄问数值，实际回复：${r.reply}`);
+  assert.ok(!/挽回多少单、多少金额/.test(r.reply), '不得原样重念菜单问句');
+  assert.equal(r.askedSlot, null, '收窄轮走确定性阶梯（非 B4 探问，askedSlot=null）');
 });
 
 test('P0-N3/G-6: 降级轮「营销目标是本月挽回 100 单」goal 数值目标入槽', async () => {

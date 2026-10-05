@@ -70,6 +70,9 @@ const SEMANTIC_SAME_GROUPS = [
   ['弃购 / 下单未付客户', '弃购未付', '弃购', '下单未付', '下单没付'],
   // audience：浏览未买族
   ['浏览未买客户', '浏览没买', '浏览未下单', '逛了没买', '看了没买'],
+  // goal：跑通流程族（chips 选项「跑通流程」与口语「先试发一封/先跑起来」互为同义——
+  // 10-05 GUI 实测「先试发一封」被当新目标追问 → 原样重问循环）
+  ['先跑通流程', '跑通流程', '先跑起来', '先试发一封', '试发一封', '先发一封'],
 ];
 
 // —— Wave 4 F2 算账意图（对话内问「这批人值多少钱 / 值不值」→ 确定性算账，与账本同口径）——
@@ -158,6 +161,15 @@ const FALLBACK_CATCH_POOL = [
   '这轮我没接稳，重来——'
 ];
 
+// —— S2 满卡待确认期的闲聊/不识别输入专用池（10-05 截图循环连带修复）：原非确认输入轮换到
+//    FALLBACK_POOL 完整句——内嵌罐头接住语（「卡了一下」）且重问已填满的受众。满卡态既不追问
+//    也不该装掉线，一律引向确认卡/自由改。 ——
+const S2_IDLE_POOL = [
+  '方案四样都在下面确认卡里了，想改哪样直接说，没问题就点确认。',
+  '你在下面的确认卡上核对就行——哪样不对点哪样改，想补细节（比如发送时段）也可以直接打字。',
+  '配置都在下面确认卡里。要调哪里说一声，都 OK 就点确认。'
+];
+
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
 // Wave 3：批次域动作词（批次/停发/全停/暂停/恢复/重发）也是业务词 —— 运维话术不得被离题路由劫持
 // Wave 4：算账问句 / 复用意图（F2/A3）同为业务词，桩模式下不得被离题兜底吞掉
@@ -223,7 +235,7 @@ function extractNeeds(text) {
     const forgotM = t.match(/忘(?:了|记)?(?:结账|付款)/);
     if (forgotM) { out.reason = forgotM[0]; t = t.replace(forgotM[0], ' '); }
     else if (/太久|很久|好久|不活跃|没动静|沉默|忘了|忘记|没人管|被忽略/.test(t)) out.reason = '太久没动静、快被遗忘';
-    else if (/竞品|别家|对手|别人家|competitor|rival/i.test(t)) out.reason = '可能被竞品勾走';
+    else if (/竞品|别家|对手|别人家|别的牌子|其他牌子|别的品牌|competitor|rival/i.test(t)) out.reason = '可能被竞品勾走';
     else if (/运费太贵|运费贵|运费高|运费偏贵|shipping.*(expensive|cost|price)|too expensive|high? cost/i.test(t)) out.reason = '嫌运费贵、临门犹豫';
     else if (/贵|价格|预算|划算|expensive|price|cost|budget/i.test(t)) out.reason = '觉得贵、犹豫价格';
     else if (/犹豫|纠结|再想想|考虑|hesitat|unsure|thinking/i.test(t)) out.reason = '还在犹豫';
@@ -239,7 +251,9 @@ function extractNeeds(text) {
   if (goalRecoverM) out.goal = goalRecoverM[0];
   else if (goalTargetM) out.goal = goalTargetM[0].replace(/^(?:目标|希望|想要|结果)(?:是|就是|就|要|想)?/, '').trim();
   else if (/完成付款|完成下单|complete\s+the\s+purchase|complete.*payment|checkout|pay\s+(for|the)/i.test(t)) out.goal = '促使完成付款 / 结账';
-  else if (/跑通/.test(t)) out.goal = '先跑通流程';
+  // 「先试发一封/先跑起来」= 跑通流程族口语（10-05 截图循环：被当无效回答原样重问）；
+  // 「发一封」裸词不收（「帮我写一封/发一封」是写意图不是目标）
+  else if (/跑通|试发|先发一封|发一封试试|先跑起来/.test(t)) out.goal = '先跑通流程';
   else if (/复购|再买|再下一单|回购|reorder|buy\s+again|repeat\s+purchase|repeat\s+order/i.test(t)) out.goal = '促成复购 / 再下一单';
   else if (/回流|回来|唤?醒|召回|拉回/.test(t)) out.goal = '唤醒回流';
   else if (/转化|成交|下单|购买/.test(t)) out.goal = '提升到转化 / 成交';
@@ -259,7 +273,9 @@ function extractNeeds(text) {
   }
   else if (/包邮|免邮/.test(t)) out.offer = '包邮'; // 明确要包邮时优先于通用「折扣」词，避免"折扣改成包邮"被误抽成折扣
   else if (/(\d+)\s*%|打折|折扣/.test(t)) {
-    const m = t.match(/(\d+)\s*%/);
+    // 一句双改难题（10-05 PRD 矩阵）：「10% off，不对，还是 15% off」——句中带改口词时取最后一个百分比
+    const pcts = t.match(/\d+\s*%/g) || [];
+    const m = (pcts.length > 1 && /(不对|还是|改成|换成|换|改为)/.test(t)) ? t.match(/(\d+)\s*%(?!.*\d+\s*%)/) : t.match(/(\d+)\s*%/);
     // "100% 回来下单"是数量表述不是折扣，勿误抽成 offer；单位保留用户原话口径（% off）
     out.offer = (m && +m[1] !== 100) ? m[1] + '% off' : (m ? '' : '折扣优惠');
     if (!out.offer) delete out.offer;
@@ -547,7 +563,7 @@ class IGDE {
   probeFor(field) {
     const map = {
       audience: '这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。',
-      reason: '你认为顾客流失的原因是哪一个',
+      reason: '你认为顾客流失的原因是哪一个？',
       goal: '你希望拿到什么结果？挽回多少单、多少金额，还是先跑通流程？',
       offer: '这封给客人什么钩子？'
     };
@@ -618,7 +634,8 @@ class IGDE {
     const lines = {
       impatient: '好，不磨叽了——缺的几样我按常见打法先补上（都是我推断的，可改），你直接在下面的确认卡里核对、改完点确认。',
       overflow: '咱聊了不少轮啦，剩下几样我先按常见打法补齐（推断的，可改），你直接在确认卡上核对，哪样不对点哪样改。',
-      loop: '咱俩想法对上了，就是说法绕了点——缺的我先补齐（推断的，可改），你看下面的确认卡，不行在上面改。'
+      loop: '咱俩想法对上了，就是说法绕了点——缺的我先补齐（推断的，可改），你看下面的确认卡，不行在上面改。',
+      stalled: '行，具体数不急着定——先按「先跑通流程」跑起来也行。缺的我先补齐（推断的，可改），你在下面的确认卡上核对，哪样不对点哪样改。'
     };
     return { reply: lines[reason] || lines.impatient };
   }
@@ -875,6 +892,77 @@ class IGDE {
       }
     }
 
+    // —— goal 槽自家 chips / 口标应答（2026-10-05 截图循环根治）：引擎下发的 goal chips 里
+    //    「挽回订单/具体金额」按 C4 是待具体化的类目（无数值不入槽），但点它绝不能换来原样重问——
+    //    首点 → 收窄成数值追问；再点（停滞）→ 防呆强制确认卡。「跑通流程」是 C4 合法非数值目标，
+    //    口语变体（先试发一封/先跑起来）直接入槽收口；「我自己定」引导自由输入。
+    //    仅在 goal 是当前追问目标（B4 探问指向 goal，即 chips 正挂着 goal 项）时触发——
+    //    采集早期聊别的槽时说「跑起来」不该被误吞成目标。 ——
+    if (act.stage === 'S1' && this.missingFields(act).includes('goal') && this._nextProbeSlot(act) === 'goal') {
+      const raw = String(userText || '').trim();
+      const tRun = /^(?:先跑通流程|跑通流程|先跑起来|跑起来|先试发一封|试发一封|先发一封(?:试试|看看)?|发一封试试)[。.！!～~\s]*$/.test(raw);
+      const tBare = /^(?:挽回订单|具体金额)[。.！!～~\s]*$/.test(raw);
+      const tSelf = /^(?:我自己定|我自己来定|我来说|我来说目标)[。.！!～~\s]*$/.test(raw);
+      if (tRun || tBare || tSelf) {
+        act.memory = ensureMemory(act.memory, nowMs);
+        // 顺序硬约束（B3「先落库后回复」的镜像：先记账后落库）：earlyReturn 先把本轮
+        // user/assistant 消息 push 进 act，再 doPersist 序列化——SSE done 帧的 act 才带得上
+        // 本轮两条消息（10-05 GUI 全功能测试抓到：先 persist 后 push → 前端丢本轮气泡）。
+        const earlyReturn = (replyText, chipsOut, cardOut) => {
+          act.messages.push({ role: 'user', content: userText, ts: nowMs });
+          act.messages.push({ role: 'assistant', content: replyText, ts: nowMs });
+          act.updated_at = nowMs;
+          return { reply: replyText, stage: act.stage, needs: act.needs, planCard: cardOut || null, guardrailHits: [], engine: this._engineOf(this.aiEnabled), chips: chipsOut || [], askedSlot: null, agentMeta: this._agentMeta(runtime) };
+        };
+        if (tRun) {
+          act.needs.goal = { value: clampNeedValue('先跑通流程'), source: 'explicit', at: nowMs };
+          this._advanceStage(act, '');
+          const miss2 = this.missingFields(act);
+          if (!miss2.length) {
+            let card = null;
+            if (this.aiEnabled && act.stage === 'S2') card = this.producePlanCard(act, { locale: opts.locale, code: null });
+            const out = earlyReturn('行，就按「先跑通流程」来——四样齐了，你在下面的确认卡里核对一遍，哪样不对点哪样改。', [], card);
+            await doPersist();
+            return out;
+          }
+          const nx = miss2[0];
+          const reply = `好，目标就按先跑通流程算。还差${FIELD_LABEL[nx]}——${this._probeExample(nx)}，你说个大概就行。`;
+          const out = earlyReturn(reply, SLOT_CHIPS[nx] || []);
+          await doPersist();
+          return out;
+        }
+        if (tBare) {
+          const visits = (Number(act.memory.goal_bare) || 0) + 1;
+          act.memory.goal_bare = visits;
+          act.memory.ask_count.goal = (Number(act.memory.ask_count.goal) || 0) + 1;
+          if (visits === 1) {
+            const byAmount = raw.startsWith('具体金额');
+            const reply = byAmount
+              ? '行，按金额算——大概想挽回多少钱？给个数就行，比如「挽回 1000 元」。'
+              : '行，冲挽回订单去——大概想挽回多少单？给个数就行，比如「挽回 50 单」。';
+            const chips = byAmount ? ['挽回 1000 元', '挽回 5000 元', '先跑通流程'] : ['挽回 50 单', '挽回 100 单', '先跑通流程'];
+            const out = earlyReturn(reply, chips);
+            await doPersist();
+            return out;
+          }
+          const fc = this._forceConfirmTurn(act, opts, 'stalled');
+          let card = null;
+          if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
+            card = this.producePlanCard(act, { locale: opts.locale, code: null });
+          }
+          const out = earlyReturn(fc.reply, [], card);
+          await doPersist();
+          return out;
+        }
+        // tSelf：引导自由输入（不计数；下一轮说什么按正常管线走）
+        const reply = '行，你直接打字说就行——比如「挽回 50 单」「挽回 1000 元」，或者「先跑通流程」。';
+        act.memory.ask_count.goal = (Number(act.memory.ask_count.goal) || 0) + 1;
+        const out = earlyReturn(reply, SLOT_CHIPS.goal || []);
+        await doPersist();
+        return out;
+      }
+    }
+
     // —— 边界（负空间）：仅当用户真触发越界需求才处理 ——
     //   强信号命中 → scopeBoundary 返回拒绝话术。
     //   · 硬拒绝（A/B/C 类：违法 / 非邮件渠道 / 非邮件任务）：两种模式都引擎级拦截（安全 fail-safe）。
@@ -941,8 +1029,12 @@ class IGDE {
       || /(多少|哪个|哪些|是不是|有没有|还记得|别记混|是多少)/.test(userText);
     const kwActive = !usedAI || !probeQuestion;
 
-    // B1 critic：envelope slot_updates 逐条校验原文依据（confidence<0.6 → inferred；无依据 → 丢弃）
-    const grounded = usedAI ? this._groundSlotUpdates(env.slotUpdates, userText) : [];
+    // B1 critic：envelope slot_updates 逐条校验原文语义依据（confidence<0.6 → inferred；
+    // 词表命中直通；无依据 → 丢弃）。依据参照 = 本轮 + 紧邻上一轮用户原话（10-05 batch3 S14：
+    // 用户在 T1 早给的原因「被 Shein 拉走」，模型按「只交本轮证据」契约永远无法入槽 → 同槽被无限重问）
+    const prevUserMsg = [...act.messages].reverse().find(m => m.role === 'user');
+    const groundRef = userText + (prevUserMsg ? '\n' + String(prevUserMsg.content || '') : '');
+    const grounded = usedAI ? this._groundSlotUpdates(env.slotUpdates, groundRef) : [];
     runtime.slotUpdatesAccepted += grounded.length;
     runtime.slotUpdatesRejected += Math.max(0, (env.slotUpdates || []).length - grounded.length);
     // B2 更新列表：envelope 优先，词表覆盖同槽（kwTouched = 用户原话逐字命中，短时记忆语义=原话为准）
@@ -958,8 +1050,12 @@ class IGDE {
     // ① 品牌名「品牌叫/是 X」→ extras.brand（模型在长句多素材时偶发漏交）
     const turnExtras = (Array.isArray(env.extras) ? env.extras : []).filter(e => e && String(e.value == null ? '' : e.value).trim());
     if (!turnExtras.some(e => e && e.key === 'brand')) {
-      const bm = String(userText || '').match(/品牌(?:叫|是|名为|name\s*is)\s*([A-Za-z0-9\u4e00-\u9fa5]{1,24})/i);
-      if (bm) turnExtras.unshift({ key: 'brand', value: bm[1] });
+      const bm = String(userText || '').match(/品牌(?:叫|是|名为)\s*([A-Za-z0-9\u4e00-\u9fa5]{1,24})/i);
+      // 问句守卫（M8 同源，10-05 PRD 矩阵 A3 实测）：「品牌叫啥/叫什么名字」是查询不是陈述——
+      // 抓到的疑问词不作品牌名，否则召回问句会把已存的 brand 覆写成「啥」
+      const bmIsQuery = !bm || /^(啥|啥子|什么|啥名字|什么名字|名字|哪个|哪些|多少|什么来着|啥来着)$/i.test(bm[1])
+        || /(多少|哪个|哪些|是不是|还记得|来着|叫啥|叫什么)/.test(bm[1]);
+      if (bm && !bmIsQuery) turnExtras.unshift({ key: 'brand', value: bm[1] });
     }
     // ② C6 澄清轮后的数字分段短答（「25 到 34 吧」「按 25-34 吧」）→ audience 回答（chips 选项的输入框等价物）。
     //    P1-N1（复测 10-03）：允许 ≤3 个非数字引导字（按/就/选…）与语气尾字，否则口头决议抓不到、账本滞后一轮
@@ -1047,9 +1143,16 @@ class IGDE {
       if (opts.onReplyToken && tokenBuffer.length) {
         for (const p of tokenBuffer) opts.onReplyToken(p);
       }
+      // 出卡口径与防呆/写意图/阶梯分支一致（10-05 GUI 全功能测试 F-3 修复）：A3 复用预填四齐
+      // 进 S2 时也出无码预览卡——话术说「确认卡里核对」就不能没有卡。
+      let card4 = null;
+      if (act.stage === 'S3' && act.plan_card) card4 = act.plan_card;
+      else if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
+        card4 = this.producePlanCard(act, { locale: opts.locale, code: null });
+      }
       return {
         reply: reply4, stage: act.stage, needs: act.needs,
-        planCard: (act.stage === 'S3' && act.plan_card) ? act.plan_card : null,
+        planCard: card4,
         guardrailHits,
         engine: this._engineOf(usedAI && !aiDead),
         chips: w4.chips || [], askedSlot: w4.askedSlot || null,
@@ -1136,9 +1239,11 @@ class IGDE {
       reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
     }
 
-    // B5 硬约束落实：本轮选了追问但模型回复没带任何问句 → 引擎补一句该槽探问
+    // B5 硬约束落实：本轮选了追问但模型回复没带任何问句 → 引擎补一句该槽探问。
+    // includes 守卫（10-05）：探问句本身漏问号时（S1 首轮实测整句重复两遍），？检查拦不住
     if (askedSlot && question.kind !== 'conflict' && !/[?？]/.test(reply)) {
-      reply += ' ' + this.probeFor(askedSlot);
+      const p = this.probeFor(askedSlot);
+      if (!reply.includes(p)) reply += ' ' + p;
     }
 
     // —— 单一 FSM 权威：阶段推进只在此处（桩/AI 两条路径一致），_stubReply/_aiCoach 不碰 stage（P2-1）——
@@ -2033,6 +2138,11 @@ class IGDE {
     const t = (userText || '').trim();
     if (!t) return null;
     if (countFilled(act.needs) > 0) return null; // 已有业务上下文 → 正常收集
+    // 词表提取命中 → 是业务素材不是闲聊，放行进采集（10-05 PRD 矩阵：BIZ_RE 词表比提取词表窄，
+    // 「客人说运费太贵就不付了/我品牌叫 X」类首句曾被当闲聊刷掉，槽位信息整句丢失）
+    const kwHit = extractNeeds(t);
+    if (NEEDED_FIELDS.some(f => kwHit[f])) return null;
+    if (/品牌(?:叫|是|名为)|店名|我卖|我做/.test(t)) return null; // 品牌名/品类是 handle 后段 extras 逻辑采的，这里先放行
     if (BIZ_RE.test(t)) return null;             // 业务相关 → 不拦
     if (IDENTITY_RE.test(t)) return { primary: IDENTITY_POOL[0], pool: IDENTITY_POOL };
     if (META_RE.test(t)) return { primary: META_POOL[0], pool: META_POOL };
@@ -2079,7 +2189,20 @@ class IGDE {
     }
     if (assistants.length < 2) return reply;
     // 注意不加「上一条也近似」条件：交替型循环里上一条恰是异文罐头，加了就永远不触发
-    const hits = assistants.filter(a => this._similarEnough(a, reply)).length;
+    // 问句体比对（10-05 截图循环）：_probe 的换皮前缀（换个说法——/再帮我想想这一项就行：…）
+    // 让整句包含比对恒失配 → 同一问句连问 N 遍断路器永不触发。换皮变体里问句原文/示例
+    // 至少逐字出现其一，以「针」集合匹配——任一针同时出现在窗口助手句与本句即计近似。
+    const needles = [];
+    if (askedSlot && NEEDED_FIELDS.includes(askedSlot)) {
+      const p = this.probeFor(askedSlot);
+      if (p && p.length >= 8) needles.push(p);
+      const ex = this._probeExample(askedSlot);
+      if (ex && ex.length >= 8) needles.push(ex);
+    }
+    const bodyHit = needles.length
+      ? (a) => { const A = String(a), R = String(reply); return needles.some(n => A.includes(n) && R.includes(n)); }
+      : () => false;
+    const hits = assistants.filter(a => this._similarEnough(a, reply) || bodyHit(a)).length;
     if (hits < 2) return reply;
     act.memory.loop_breaks = (Number(act.memory.loop_breaks) || 0) + 1; // 防呆：熔断计数
     const known = NEEDED_FIELDS.filter(f => act.needs[f] && act.needs[f].value)
@@ -2223,10 +2346,11 @@ class IGDE {
       if (this.missingFields(act).length === 0) {
         const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
         if (confirm) return { reply: '好，四样都核对齐了。点下面的「确认」按钮，我去你的店铺创建折扣码并生成方案卡。', asked: false };
-        return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
+        // 满卡非确认输入 → 待确认专用池（10-05：原 FALLBACK_POOL 完整句带罐头接住语且重问已填槽）
+        return { reply: this._replyFresh(act, S2_IDLE_POOL[0], S2_IDLE_POOL), asked: false };
       }
       if (nonInfo) {
-        return { reply: this._replyFresh(act, '没事，咱不急。哪点想调直接说，其它对的我先留着。', FALLBACK_POOL), asked: false };
+        return { reply: this._replyFresh(act, '没事，咱不急。方案在下面确认卡里，想调哪样直接说。', S2_IDLE_POOL), asked: false };
       }
       return { reply: this._probe(act, probeSlot || this.missingFields(act)[0]), asked: true };
     }
