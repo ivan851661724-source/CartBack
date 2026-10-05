@@ -42,28 +42,33 @@ const CONFIRM_PREFS = {
   brand: 'LunaGlow', signature: 'LunaGlow', act_id: 'act_old', confirmed_at: String(Date.now()), source: 'confirm'
 };
 
-/* ---------------- A. F1 零配置开场 ---------------- */
+/* ---------------- A. F1 零配置开场（2026-10-03 重写：清单 + 出口 chips，剧本 #23） ---------------- */
 
-test('F1 opening：无任何 act → 欢迎语一次性拼接；老用户/新会话不再出现', () => {
+test('F1 opening：无任何 act → 欢迎语一次性拼接 + 清单 + 出口 chips（剧本 #23）', () => {
   const e = makeEngine();
-  // 首次（名下无 act）→ 欢迎语开头 + 问一句话开场（未连接店铺不硬编数据）
+  // 首次（名下无 act）→ 欢迎语开头 + 问一句话开场（未连接店铺不硬编数据）+ 清单 + 出口
   const first = e.opening({ hasAnyAct: false, storeBanner: { connected: false } });
   assert.ok(first.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语在首条气泡开头');
   assert.equal(first.welcome, true);
   assert.equal(first.stage, 'S0');
   assert.ok(first.reply.includes('召回谁'), '无店铺数据 → 问一句话开场（C1 定稿话术）');
-  assert.deepEqual(first.chips, ['加购未付', '浏览未买', '我自己说'], '未连接 chips 契约');
+  assert.ok(first.reply.includes('我还需要的信息'), '首条气泡含「我还需要的信息」清单');
+  assert.ok(first.reply.includes('发给谁') && first.reply.includes('想拿到什么结果'), '清单覆盖缺失四槽（价值化话术）');
+  assert.ok(first.reply.includes('可选'), 'extras 可选项以附注呈现（C5 口径）');
+  assert.ok(first.reply.includes('需要现在就编写邮件吗'), '编写邮件出口句');
+  assert.ok(!/\d\s*\/\s*4/.test(first.reply), '清单无进度数字（F4 口径）');
+  assert.deepEqual(first.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求'], '出口 chips 3 项（剧本 #23）');
   // 第二个 act（名下已有 act，含 closed）→ 不拼欢迎语
   const second = e.opening({ hasAnyAct: true, storeBanner: { connected: false } });
   assert.ok(!second.reply.includes('欢迎使用百客'), '欢迎语一生只出现一次');
   assert.equal(second.welcome, false);
-  assert.ok(second.reply.length > 0, '老用户仍有开场（问一句话）');
+  assert.ok(second.reply.includes('我还需要的信息'), '老用户开场仍有清单');
   // 兼容：无 opts 调用（旧调用方）不炸
   const legacy = e.opening();
   assert.ok(legacy.reply && Array.isArray(legacy.chips));
 });
 
-test('F1 opening：已连接店铺 → 数据先于提问 + 数据式 chips（≤2 数据 chip +「我自己说」）', () => {
+test('F1 opening：已连接店铺 → 数据先于清单 + 出口 chips（剧本 #23）', () => {
   const e = makeEngine();
   const op = e.opening({
     hasAnyAct: false,
@@ -72,20 +77,20 @@ test('F1 opening：已连接店铺 → 数据先于提问 + 数据式 chips（�
   assert.ok(op.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语仍在开头');
   const idxWelcome = op.reply.indexOf('欢迎使用百客');
   const idxData = op.reply.indexOf('已连接LunaGlow');
-  const idxQ = op.reply.indexOf('发给谁');
-  assert.ok(idxWelcome < idxData && idxData < idxQ, '数据先于提问');
+  const idxList = op.reply.indexOf('我还需要的信息');
+  assert.ok(idxWelcome < idxData && idxData < idxList, '数据先于清单（数据先于提问）');
   assert.ok(op.reply.includes('本周214个加购未付（客单$45，弃购总额$9630）'), '数据开场句按 PRD 句式');
   assert.ok(op.chips.length <= 3, '开场 chips ≤3');
-  assert.ok(op.chips.includes('我自己说'), '必含自由输入出口');
-  assert.ok(op.chips.includes('加购未付 214 人'), '含人群数据式 chip');
+  assert.deepEqual(op.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求'], '出口 chips 3 项');
 });
 
-test('F1 opening：已连接但无数据 → 不硬编数据，改问一句话开场', () => {
+test('F1 opening：已连接但无数据 → 不硬编数据，问一句话开场 + 清单照常', () => {
   const e = makeEngine();
   const op = e.opening({ hasAnyAct: true, storeBanner: { connected: true } });
   assert.ok(!op.reply.includes('本周'), '无数据不硬编');
   assert.ok(!op.reply.includes('已连接'), '无店名不硬编');
-  assert.deepEqual(op.chips, ['加购未付', '浏览未买', '我自己说']);
+  assert.ok(op.reply.includes('我还需要的信息'), '清单照常（F1 处理逻辑 6）');
+  assert.deepEqual(op.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求']);
 });
 
 /* ---------------- B. F2 对话内算账 ---------------- */

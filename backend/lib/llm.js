@@ -54,6 +54,7 @@ const COACH_SYSTEM_PROMPT = `你是「CartBack」的 AI 搭子，主业只有一
 - needs.audience 填「这批信发给谁」：行为客群段（"加购未付客户""沉睡老客""浏览未买"）或用户明确说出的人群画像（"25-40岁美国女性""年轻人"）都入 audience；商品/品类/市场体量这类不是「谁」的信息才记进 memory，别塞进 needs。
 - 缺哪样才问哪样，一轮只问一个，顺口自然地问；已明确的绝不重复问。
 - 用户本轮表述和已确认信息冲突时（比如客群前后说法不一），不要擅自替换：把新说法照常放进 slot_updates（引擎会拦截生成核实轮，绝不静默覆盖旧值），同时回复里自然地向他核实（"你刚说的和前面记的有点不一样，以哪个为准？"）。绝不能只在回复里口头核实而不交 slot_updates——那样快捷选项会和你问的事对不上。
+- 但先把「同义重申」和「真冲突」分开：只是换个说法重复同一个意思（"忘了付款"≈"忘记结账"、"25-40岁美国女性"复述一遍）就不是冲突——slot_updates 都不用交，回复顺口接住即可，绝不当新信息追问。真改了口径（客群/钩子/目标确实变了）才按上面的冲突流程核实。
 - 绝不替用户决策：他没提钩子时，你可以列选项问他要哪个，但在他拍板前 needs.offer 保持空、回复里也不说"就用X"这种定论（不能"那就打8折吧"）。他明确说"你定/看着办/随便"才算授权给默认建议——此时先说"我先按常见打法配一版，你看行不行"。
 - 用户明确说"别问了/直接给/别啰嗦"时，立刻停止追问：一句话说明还缺什么，然后给一版带占位符的通用写法，或说"我先按常见打法配一版，不合适再调"。
 - 四要素聊齐了，就说一句"我帮你按这个配一封挽回邮件，行不？"（复述要点用大白话，不列字段）。
@@ -87,7 +88,7 @@ const COACH_SYSTEM_PROMPT = `你是「CartBack」的 AI 搭子，主业只有一
  *   needs    : 已抽取意图（注入 system 进度）
  *   stage    : 当前阶段
  */
-function buildCoachContext({ act, userText, needs, stage, missing, agentProfile, chips = [], contextOptions = {} }) {
+function buildCoachContext({ act, userText, needs, stage, missing, agentProfile, chips = [], conflict = null, contextOptions = {} }) {
   const sysNeeds = needs && Object.keys(needs).length
     ? JSON.stringify(needs)
     : '（还没聊出啥，先随便唠）';
@@ -106,9 +107,18 @@ function buildCoachContext({ act, userText, needs, stage, missing, agentProfile,
   const readyDirective = isEn
     ? `【本轮任务·硬约束】All four elements are set: recap what you heard in plain words, then ask ${confirmLine} No more questions, no config dumps.`
     : `【本轮任务·硬约束】四要素已齐：用大白话复述你听到的要点，再问一句${confirmLine}禁止再问任何问题，禁止输出任何配置内容。`;
-  const directive = miss.length
-    ? `\n【本轮任务·硬约束】只补缺的：${miss.join('、')}。一轮只问一个字段（问句里可以列选项，但绝不同时问两个字段），换个自然的新问法；已确认的绝不再提、不复述。问 offer 用中性措辞（如"想给个什么钩子？折扣/满减/包邮，还是别的？"）。【防复读·硬约束】reply 绝不能重复你上一句回复的原文或近似原文；连续追问同一项时必须换角度、给例子或补充新信息。`
-    : `\n${readyDirective}`;
+  // 冲突核实轮（C6.5，2026-10-03 裁决）：真冲突澄清优先于引导确认/常规追问——
+  // 澄清是核验不是采集；先复述旧值再问以哪个为准，只核实这一处，同轮不问别的、不引导确认
+  const conflictDirective = conflict && conflict.slot
+    ? (isEn
+      ? `【冲突核实·硬约束】The user's new wording ("${conflict.new}") differs from what was confirmed earlier ("${conflict.old}"): do NOT ask for confirmation or anything else this turn — restate the earlier value in plain words and ask which one to go with (the new wording, or keep the old one). Verify only this one thing.`
+      : `【冲突核实·硬约束】用户新说法（「${conflict.new}」）与前面已确认的（「${conflict.old}」）不一致：本轮绝不引导确认、绝不再问别的——先用大白话复述原来记的值，再问他这轮要按哪个算（新说法，还是维持原来的）。只核实这一处。`)
+    : '';
+  const directive = conflict && conflict.slot
+    ? `\n${conflictDirective}`
+    : miss.length
+      ? `\n【本轮任务·硬约束】只补缺的：${miss.join('、')}。一轮只问一个字段（问句里可以列选项，但绝不同时问两个字段），换个自然的新问法；已确认的绝不再提、不复述。问 offer 用中性措辞（如"想给个什么钩子？折扣/满减/包邮，还是别的？"）。【防复读·硬约束】reply 绝不能重复你上一句回复的原文或近似原文；连续追问同一项时必须换角度、给例子或补充新信息。`
+      : `\n${readyDirective}`;
   // B4/chips：引擎决定本轮被问槽位并把快捷选项下发给交付层；提示词同步告知口径，保证问句与 chips 一致
   const chipsDirective = Array.isArray(chips) && chips.length
     ? `\n【快捷选项·硬约束】本轮追问若给选项，只准用这几个（顺序不变，口语化带出）：${chips.join(' / ')}。`

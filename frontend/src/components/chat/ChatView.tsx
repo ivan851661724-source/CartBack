@@ -30,10 +30,9 @@ export default function ChatView() {
     chatInput, chatPlaceholder, chips, askedSlot, engine, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, switchTab, setHistoryOpen,
     confirmState, confirmFailed, confirmBusy, confirmPlan,
-    onboardingStep, onboardingSkipped, setOnboardingStep, guideStyle,
     campaigns, pendingBatches,
     lastPlan, notifications,
-    todos, resumeTodo,
+    todos, resumeTodo, welcome,
   } = useApp();
 
   const areaRef = useRef<HTMLDivElement>(null);
@@ -54,8 +53,6 @@ export default function ChatView() {
     && typeof lastAssistant?.content === 'string' && lastAssistant.content.includes('建议')
     ? '建议' : undefined;
   const hasOpportunities = Boolean(opportunities && (opportunities.newCount || opportunities.untargeted));
-  // 引导风格开关：demo=硬编码品牌词（快捷词行已移除）；safe=纯意图词+顶栏串联引导
-  const isDemoGuide = guideStyle === 'demo';
   // 本会话是否已发过邮件（确认卡据此隐藏「可以，去发」）
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
@@ -87,22 +84,6 @@ export default function ChatView() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages.length, streamingText, planShown, streaming, chips, confirmState, confirmFailed, pendingBatches.length, actCampaigns.length, actReceipts.length]);
 
-  // 步骤1→2 自动跳步：确认卡实际出现（planShown='confirm' + planCard 就绪）即推进 ——
-  // 引导跟着产品状态走，不要求「本会话逐字点满 10 条品牌词」（跨会话/自由输入也能正常引导）。
-  // 保持 planShown='confirm'（#1 确认卡持久化），不切 tab（引导浮层已移除，进度由顶栏 HintPill 承载）。
-  // 不再预建草稿（复测 10-03）：草稿唯一创建入口 = 「可以，去发」→ /confirm 服务端权威建稿——
-  // 预建稿会在 confirm 后被当作僵尸稿删除（变体生成白跑一遍），且让刷新后的确认卡召回
-  // 被 P1-9「有草稿不反推」规则压制（A2 刷新续卡失效）。旧后端 404 回退路径保留预建（AppProvider）。
-  const advanced0Ref = useRef(false);
-  useEffect(() => { if (!act?.planCard) advanced0Ref.current = false; }, [act?.planCard]);
-  useEffect(() => {
-    if (!isDemoGuide || onboardingStep !== 0 || advanced0Ref.current) return;
-    if (planShown === 'confirm' && act?.planCard && !streaming) {
-      advanced0Ref.current = true;
-      setOnboardingStep(1);
-    }
-  }, [isDemoGuide, onboardingStep, planShown, streaming, act, setOnboardingStep]);
-
   const focusInput = () => {
     const i = inputRef.current;
     if (i) { i.focus(); i.placeholder = EDIT_HINT; }
@@ -113,11 +94,18 @@ export default function ChatView() {
 
   // C4 goal 槽位级例外（P2-N4 复测 10-03）：goal 的 chips 是「要一个值」的类别入口而非答案本身——
   // 点击把类别词预填进输入框，商家补上具体值（多少单/多少金额）再发送；「我自己定」只聚焦输入框。
-  // 其余槽位的 chips 仍是完整答案，点击即按原文发送。
+  // F1 出口 chip「其他需求」同构（自由输入出口，PRD F1 处理逻辑 4）：只聚焦输入框不发送；
+  // 「好，帮我写一封」「介绍一下其他功能」按原文发送，分别进入 C6 推断补满（→D1）与 F5 功能导览。
   const onChipClick = (c: string) => {
     if (askedSlot === 'goal') {
       setChatInput(c === '我自己定' ? '' : `${c} `);
       setChatPlaceholder(c === '我自己定' ? '说说你要的结果，比如「本月挽回 100 单」' : CHAT_PLACEHOLDER);
+      if (inputRef.current) inputRef.current.focus();
+      return;
+    }
+    if (c === '其他需求') {
+      setChatInput('');
+      setChatPlaceholder('直接说你的需求，比如「上个月加购没付的想捞回来」');
       if (inputRef.current) inputRef.current.focus();
       return;
     }
@@ -160,7 +148,7 @@ export default function ChatView() {
             <div className="ch-av"><NavChat /></div>
                           <div className="ch-copy">
                             <span className="ch-kicker">当前会话</span>
-                            <span className="ch-t">{!onboardingSkipped && onboardingStep < 4 ? '运营助手' : '挽回策略助手'}</span>
+                            <span className="ch-t">挽回策略助手</span>
                           </div>
                           <span className="ch-s" style={engine === 'degraded' ? { color: 'var(--warn2)' } : undefined}>
                             <span className="dot"></span>
@@ -177,21 +165,49 @@ export default function ChatView() {
           </div>
 
           <div className="chat-area" ref={areaRef} aria-live="polite" aria-label="对话消息区">
-            {/* Z4 中性空态：不写死欢迎语——opening（欢迎语/数据开场句）由后端在首条消息后持久化为
-                act.messages[0]，前端只引导发首条消息；上方按需渲染「上次方案」复用卡。 */}
+            {/* Z4 空态（剧本 #23：不输入也见首条气泡）：welcome.eligible 时渲染后端 opening 预览
+                （欢迎语+数据开场句+清单+出口句，与建会话 messages[0] 同源单点生成）+ 出口 chips 3 项；
+                上方按需渲染「上次方案」复用卡与待办卡。无 opening（旧后端）→ 退回中性引导。 */}
             {messages.length === 0 && !streaming && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
                 {lastPlan && <LastPlanCard plan={lastPlan} onUse={() => sendMsg('照上次的来')} />}
                 {todos.length > 0 && <TodosCard todos={todos} onResume={resumeTodo} />}
-                <div style={{
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-                  gap: 12, padding: '56px 16px', color: 'var(--muted)',
-                }}>
-                  <div className="chat-empty-ic"><NavChat /></div>
-                  <div style={{ fontSize: '13.5px', color: 'var(--muted)', textAlign: 'center', lineHeight: 1.7 }}>
-                    把你的想法说给我，比如想挽回哪拨客人
+                {welcome?.eligible && welcome.opening ? (
+                  <>
+                    <div className="msg agent">
+                      <div className="avatar agent"><NavChat /></div>
+                      <div className="bubble">{welcome.opening}</div>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
+                      {(welcome.chips || []).map((c, i) => (
+                        <button
+                          key={`${i}-${c}`}
+                          type="button"
+                          onClick={() => onChipClick(c)}
+                          style={{
+                            display: 'inline-flex', alignItems: 'center', gap: '6px',
+                            padding: '7px 13px', borderRadius: '9px',
+                            border: '0.5px solid #DDE2E8', background: '#fff', color: 'var(--text)',
+                            fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
+                            whiteSpace: 'nowrap', transition: 'all .15s',
+                          }}
+                        >
+                          {c}
+                        </button>
+                      ))}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    gap: 12, padding: '56px 16px', color: 'var(--muted)',
+                  }}>
+                    <div className="chat-empty-ic"><NavChat /></div>
+                    <div style={{ fontSize: '13.5px', color: 'var(--muted)', textAlign: 'center', lineHeight: 1.7 }}>
+                      把你的想法说给我，比如想挽回哪拨客人
+                    </div>
                   </div>
-                </div>
+                )}
               </div>
             )}
 

@@ -2,43 +2,6 @@
  * CartBack v3 前端常量与纯函数 —— 1:1 移植自 app.js 顶部（与引擎 extractNeeds / server matchAudienceByDesc 口径对齐）。
  */
 
-/**
- * 初始引导：品牌基础信息 10 项（快捷描述 chip + 右侧需求收集 checklist 共用）。
- * - msg：点击 chip 时发给助手的那句完整话（驱动 LLM 对话）
- * - val：checklist 右侧展示的短值（具体填充内容，对齐 Figma NEED_POINTS.val）
- */
-export const BRAND_POINTS: { key: string; label: string; msg: string; val: string }[] = [
-  { key: 'brandName', label: '品牌名称', msg: '我的品牌叫 Leo\'s PhoneCase，专门做手机壳的', val: "Leo's PhoneCase" },
-  { key: 'category', label: '品牌类目', msg: '我们主要做手机配件，主打手机壳和贴膜', val: '手机配件 · 手机壳/贴膜' },
-  { key: 'aov', label: '客单价', msg: '客单价大概 30-50 美元，手机壳为主', val: '$30-50' },
-  { key: 'sendTime', label: '发送时段', msg: '我想在晚上 8 点发送挽回邮件', val: '20:00' },
-  { key: 'audience', label: '目标受众', msg: '我要挽回加购未付的客户，主要是 25-35 岁年轻人', val: '加购未付 · 25-35岁' },
-  { key: 'reason', label: '挽回原因', msg: '他们加购了但没付款，可能是价格或运费问题', val: '价格/运费阻碍' },
-  { key: 'discount', label: '折扣力度', msg: '我想给 8 折优惠，再加免邮费', val: '8折 + 免邮' },
-  { key: 'product', label: '产品特色', msg: '我们手机壳主打防摔设计，有 50 多种图案可选', val: '防摔 · 50+图案' },
-  { key: 'goal', label: '营销目标', msg: '希望他们回来完成购买，顺便看看新品', val: '回访复购' },
-  { key: 'frequency', label: '发送频率', msg: '先发一封试试，效果好的话 3 天后再发第二封', val: '首封 + 3天追发' },
-];
-
-/**
- * 初始引导：纯意图快捷词 10 项（guideStyle='safe' 用，真实商家版）。
- * 只表达挽回意图，不带任何具体品牌/品类/价格，避免示例数据覆盖商家真实品牌（P0-4）。
- * 点击行为由 ChatView 控制：全新会话直发，已有上下文只填入输入框待确认。
- */
-export const INTENT_POINTS: { key: string; label: string; msg: string }[] = [
-  { key: 'target', label: '挽回对象', msg: '我想挽回加购了还没付款的客户' },
-  { key: 'reason', label: '流失原因', msg: '他们加购后一直没付款，可能是忘了或者还在犹豫' },
-  { key: 'goal', label: '挽回目标', msg: '希望他们回来把订单完成' },
-  { key: 'hook', label: '优惠钩子', msg: '想给个折扣或者免邮的钩子，具体力度你帮我建议' },
-  { key: 'browse', label: '浏览召回', msg: '也想召回看过商品但没下单的人' },
-  { key: 'dormant', label: '老客唤醒', msg: '还有一批很久没来的老客，想唤醒一下' },
-  { key: 'timing', label: '发送时机', msg: '发送时机什么时候合适？' },
-  { key: 'tone', label: '话术风格', msg: '语气自然一点，别太像促销' },
-  { key: 'cadence', label: '发送节奏', msg: '先发一封试试，效果好再安排跟进' },
-  { key: 'objective', label: '效果目标', msg: '主要目标是把流失的订单捞回来' },
-];
-
-
 export const STAGE_TXT: Record<string, string> = {
   S0: 'S0 接入',
   S1: 'S1 澄清',

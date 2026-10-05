@@ -327,6 +327,10 @@ export interface ApiError {
 /** Z4 首屏欢迎态（GET /api/state 顶层 welcome；缺省 = null）：eligible=商家名下无任何 act */
 export interface WelcomeState {
   eligible: boolean;
+  /** F1·剧本 #23：Z4 预览首条气泡（欢迎语+数据开场句+清单+出口句），与建会话 messages[0] 同源（后端 opening 单点生成） */
+  opening?: string;
+  /** 出口 chips 3 项（好，帮我写一封 / 介绍一下其他功能 / 其他需求） */
+  chips?: string[];
 }
 
 /** F1 数据开场句数据源（GET /api/state 顶层 store_banner；缺省 = null）：connected=店铺已连接 */

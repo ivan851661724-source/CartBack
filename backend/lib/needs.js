@@ -135,6 +135,12 @@ function ensureMemory(memory, now = Date.now()) {
   }
   m.ask_count = ac;
   for (const s of SLOTS) if (!Number.isFinite(Number(m.ask_count[s]))) m.ask_count[s] = 0;
+  // C6.5 拉锯保护计数（2026-10-03 裁决）：同槽澄清 ≤1 次（含 S2），第二次改口直接按 correction 处理
+  const cc = emptyAskCount();
+  if (m.clarif_count && typeof m.clarif_count === 'object') {
+    for (const s of SLOTS) cc[s] = Math.max(0, Number(m.clarif_count[s]) || 0);
+  }
+  m.clarif_count = cc;
   if (!Array.isArray(m.conflicts)) m.conflicts = []; // 未消解的冲突候选（B2 产出 → B4 追问 → C6 兜底）
   return m;
 }

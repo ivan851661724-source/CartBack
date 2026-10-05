@@ -237,28 +237,30 @@ test('剧本 #14 降级补测（Wave 5）：S2 四样齐后连发 3 条闲聊 �
 
 /* ---------------- Wave 4（F1 零配置开场 / A3 商家记忆）追加用例 ---------------- */
 
-test('Wave 4 #1 零配置开场：欢迎语只在首个 act 拼一次；数据开场句先于提问（F1）', () => {
+test('Wave 4 #1 零配置开场：欢迎语只在首个 act 拼一次；清单 + 出口 chips（F1 · 剧本 #23）', () => {
   const { IGDE } = require('../lib/igde');
   const igde = new IGDE({ aiEnabled: false, criticMode: 'off' });
   // 场景一：商家名下无任何 act（含 closed）→ 首条 agent 气泡开头拼接欢迎语
   const first = igde.opening({ hasAnyAct: false, storeBanner: { connected: false } });
   assert.ok(first.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '#1 欢迎语开头一次性拼接');
   assert.equal(first.welcome, true, 'welcome 标识（前端 eligible=false 时不显示）');
-  assert.deepEqual(first.chips, ['加购未付', '浏览未买', '我自己说'], '开场 chips ≤3 且含自由输入出口');
+  assert.ok(first.reply.includes('我还需要的信息'), '首条气泡含「我还需要的信息」清单（无进度数字）');
+  assert.ok(!/\d\s*\/\s*4/.test(first.reply), '清单无进度数字（F4）');
+  assert.deepEqual(first.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求'], '出口 chips 3 项（剧本 #23）');
   // 场景二：老用户恢复会话 / 新会话（名下已有 act）→ 不再出现欢迎语
   const second = igde.opening({ hasAnyAct: true, storeBanner: { connected: false } });
   assert.ok(!second.reply.includes('欢迎使用百客'), '第二个 act 起不再拼欢迎语');
-  // 场景三：已连接店铺 → 店铺真实数据先于提问 + 数据式 chips
+  // 场景三：已连接店铺 → 店铺真实数据先于清单 + 出口 chips
   const data = igde.opening({
     hasAnyAct: false,
     storeBanner: { connected: true, store_name: 'LunaGlow', weekly_abandoned_count: 214, aov: 45, abandoned_value: 9630, currency: 'USD' }
   });
   const iW = data.reply.indexOf('欢迎使用百客');
   const iD = data.reply.indexOf('已连接LunaGlow');
-  const iQ = data.reply.indexOf('发给谁');
-  assert.ok(iW < iD && iD < iQ, '数据先于提问');
+  const iL = data.reply.indexOf('我还需要的信息');
+  assert.ok(iW < iD && iD < iL, '数据先于清单（数据先于提问）');
   assert.ok(data.reply.includes('本周214个加购未付'), '数据开场句');
-  assert.ok(data.chips.length <= 3 && data.chips.includes('我自己说'), 'chips ≤3 且含「我自己说」');
+  assert.ok(data.chips.length <= 3, 'chips ≤3（出口 3 项）');
 });
 
 test('Wave 4 A3 商家记忆：方案沉淀 prefs → 新 act「照上次的来」预填 inferred + 复述；否认清空', async () => {

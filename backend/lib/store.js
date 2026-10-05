@@ -21,6 +21,7 @@ const SCHEMA = {
     plan_card: 'JSON',            // Wave 2 D3：confirm 产出的服务端权威 planCard（S3 可回读；S2 改参后作废）
     execution_snapshot: 'JSON',   // Wave 2 D3：confirm 冻结的四字段快照（audience/reach_count/discount/estGmv），闸门⑤ diff 依据
     pending_ops: 'JSON',          // Wave 3 I1/I3：待确认的批次计划 {batches:[...]} / 重发确认 {resend:{...}}（batch_plan 阶段不建 campaigns 行，确认才建）
+    pending_tour: 'JSON',         // Wave F5 功能导览：菜单轮挂起标记（true=等下一轮选中；讲解/让路即清）
     resumed_from: 'TEXT'          // Wave 5 A4：由哪个收口会话 resume 而来（待办恢复留痕；新建会话为 null）
   },
   drafts: {

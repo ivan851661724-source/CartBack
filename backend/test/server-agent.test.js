@@ -93,10 +93,13 @@ test('agent context configuration and metrics work through the HTTP API', async 
     method: 'POST', headers, body: '{}'
   });
   const { act } = await actResponse.json();
-  // PRD v2 契约：memory 含 extras/prefs/ask_count；act 含 code_status/filled_count
+  // PRD v2 契约：memory 含 extras/prefs/ask_count/clarif_count（C6.5 拉锯保护计数）；act 含 code_status/filled_count
   assert.deepEqual(act.memory, {
     facts: [], decisions: [], corrections: [],
-    extras: [], prefs: {}, ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 }, conflicts: []
+    extras: [], prefs: {},
+    ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    conflicts: []
   });
   assert.equal(act.code_status, 'none');
   assert.equal(act.filled_count, 0);
@@ -124,7 +127,10 @@ test('agent context configuration and metrics work through the HTTP API', async 
   assert.equal(stored.filled_count, 4, 'filled_count 落库计算（一句说全 → 四槽）');
   assert.deepEqual(stored.memory, {
     facts: [], decisions: [], corrections: [],
-    extras: [], prefs: {}, ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 }, conflicts: []
+    extras: [], prefs: {},
+    ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    conflicts: []
   });
   assert.equal(stored.stage, 'S2', '四槽齐 → S2');
   assert.equal('agentProfile' in state, false);

@@ -105,7 +105,7 @@ test('P0 主链 E2E：建会话契约 + 满4/4预览卡落库可召回 + 冲突�
   const created = await api('/api/act', { method: 'POST', body: { preset: { audience: '加购未付客户' } } });
   assert.equal(created.status, 200);
   assert.ok(Array.isArray(created.json.chips) && created.json.chips.length >= 3, '开场 chips 顶层下发');
-  assert.ok(created.json.chips.includes('我自己说'), '开场 chips 含自由输入出口');
+  assert.ok(created.json.chips.includes('其他需求'), '开场 chips 含自由输入出口（F1 出口 chips · 剧本 #23）');
   assert.equal(typeof created.json.welcome, 'boolean');
   assert.ok(created.json.store_banner && typeof created.json.store_banner === 'object');
   const actId = created.json.act.id;

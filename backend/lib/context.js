@@ -128,6 +128,7 @@ function createEmptyMemory() {
     extras: [],
     prefs: {},
     ask_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
+    clarif_count: { audience: 0, reason: 0, offer: 0, goal: 0 },
     conflicts: []
   };
 }
@@ -264,6 +265,12 @@ function normalizeMemory(memory) {
   if (memory.ask_count && typeof memory.ask_count === 'object') {
     for (const slot of ['audience', 'reason', 'offer', 'goal']) {
       out.ask_count[slot] = Math.max(0, Math.trunc(Number(memory.ask_count[slot]) || 0));
+    }
+  }
+  // C6.5 拉锯保护计数（2026-10-03 裁决）：同槽澄清 ≤1 次（含 S2）
+  if (memory.clarif_count && typeof memory.clarif_count === 'object') {
+    for (const slot of ['audience', 'reason', 'offer', 'goal']) {
+      out.clarif_count[slot] = Math.max(0, Math.trunc(Number(memory.clarif_count[slot]) || 0));
     }
   }
   return out;

@@ -119,6 +119,9 @@ test('F1：首个 act 拼欢迎语一次性；第二个 act 不拼；state 顶�
   // 名下无任何 act → welcome.eligible=true；store_banner 已连接（mock 店）
   const st0 = await api('/api/state');
   assert.equal(st0.json.welcome.eligible, true, '无 act → 欢迎语资格');
+  assert.ok(st0.json.welcome.opening && st0.json.welcome.opening.includes('欢迎使用百客'), 'Z4 opening 预览随 state 下发（剧本 #23：不输入也见首条气泡）');
+  assert.ok(st0.json.welcome.opening.includes('我还需要的信息'), 'opening 预览含清单');
+  assert.deepEqual(st0.json.welcome.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求'], '出口 chips 3 项随 state 下发');
   assert.equal(st0.json.last_plan, null, '尚无确认方案 → last_plan=null');
   assert.equal(st0.json.store_banner.connected, true, 'mock 店已连接');
   assert.equal(typeof st0.json.prefs, 'object', 'state 顶层 prefs 字段在');
@@ -129,7 +132,7 @@ test('F1：首个 act 拼欢迎语一次性；第二个 act 不拼；state 顶�
   const firstMsg = a1.json.act.messages[0].content;
   assert.ok(firstMsg.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '首条气泡开头拼欢迎语');
   assert.equal(a1.json.welcome, true);
-  assert.ok(Array.isArray(a1.json.chips) && a1.json.chips.includes('我自己说'), '开场 chips 含自由输入出口');
+  assert.ok(Array.isArray(a1.json.chips) && a1.json.chips.includes('其他需求'), '开场 chips 含自由输入出口（F1 出口 chips · 剧本 #23）');
   assert.equal(a1.json.store_banner.connected, true, 'act 响应带 store_banner');
 
   // 第一个 act 存在后 → welcome.eligible 翻 false；第二个 act 不再拼欢迎语

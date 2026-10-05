@@ -1878,6 +1878,13 @@ const server = http.createServer(async (req, res) => {
       const extras = buildStateExtras(req.userId, scopeOpts(req));
       const storeBanner = await buildStoreBanner(req.userId, scopeOpts(req));
       const so = scopeOpts(req);
+      // F1 · 剧本 #23：全新账号不输入也要看到首条气泡（欢迎语+数据开场句+清单+出口 chips）——
+      // opening 与建会话 messages[0] 同源单点生成（igde.opening），此处只作 Z4 预览，不建 act
+      if (extras.welcome.eligible) {
+        const op = igde.opening({ hasAnyAct: false, storeBanner });
+        extras.welcome.opening = op.reply;
+        extras.welcome.chips = op.chips;
+      }
       return sendJson(res, 200, {
         status: cfg.status(config),
         engine: engineOnline() ? 'online' : 'degraded',   // PRD v2：llm 熔断 closed→online，open/half-open→degraded
@@ -2024,6 +2031,7 @@ const server = http.createServer(async (req, res) => {
           agentProfile: store.getAgentProfile(req.userId),
           executors: makeCampaignExecutor(req.userId, scopeOpts(req)),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
           reusePrefs: latestPrefsFor(req.userId, act.id, scopeOpts(req)),   // Wave 4 A3②：复用意图的 prefs 数据源
+          storeBanner: await buildStoreBanner(req.userId, scopeOpts(req)),  // F1 出口「好，帮我写一封」推断受众用（有数据带人数）
           persist: () => store.upsertAct(act)
         });
         persistAgentProfile(r, req.userId);
@@ -2078,6 +2086,7 @@ const server = http.createServer(async (req, res) => {
           agentProfile: store.getAgentProfile(req.userId),
           executors: makeCampaignExecutor(req.userId, scopeOpts(req)),   // Wave 3：批次/运维执行器（按请求注入，带 userId 作用域）
           reusePrefs: latestPrefsFor(req.userId, act.id, scopeOpts(req)),   // Wave 4 A3②：复用意图的 prefs 数据源
+          storeBanner: await buildStoreBanner(req.userId, scopeOpts(req)),  // F1 出口「好，帮我写一封」推断受众用（有数据带人数）
           onReplyToken,
           persist: () => store.upsertAct(act)
         });

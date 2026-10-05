@@ -56,11 +56,68 @@ const CORRECTION_TONE_RE = /(不是|不对|改成|改为|纠正|更新|换成|�
 // 注意：「其实」不进修正语气表——PRD 剧本 #4 明确「其实主要是年轻人」类表述是冲突澄清（追问一次），
 // 不是静默覆盖；「其实」入表会让 demographic 冲突永远绕过 C6（真模型矩阵 m10 实测）。
 
+// B2.3 同义重申豁免 · 词表（2026-10-03 裁决③「语义同义走词表判定」）：同组内互为同义，
+// 命中按同值处理（不追问、不重复计数）。PRD 样例：「忘了付款」≈「忘记结账」。
+// 只收同一口径的不同叫法；加购未付 ≠ 下单未付（剧本 #17 两批分立）、比价 ≠ 犹豫（话术方向不同），绝不并组。
+const SEMANTIC_SAME_GROUPS = [
+  // reason：忘记结账族（chips 选项「忘记结账」与口语「忘了付款/没来得及付」互为同义）
+  ['忘记结账', '忘了结账', '忘记付款', '忘了付款', '忘记付', '忘了付', '没来得及结账', '没来得及付款', '忘记下单', '忘了下单'],
+  // audience：老客唤醒族
+  ['沉睡 / 流失老客', '沉睡老客', '很久没来的老客', '很久没来的客户', '老客户', '流失老客', '老客'],
+  // audience：加购未付族
+  ['加购未付客户', '加购没付客户', '加购未付款', '加购了没付款', '加购没付款'],
+  // audience：下单弃付族
+  ['弃购 / 下单未付客户', '弃购未付', '弃购', '下单未付', '下单没付'],
+  // audience：浏览未买族
+  ['浏览未买客户', '浏览没买', '浏览未下单', '逛了没买', '看了没买'],
+];
+
 // —— Wave 4 F2 算账意图（对话内问「这批人值多少钱 / 值不值」→ 确定性算账，与账本同口径）——
 const LEDGER_RE = /(值多少|值不值|划不划算|能赚多少|赚多少|能回多少|值几个钱|算.{0,4}账)/i;
 // —— Wave 4 A3 复用意图（新会话首条消息「照上次的来」→ prefs 预填）/ 否认复用（清预填）——
 const REUSE_RE = /(照上次的?来?|跟(上次|上回)一样|和(上次|上回)一样|上个月那套|上次那套|按上次的?|照旧)/i;
 const REUSE_DENY_RE = /(别用|不用|不要用|别照|不照|别按|不按|别跟|不跟|别拿|不拿|不是照|不是跟|不是|没照|没跟|不对，?不是).{0,3}(上次|上回|上个月|那套)/i;
+
+// —— F1 出口意图（2026-10-03 重写）：「好，帮我写一封」→ 缺槽 C6 推断补满 → D1（不给缺槽直出邮件开口）。
+//    整句锚定：带业务内容的「帮我写一封…挽回邮件」不算出口意图，走正常采集。——
+const WRITE_INTENT_RE = /^(?:好[，,]?)?(?:帮我写一封|直接写一封|开始写吧|就按这些写吧)[。.！!～~\s]*$/;
+
+// —— F5 功能导览流（2026-10-03 新增 · P1 · 独立旁路）：全程不写槽、不动 needs、不推进 stage、
+//    不触发 E5 离题判定；商家中途输入业务内容 → 导览立即让路（pending_tour 下一轮即清）。——
+//    触发收紧：「介绍…功能」必须带「其他/其它」（PRD 触发语「介绍一下其他功能」），
+//    防「介绍一下产品功能」类业务句被劫持进导览。
+const TOUR_TRIGGER_RE = /(介绍|看看|讲讲|了解).{0,6}(其他|其它).{0,2}功能|功能介绍|有什么功能|都有(什么|哪些)功能|能做(什么|哪些)/i;
+// 菜单与左侧导航同源（助手除外）；PRD 口径：与左侧导航同源（406-2671 第 5 项「订单」与 616-7875「设置」两帧不一致，以导航为准）
+const TOUR_MENU = ['邮件配置', '数据看板', '用户', '竞品', '设置'];
+// 讲解话术 = 设计稿定稿逐字收录（句子不改，标点随排版微调）；blocked 段依赖另立更新项
+//（邮件页：发送策略编辑 / 按条件检索；看板页：报告检索与行动建议）——能力落地前对应气泡不播放。
+const TOUR_SCRIPTS = {
+  '邮件配置': {
+    lines: [
+      '点击左侧邮件tab查看所有生成的历史邮件。',
+      '生成邮件预览后会出现对应的详情卡片，点击底部按钮选择你想进行的操作。',
+    ],
+    blocked: [
+      '预览和编辑功能支持编辑文本内容和样式，调整图片提示词，以及调整发送策略。',
+      '也可以直接询问我来查找特定的邮件。',
+      '我会提供相应的邮件清单并协助您进行相关的查找和发送等操作。',
+    ],
+    exampleChips: [], // 检索能力落地后随「也可以直接询问我…」段挂示例问句 chips
+  },
+  '数据看板': {
+    lines: [
+      '点击左侧数据看板来查看过往邮件获单效果的数据统计。',
+      '优先关注这一行，初步判断近期邮件获单效果。',
+      '转化漏斗哪一栏的百分比掉得最多，就优先优化哪一环。',
+      '回流GMV，这个量化投放指标。',
+    ],
+    blocked: [
+      '也可以直接询问我来查找特定的报告，或是下一步的行动建议。',
+    ],
+    exampleChips: [], // 报告检索落地前该气泡不播放（示例问句 chips 不可点，随段挂起）
+  },
+};
+
 
 // —— Wave 5 I5 批次状态汇报意图（「现在都在跑啥」「几个批次怎么样了」「批次状态」）——
 const BATCH_STATUS_RE = /(现在都在跑啥|都在跑啥|在跑啥|批次状态|批次怎么样|几个批次|批次都怎么样|批次情况|汇报一下批次|批次汇报)/i;
@@ -493,11 +550,14 @@ class IGDE {
   }
 
   /** 会话创建时一次性下发 S0 开场白（不推进阶段）。
-   *  Wave 4 F1 零配置开场：
-   *  - opts.hasAnyAct=true（商家名下已存在任何 act，含 closed）→ 不拼欢迎语（欢迎语一生只在首次出现）；
-   *  - opts.storeBanner.connected 且有数据 → 数据先于提问：
-   *    「已连接{店名}。本周{N}个加购未付（客单¥X，弃购总额¥Y）」+ 数据式 chips（≤2 数据 chip +「我自己说」）；
-   *  - 未连接 / 无店铺数据 → 问一句话开场（不硬编数据），chips = ['加购未付','浏览未买','我自己说']。
+   *  Wave 4 F1 零配置开场 · 2026-10-03 重写（更新摘要「初始引导对话流化」+ 剧本 #23）：
+   *  - 首条气泡 = 欢迎语（仅首次：hasAnyAct=false，欢迎语一生只在首次出现）
+   *    + 数据开场句（已连接有数据时数据先于提问）或无数据一句话开场
+   *    + 「我还需要的信息」清单（缺失四槽、价值化话术、无进度数字；extras 可选项以附注呈现）
+   *    + 「需要现在就编写邮件吗？」出口；
+   *  - 出口 chips 3 项：好，帮我写一封 / 介绍一下其他功能 / 其他需求（自由输入出口）。
+   *    「好，帮我写一封」→ C6 推断补满 → D1（_writeIntentTurn 承接，不给缺槽直出邮件开口）；
+   *    「介绍一下其他功能」→ F5 功能导览（独立旁路）。
    *  返回 { reply, stage, chips, welcome }；welcome=是否拼了欢迎语（前端可据此高亮首屏）。 */
   opening(opts = {}) {
     const banner = (opts.storeBanner && typeof opts.storeBanner === 'object') ? opts.storeBanner : null;
@@ -508,23 +568,76 @@ class IGDE {
     const cur = banner && String(banner.currency) === 'USD' ? '$' : '¥';
     const parts = [];
     if (!opts.hasAnyAct) parts.push('欢迎使用百客，我是你的专属智能邮件营销助手。');
-    let chips;
     if (hasData) {
       if (banner.store_name) parts.push(`已连接${banner.store_name}。`);
       if (count > 0) {
         const fmt = (n) => (Number.isInteger(n) ? String(n) : String(+n.toFixed(2)));
         parts.push(`本周${count}个加购未付（客单${cur}${fmt(aov)}，弃购总额${cur}${fmt(total)}）。`);
       }
-      parts.push('咱们先把「发给谁」定了，先捞这拨？');
-      chips = [];
-      if (count > 0) chips.push(`加购未付 ${count} 人`);
-      if (chips.length < 2) chips.push('浏览未买');
-      chips.push('我自己说');
     } else {
+      // 无店铺数据：开场改问一句话（不弹表单、不硬编数据），清单照常
       parts.push('这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。');
-      chips = ['加购未付', '浏览未买', '我自己说'];
     }
-    return { reply: parts.join(''), stage: 'S0', chips, welcome: !opts.hasAnyAct };
+    // 「我还需要的信息」清单：缺失四槽按 B4 价值优先级排列，价值化话术、只列文字状态（无进度数字）
+    parts.push('我还需要的信息：');
+    parts.push('· 发给谁——想召回哪拨客人');
+    parts.push('· 为什么流失——顾客卡在了哪一步');
+    parts.push('· 给什么钩子——折扣、免邮还是小赠品');
+    parts.push('· 想拿到什么结果——挽回多少单，还是先跑通流程');
+    parts.push('（发送时段、产品特色这些想说也可以说——可选，能提升回流率。）');
+    parts.push('需要现在就编写邮件吗？');
+    const chips = ['好，帮我写一封', '介绍一下其他功能', '其他需求'];
+    return { reply: parts.join('\n'), stage: 'S0', chips, welcome: !opts.hasAnyAct };
+  }
+
+  /** F5 功能导览（独立旁路，2026-10-03 新增 P1 可裁）。
+   *  返回 null = 本轮无导览语义（含让路：pending_tour 挂起但输入非菜单项 → 清挂起、回正常流水线）。
+   *  剧本 #22：菜单 chips ≤5 且与导航同源；讲解含操作路径；needs / stage / 清单零变化；
+   *  被依赖标注挡住的话术段（发送策略 / 检索能力未落地）不出现在导览序列里。 */
+  _tourTurn(act, userText) {
+    const t = String(userText || '').trim();
+    // ① 菜单挂起轮：命中菜单项 → 讲解；否则让路
+    if (act.pending_tour) {
+      act.pending_tour = null;
+      const picked = TOUR_MENU.find(m => t === m || t.replace(/[的吗呢吧。.！!？?\s]+$/g, '') === m);
+      if (!picked) return null; // 业务内容 → 导览立即让路
+      const script = TOUR_SCRIPTS[picked];
+      const lines = script ? [...script.lines] : [];
+      const reply = lines.length
+        ? `${picked}是这样用的：\n${lines.map(l => `· ${l}`).join('\n')}`
+        : `${picked}在左侧导航里，点开就能用。`;
+      return { reply, chips: (script && script.exampleChips) || [] };
+    }
+    // ② 触发轮：入口问句 + 菜单 chips（挂起，等下一轮选中）
+    if (TOUR_TRIGGER_RE.test(t)) {
+      act.pending_tour = true;
+      return { reply: '你需要了解哪个功能？', chips: TOUR_MENU.slice() };
+    }
+    return null;
+  }
+
+  /** F1 出口意图「好，帮我写一封」（2026-10-03 重写）：缺槽 C6 推断补满 → 进 S2 出确认卡。
+   *  推断口径（全部标 inferred，卡上「我推断的，可改」；绝不编造数值目标）：
+   *  audience=店铺加购未付（有数据带人数）/ prefs / 加购未付客户；reason=忘记结账（行业最常见）；
+   *  offer=待定（C3：无数值不编默认值）；goal=先跑通流程（C4 合法非数值目标）。 */
+  _writeIntentTurn(act, opts = {}) {
+    const now = Date.now();
+    act.memory = ensureMemory(act.memory, now);
+    const banner = (opts.storeBanner && typeof opts.storeBanner === 'object') ? opts.storeBanner : null;
+    const count = Math.max(0, Number(banner && banner.weekly_abandoned_count) || 0);
+    const put = (slot, value) => {
+      if (!value || act.needs[slot]) return;
+      act.needs[slot] = { value: clampNeedValue(value), source: 'inferred', at: now };
+    };
+    put('audience', count > 0 ? `加购未付客户（约 ${count} 人）` : '加购未付客户');
+    put('reason', '忘记结账');
+    put('offer', '待定');
+    put('goal', '先跑通流程');
+    this._advanceStage(act, '');
+    return {
+      reply: '好，缺的几样我先按常见打法补上——都是我推断的，哪样不对在下面的确认卡里直接改，改完再确认。',
+      chips: []
+    };
   }
 
   /** 追问单点字段；与上一句重复则轮换说法（桩模型路径的防复读；真模型由提示词硬约束 + 交付层相似度检查兜底） */
@@ -554,13 +667,27 @@ class IGDE {
     return map[field] || '加购未付的客户';
   }
 
-  /** 复读判定：去空白/标点后全文相等，或一方（≥12 字符）被另一方完整包含 */
+  /** 复读/同值判定（B2.3 豁免硬规则①②）：去空白/标点/虚词（的/了/是/吧…）/区间连词（到/至）后
+   *  全文相等，或一方（≥12 字符）被另一方完整包含——12 字守卫防「10% off ⊂ 110% off」类数字包含误豁免。 */
   _similarEnough(a, b) {
-    const norm = (s) => String(s || '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    const norm = (s) => String(s || '').toLowerCase()
+      .replace(/[\s\p{P}\p{S}]+|[的了吗呢吧啊嘛哦呀哈是]|那批人|这批人|那拨人|这拨人|那批|这批|那拨|这拨|的客户|的客人|的人群|客户|客人|顾客|人群|为主|到|至/gu, '');
     const x = norm(a), y = norm(b);
     if (!x || !y) return false;
     if (x === y) return true;
     return (x.length >= 12 && y.includes(x)) || (y.length >= 12 && x.includes(y));
+  }
+
+  /** B2.3 同义重申豁免 · 词表判定（2026-10-03 裁决）：同组内互为同义 → 按同值处理
+   *  （不追问、不重复计数、不复述为新信息、不产冲突候选）。
+   *  只收明显同义组，拿不准的不收——宁可真冲突当面核实，不静默吞掉真改口。 */
+  _sameSemantic(a, b) {
+    const x = String(a || ''), y = String(b || '');
+    if (!x.trim() || !y.trim()) return false;
+    for (const g of SEMANTIC_SAME_GROUPS) {
+      if (g.some(w => x.includes(w)) && g.some(w => y.includes(w))) return true;
+    }
+    return false;
   }
 
   /** B4 选问（合并后状态）：audience > reason > offer > goal 取第一个空槽；
@@ -573,16 +700,16 @@ class IGDE {
     return fresh || miss[0];
   }
 
-  /** B4 决策（B2 合并后调用）：冲突澄清优先于常规追问；无缺失 → 不问（转 S2 由 _advanceStage 处理）。
-   *  注意：S2 四槽全满态不挂冲突追问（p13 验收基线：确认阶段的复述/看卡话术不反问），冲突候选
-   *  交由 C6 兜底与显式 correction 通道消化——若 PRD 后续裁决 S2 冲突也需当面核实，再改此处次序 */
+  /** B4 决策（B2 合并后调用）：真冲突澄清优先于一切——S1 常规追问、S2 引导确认都让位。
+   *  C6.5（2026-10-03 裁决）：S2 全满态真冲突的澄清优先于引导确认（澄清是核验不是采集）；
+   *  误伤源（同义重申）已在 B2 豁免，能到这里的是真冲突——原「S2 不挂冲突」的回退门就此重启。 */
   _decideQuestion(act, turnResult) {
-    const miss = this.missingFields(act);
-    if (!miss.length) return { slot: null, chips: [], kind: 'none' };
     const newConflict = (turnResult.conflictsNew || [])[0];
     if (newConflict) {
       return { slot: newConflict.slot, chips: conflictChips(newConflict.slot), kind: 'conflict' };
     }
+    const miss = this.missingFields(act);
+    if (!miss.length) return { slot: null, chips: [], kind: 'none' };
     const probe = this._nextProbeSlot(act);
     return probe
       ? { slot: probe, chips: SLOT_CHIPS[probe] || [], kind: 'probe' }
@@ -643,6 +770,46 @@ class IGDE {
       };
     }
 
+    // —— F5 功能导览（独立旁路 · 2026-10-03 新增 P1）：菜单轮 pending_tour 挂起，下一轮
+    //    命中菜单项 → 讲解；输入任何业务内容 → 立即让路（清 pending_tour 回正常流水线）。
+    //    全程不写槽、不动 needs、不推进 stage、不触发 E5 离题判定；话术为设计稿定稿，不进护栏改写。
+    //    engine 按配置档位上报（短轮未调模型，徽标不得因此谎报降级）——
+    if (act.pending_tour || TOUR_TRIGGER_RE.test(String(userText || '').trim())) {
+      const tourTurn = this._tourTurn(act, userText);
+      if (tourTurn) {
+        act.messages.push({ role: 'user', content: userText, ts: nowMs });
+        act.messages.push({ role: 'assistant', content: tourTurn.reply, ts: nowMs });
+        act.updated_at = nowMs;
+        await doPersist();
+        return {
+          reply: tourTurn.reply, stage: act.stage, needs: act.needs, planCard: null,
+          guardrailHits: [], engine: this._engineOf(this.aiEnabled),
+          chips: tourTurn.chips, askedSlot: null, agentMeta: this._agentMeta(runtime)
+        };
+      }
+    }
+
+    // —— F1 出口意图「好，帮我写一封」：缺槽 C6 推断补满（推断项卡上标「我推断的，可改」）
+    //     → D1 确认卡（不给「缺槽直出邮件」开口）；四槽已齐则交回正常 S2 流程。——
+    if (WRITE_INTENT_RE.test(String(userText || '').trim()) && this.missingFields(act).length > 0) {
+      const writeTurn = this._writeIntentTurn(act, opts);
+      act.messages.push({ role: 'user', content: userText, ts: nowMs });
+      act.messages.push({ role: 'assistant', content: writeTurn.reply, ts: nowMs });
+      act.updated_at = nowMs;
+      // F1 处理逻辑 4：推断补满 → D1 确认卡——在线档位产出 S2 无码预览卡（确认卡数据源，
+      // 推断项带「我推断的，可改」）；降级档位不出卡（剧本 #13，S2 停住明示方案生成暂停）
+      let writePlanCard = null;
+      if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
+        writePlanCard = this.producePlanCard(act, { locale: opts.locale, code: null });
+      }
+      await doPersist();
+      return {
+        reply: writeTurn.reply, stage: act.stage, needs: act.needs, planCard: writePlanCard,
+        guardrailHits: [], engine: this._engineOf(this.aiEnabled),
+        chips: writeTurn.chips, askedSlot: null, agentMeta: this._agentMeta(runtime)
+      };
+    }
+
     // —— 边界（负空间）：仅当用户真触发越界需求才处理 ——
     //   强信号命中 → scopeBoundary 返回拒绝话术。
     //   · 硬拒绝（A/B/C 类：违法 / 非邮件渠道 / 非邮件任务）：两种模式都引擎级拦截（安全 fail-safe）。
@@ -686,9 +853,13 @@ class IGDE {
     let aiDead = false;
     let usedAI = false;
     const preProbe = this._nextProbeSlot(act); // 提示词注入的单点追问指令（B4 预决策，合并后可能变化）
+    // C6.5（2026-10-03 裁决）AI 预检：本轮词表命中与已确认值的「真冲突」预判（与 B2 同款豁免规则）。
+    // 命中 → 提示词把本轮从「引导确认/常规追问」切到「先核实」，模型直接问澄清——
+    // 仅影响提示词方向；冲突判定的权威仍是 B2 合并。
+    const preConflict = this._preConflictPreview(act, userText);
     if (this.aiEnabled && this.callAI) {
       try {
-        env = await this._aiCoach(act, userText, runtime, bufferedOnReplyToken, preProbe);
+        env = await this._aiCoach(act, userText, runtime, bufferedOnReplyToken, preProbe, preConflict);
         memoryPatch = env.memoryPatch || null;
         profilePatch = env.profilePatch || null;
         usedAI = true;
@@ -710,10 +881,11 @@ class IGDE {
     runtime.slotUpdatesRejected += Math.max(0, (env.slotUpdates || []).length - grounded.length);
     // B2 更新列表：envelope 优先，词表覆盖同槽（kwTouched = 用户原话逐字命中，短时记忆语义=原话为准）
     const bySlot = {};
-    for (const u of grounded) bySlot[u.slot] = bySlot[u.slot] || u;
+    const envSlots = new Set(); // 有 envelope（模型裁决）佐证的槽：S2 冻结期叙述守卫对它们不生效
+    for (const u of grounded) { bySlot[u.slot] = bySlot[u.slot] || u; envSlots.add(u.slot); }
     if (kwActive) {
       for (const f of NEEDED_FIELDS) {
-        if (kw[f]) bySlot[f] = { slot: f, value: kw[f], inferred: false, kw: true };
+        if (kw[f]) bySlot[f] = { slot: f, value: kw[f], inferred: false, kw: true, env: envSlots.has(f) };
       }
     }
     // 词表兜底补缺（与 B1 kw 补缺同一哲学，真模型矩阵 m12/m15 实测）——必须在 turn 构造前：
@@ -865,7 +1037,7 @@ class IGDE {
     let reply = env.reply || '';
     let askedSlot = null;
     if (!reply) {
-      const stub = this._stubReply(act, userText, question);
+      const stub = this._stubReply(act, userText, question, mergeResult.conflictsNew);
       reply = stub.reply;
       if (stub.asked) askedSlot = question.slot;
     } else {
@@ -885,9 +1057,16 @@ class IGDE {
         question = { slot: verify.slot, chips: conflictChips(verify.slot), kind: 'conflict' };
       }
     }
+    // 澄清轮形态（C6.5②，2026-10-03 裁决）：S2 全满态真冲突 → 本轮只发澄清问句＋冲突 chips，
+    // 不引导确认、不出预览卡（澄清是核验不是采集；落定后下一轮恢复收口）。在线模型若按四齐口径
+    // 只出了确认引导，此处整句替换为标准澄清问句，杜绝「引导确认 + 澄清」两问混合。
+    if (act.stage === 'S2' && question.kind === 'conflict' && usedAI && !aiDead) {
+      reply = this._conflictAskLine(act, question, mergeResult.conflictsNew);
+    }
     // S2 收口引导兜底（B5）：四要素齐且在 S2，模型回复缺确认引导时补一句（真模型 30 轮实测
-    // 「这就帮你生成」类抢跑——生成动作只能走 /confirm 端点，话术必须把用户引向确认卡）
-    if (act.stage === 'S2' && this.missingFields(act).length === 0 && !/确认|核对|行不/.test(reply)) {
+    // 「这就帮你生成」类抢跑——生成动作只能走 /confirm 端点，话术必须把用户引向确认卡）。
+    // 例外：本轮是冲突澄清轮（C6.5②）——澄清优先于引导确认，不许混入收口话术。
+    if (act.stage === 'S2' && this.missingFields(act).length === 0 && question.kind !== 'conflict' && !/确认|核对|行不/.test(reply)) {
       reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
     }
 
@@ -956,6 +1135,10 @@ class IGDE {
     if (askedSlot) {
       act.memory = ensureMemory(act.memory, nowMs);
       act.memory.ask_count[askedSlot] = (Number(act.memory.ask_count[askedSlot]) || 0) + 1;
+      // C6.5④ 拉锯保护计数：澄清轮实际发出 → 该槽 clarif_count +1（含 S2；下一次改口直接按 correction 处理）
+      if (question.kind === 'conflict') {
+        act.memory.clarif_count[askedSlot] = (Number(act.memory.clarif_count[askedSlot]) || 0) + 1;
+      }
       for (const c of act.memory.conflicts || []) {
         if (c.slot === askedSlot) c.asked = true;
       }
@@ -973,11 +1156,12 @@ class IGDE {
     //  - S3（confirm 已通过）→ 回权威卡 act.plan_card（含店铺真实回执码）；
     //  - 四要素齐 + 本轮在线（真模型 envelope）→ 产出「无码预览卡」（code_status=pending，
     //    真实出卡在 /confirm 建码成功之后 —— E2 红线：卡面绝不出现未真实存在的折扣码）；
-    //  - 降级轮（桩 / AI 失败）不出 planCard（剧本 #13：降级 4/4 时 stage=S2 且不出 planCard）。
+    //  - 降级轮（桩 / AI 失败）不出 planCard（剧本 #13：降级 4/4 时 stage=S2 且不出 planCard）；
+    //  - 澄清轮不出预览卡（C6.5②，2026-10-03 裁决：澄清轮只问不推卡，落定后下轮恢复收口）。
     let planCard = null;
     if (act.stage === 'S3' && act.plan_card) {
       planCard = act.plan_card;
-    } else if (usedAI && !aiDead && this.missingFields(act).length === 0) {
+    } else if (usedAI && !aiDead && this.missingFields(act).length === 0 && question.kind !== 'conflict') {
       planCard = this.producePlanCard(act, { locale: opts.locale, code: null });
     }
 
@@ -1593,6 +1777,24 @@ class IGDE {
         continue;
       }
       if (prev && !hasTone) {
+        // 同义重申豁免（B2.3，2026-10-03 裁决）：归一化相等 / 完整包含 / 词表同义 → 同值处理
+        // （不追问、不重复计数、不复述为新信息、不产冲突候选）——S2 确认期的口径复述从此不再误伤
+        if (this._similarEnough(prev.value, value) || this._sameSemantic(prev.value, value)) continue;
+        // S2 冻结期词表叙述守卫（剧本 #13/#16 基线）：四槽已满的确认期，纯词表命中的已填槽多为
+        // 叙述性提及（如「加购未付的客户忘了付款，把方案卡给我看看」）——不产冲突候选；
+        // S2 真冲突的语义裁决权在在线模型 envelope（B1 critic 锚定原话），真改口走 correction 语气。
+        if (act.stage === 'S2' && u.kw === true && u.env !== true) continue;
+        // 拉锯保护（C6.5④）：同槽澄清 ≤1 次（含 S2）；第二次改口不再追问，直接按 correction 落账（留痕）
+        const clarifN = Number((mem.clarif_count || {})[slot]) || 0;
+        if (clarifN >= 1) {
+          const oldVal = prev.value;
+          needs[slot] = { value, source: 'explicit', at: now };
+          corrected.add(slot);
+          mem.corrections.push({ slot, old: oldVal, new: value, at: now });
+          mem.corrections = mem.corrections.slice(-MAX_CORRECTIONS);
+          correctionsAdded++;
+          continue;
+        }
         // 冲突：现值已填 + 本轮消息无修正语气 → 不覆盖，产出冲突候选转 B4 澄清。
         // kw 原话命中同规则：触发词是用户原话，但写入值是词表归一化短语——
         // 静默覆盖会把用户已确认的具体值（如「本月挽回100单」）冲成罐头短语（真模型联调 p13 实测）。
@@ -1678,6 +1880,35 @@ class IGDE {
     if (t.includes(String(c.old).slice(0, 8))) return reply; // 已复述旧值 = 在核实
     const ask = `对了，之前记的是「${c.old}」，这轮要按「${c.new}」算吗？还是维持原来的，你定。`;
     return t ? `${t} ${ask}` : ask;
+  }
+
+  /** 澄清轮标准问句（C6.5②，2026-10-03 裁决）：先复述旧值再给新选项，只问冲突这一件事——
+   *  S1/S2 同规（S2 引导确认让位）；候选缺失时退化为该槽单点探问（不空转）。 */
+  _conflictAskLine(act, question, conflictsNew) {
+    const c = (conflictsNew || []).find(x => x && x.slot === question.slot) || (conflictsNew || [])[0];
+    if (c && c.old && c.new) return this._appendConflictAsk('', question, [c]);
+    return this._probe(act, question.slot);
+  }
+
+  /** C6.5（2026-10-03 裁决）AI 预检：本轮词表命中与已确认值的「真冲突」预判。
+   *  豁免规则与 B2 同款（归一化相等 / 完整包含 / 词表同义 / 拉锯保护已接管），
+   *  命中返回 { slot, old, new } 供提示词把本轮切到「先核实」；判定权威仍是 B2 合并。 */
+  _preConflictPreview(act, userText) {
+    const hasTone = CORRECTION_TONE_RE.test(String(userText || ''));
+    if (hasTone) return null;
+    const kw = extractNeeds(userText);
+    const mem = act.memory || {};
+    for (const f of NEEDED_FIELDS) {
+      const raw = kw[f];
+      const value = raw ? clampNeedValue(raw) : '';
+      if (!value) continue;
+      const prev = act.needs[f];
+      if (!prev || !prev.value || prev.value === value) continue;
+      if (this._similarEnough(prev.value, value) || this._sameSemantic(prev.value, value)) continue;
+      if ((Number((mem.clarif_count || {})[f]) || 0) >= 1) continue; // 拉锯保护已接管的槽不再预检核实
+      return { slot: f, old: prev.value, new: value };
+    }
+    return null;
   }
 
   /** 离题/元问题/身份询问路由：四槽全空且无业务指向时，返回温和接住池（轮换防复读）；否则 null。
@@ -1814,7 +2045,12 @@ class IGDE {
 
   /** 桩模型回复（离线可用，功能完整的教练）。question = B4 决策（合并后）；
    *  返回 { reply, asked }，asked=true 表示本轮实际追问了 question.slot（驱动 ask_count 记账）。 */
-  _stubReply(act, userText, question) {
+  _stubReply(act, userText, question, conflictsNew) {
+    // 澄清轮形态（C6.5②，2026-10-03 裁决）：真冲突轮只发澄清问句＋冲突 chips——
+    // 不复述全量、不引导确认、同轮不再问别的（B4 一轮一问；S1/S2 同规，S2 引导确认让位）
+    if (question && question.kind === 'conflict' && question.slot) {
+      return { reply: this._conflictAskLine(act, question, conflictsNew), asked: true };
+    }
     const nonInfo = isNonInfo(userText);
     const probeSlot = question && question.slot;
     if (act.stage === 'S0') {
@@ -1928,19 +2164,22 @@ class IGDE {
   /** 真实模型：一次对话同时完成话术与结构化提取（PRD v2 envelope）。
    *  onReplyToken 仅流给首轮 coach 调用（critic / 重生成不流，护栏前的预览以返回值为权威）；
    *  预览 token 由 handle 缓冲，B3 落库成功后才冲刷（严格先落库后回复）。 */
-  async _aiCoach(act, userText, runtime, onReplyToken, preProbe) {
+  async _aiCoach(act, userText, runtime, onReplyToken, preProbe, preConflict = null) {
     const promptNeeds = plainNeeds(act.needs);
     if (!promptNeeds.offer && runtime.agentProfile.default_offer) {
       promptNeeds.offer = runtime.agentProfile.default_offer;
     }
-    const missing = preProbe ? [preProbe] : [];
+    const missing = preConflict ? [] : (preProbe ? [preProbe] : []);
     const context = buildCoachContext({
       act,
       userText,
       needs: promptNeeds,
       stage: act.stage,
       missing,
-      chips: preProbe ? (SLOT_CHIPS[preProbe] || []) : [],
+      conflict: preConflict,
+      chips: preConflict
+        ? conflictChips(preConflict.slot)
+        : (preProbe ? (SLOT_CHIPS[preProbe] || []) : []),
       agentProfile: runtime.agentProfile,
       contextOptions: this.contextOptions
     });
