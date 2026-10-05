@@ -860,6 +860,7 @@ class IGDE {
     if (this.aiEnabled && this.callAI) {
       try {
         env = await this._aiCoach(act, userText, runtime, bufferedOnReplyToken, preProbe, preConflict);
+        this._absorbLeakedJson(env);
         memoryPatch = env.memoryPatch || null;
         profilePatch = env.profilePatch || null;
         usedAI = true;
@@ -1080,6 +1081,11 @@ class IGDE {
 
     // —— 护栏管线（L0→L1→L2→L4；违规重生成 1 次 + 轮换兜底）——
     //    注：L3 已软化（P0-4）—— 不再强制问号，问号与否交给模型人格（COACH_SYSTEM_PROMPT 要求"该问才问"）
+    // 桩 authored 豁免（2026-10-05 视频罐头循环根治）：aiDead/桩路径的回复是引擎模板（G2 语义：
+    // 降级回复也走 B4/B5 状态机），REPEAT/L4 与 L2 的模型 critic 属「模型输出护栏」不适用——
+    // 宕机期重生成必然失败 → 落 FALLBACK_CATCH 罐头，且探问句固定 → 锁死「卡了一下」循环。
+    // 本地 L2 正则仍对桩回复生效（模板话语安全兜底）。
+    const stubAuthored = !usedAI || aiDead;
     // L0：空回复或退化输出（实测出现过 3 字符 "[1]" 残渣）→ 落兜底池，绝不直达用户
     // 兜底一律走 _fallbackWithProbe（P1-3）：问句按当前缺口生成并与 chips 同源，绝不复用 FALLBACK_POOL 完整句
     if (!guardrailL0(reply) || reply.trim().length < 2) {
@@ -1089,7 +1095,7 @@ class IGDE {
     reply = guardrailL1(reply);
     // L2 说教/推销：本地正则先拦 + /critic 精判；违规先重生成 1 次（真模型），仍不过则兜底
     let l2ok = guardrailL2(reply);
-    if (l2ok && this.callCritic && this._criticRequired(reply)) {
+    if (l2ok && !stubAuthored && this.callCritic && this._criticRequired(reply)) {
       if (runtime.llmCalls >= this.maxLlmCallsPerTurn) {
         l2ok = false;
       } else {
@@ -1107,8 +1113,8 @@ class IGDE {
         reply = fb.reply; askedSlot = fb.slot; guardrailHits.push('L2');
       }
     }
-    // L4 抢跑禁令（S3 前不得出方案卡式配置）
-    if (!guardrailL4(reply, act.stage)) {
+    // L4 抢跑禁令（S3 前不得出方案卡式配置）；桩回复豁免——收口句「确认卡」是引擎权威话术
+    if (!stubAuthored && !guardrailL4(reply, act.stage)) {
       const regen = await this._tryRegen(act, userText, 'preempt', runtime);
       if (regen && guardrailL4(regen, act.stage)) { reply = regen; guardrailHits.push('L4regen'); }
       else {
@@ -1121,7 +1127,7 @@ class IGDE {
     // 放在 push 之前，比对对象才是「上一轮」的回复。
     // 例外：四要素已齐的确认阶段，提示词本来就要求「复述要点 + 问同一句确认」，回复天然相似，不做此检查
     const lastAssistant = [...act.messages].reverse().find(m => m.role === 'assistant');
-    if (lastAssistant && this.missingFields(act).length > 0 && this._similarEnough(lastAssistant.content, reply)) {
+    if (!stubAuthored && lastAssistant && this.missingFields(act).length > 0 && this._similarEnough(lastAssistant.content, reply)) {
       const regen = await this._tryRegen(act, userText, 'repeat', runtime);
       if (regen && !this._similarEnough(lastAssistant.content, regen)) { reply = regen; guardrailHits.push('REPEATregen'); }
       else {
@@ -1888,6 +1894,43 @@ class IGDE {
     const c = (conflictsNew || []).find(x => x && x.slot === question.slot) || (conflictsNew || [])[0];
     if (c && c.old && c.new) return this._appendConflictAsk('', question, [c]);
     return this._probe(act, question.slot);
+  }
+
+  /** B1 修复（2026-10-05 实测）：模型偶发把 slot_updates JSON 数组泄漏为用户可见回复
+   *  （如「[{"slot":"goal",...}] 你希望拿到什么结果？」）——PRD B5 禁止暴露内部字段。
+   *  解析泄漏的数组吸收进 slot_updates（后续照常过 B1 critic 原文依据校验），
+   *  reply 只保留 JSON 之后的自然语言；整段不可解析则原样交给 L0 兜底。 */
+  _absorbLeakedJson(env) {
+    let t = String(env.reply || '');
+    // ① slot_updates 数组泄漏：吸收进 slotUpdates（后续照常过 B1 critic 原文依据校验）
+    const m = t.match(/(\[\s*\{\s*"slot"\s*:\s*"[\s\S]*?\]\s*)/);
+    if (m) {
+      try {
+        const arr = JSON.parse(m[1]);
+        if (Array.isArray(arr)) {
+          env.slotUpdates = Array.isArray(env.slotUpdates) ? env.slotUpdates : [];
+          for (const u of arr) {
+            if (u && typeof u === 'object' && u.slot && u.value != null) {
+              env.slotUpdates.push({ slot: String(u.slot), value: String(u.value), confidence: Number(u.confidence) || 0.9, inferred: u.inferred === true });
+            }
+          }
+          t = t.slice(0, m.index) + t.slice(m.index + m[1].length);
+        }
+      } catch (e) { /* 不可解析 → 走 ② 通用剥离 */ }
+    }
+    // ② 其他形态 JSON 前缀垃圾（如内容块数组 [{"type":"text",...}]，qwen3.8-flash 实测）：
+    //    中文口语回复永远不会以 [ { " 开头——能整段解析成 JSON 的前缀一律剥离，防内部结构直达用户
+    if (/^\s*[\[{"]/.test(t)) {
+      for (let i = 0; i < t.length; i++) {
+        const c = t[i];
+        if (c !== ']' && c !== '}') continue;
+        try {
+          const v = JSON.parse(t.slice(0, i + 1));
+          if (v && typeof v === 'object') { t = t.slice(i + 1); break; }
+        } catch (e) { /* 继续找下一个闭合符 */ }
+      }
+    }
+    env.reply = t.trim();
   }
 
   /** C6.5（2026-10-03 裁决）AI 预检：本轮词表命中与已确认值的「真冲突」预判。
