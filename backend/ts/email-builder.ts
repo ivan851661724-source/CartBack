@@ -84,7 +84,8 @@ function resolveLangKey(lang: string): string {
 function discountStr(discount: Optional<number>): string {
   if (discount == null) return '';
   const n = Number(discount);
-  if (Number.isNaN(n)) return '';
+  // 0 = 无钩子方案：不得产生「0% OFF」假折扣文案（正文徽标与 img alt 同源此函数）
+  if (Number.isNaN(n) || n <= 0) return '';
   // Python: int(discount) if float(discount).is_integer() else discount
   const pct = Number.isInteger(n) ? n : n;
   return `${pct}% OFF`;
@@ -107,14 +108,16 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
   } = opts;
 
   const dStr = discountStr(discount);
+  // 无折扣时 alt 只用品牌名，不留「 - 品牌」残缺格式
+  const imgAlt = [dStr, safeStr(brand_name)].filter(Boolean).join(' - ');
 
   let imgTag: string;
   if (use_cid) {
-    imgTag = `<img src="cid:hero-image" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
+    imgTag = `<img src="cid:hero-image" alt="${escapeHtml(imgAlt)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
   } else {
     const iu = safeStr(image_url);
     if (iu) {
-      imgTag = `<img src="${escapeHtml(iu)}" alt="${escapeHtml(dStr)} - ${escapeHtml(brand_name)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
+      imgTag = `<img src="${escapeHtml(iu)}" alt="${escapeHtml(imgAlt)}" style="width:100%;height:auto;max-width:600px;display:block;border:0;" />`;
     } else {
       imgTag = '';
     }

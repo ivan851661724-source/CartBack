@@ -13,8 +13,9 @@ const { migrateAct, mergeMonotonicAct } = require('./needs');
 
 const SCHEMA = {
   acts: {
+    flow_version: 'INTEGER', business_version: 'INTEGER', flow_state: 'JSON',
     id: 'TEXT', stage: 'TEXT', needs: 'JSON', messages: 'JSON',
-    status: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER',
+    status: 'TEXT', created_at: 'INTEGER', updated_at: 'INTEGER', code_status: 'TEXT',
     user_id: 'TEXT',   // 归属用户（整改 1b）；null/缺失 = 本地模式历史数据
     memory: 'JSON', context_summary: 'JSON',
     summary_cursor: 'INTEGER', context_version: 'INTEGER',
@@ -34,7 +35,10 @@ const SCHEMA = {
     brand: 'TEXT',             // M4 白标：邮件品牌快照（设置页品牌 > 方案卡品牌，创建时固化）
     product: 'TEXT',           // M6 个性化：商品位快照（方案卡 product > 标签画像品类兜底）
     mailgen_meta: 'JSON',      // 产图档位/文案来源观测（image_method=wanx-edit/upload/…，统计图生图命中率与回退率）
-    tag_distribution: 'JSON'   // 创建时圈中受众的标签分布快照（卡片展示产品分类/年龄段/机型等代表值）
+    tag_distribution: 'JSON',   // 创建时圈中受众的标签分布快照（卡片展示产品分类/年龄段/机型等代表值）
+    variants: 'JSON', variants_provider: 'TEXT', // 分层文案必须在 SQLite 往返后保留，发送/预览消费
+    fail_reason: 'TEXT', gate_checklist: 'JSON',   // 异步发送失败的人话原因及闸门留痕
+    scheduled_at: 'INTEGER'                    // 缓发时间在刷新后保留
   },
   audience: {
     id: 'TEXT', name: 'TEXT', email: 'TEXT', intent: 'TEXT', risk: 'TEXT',

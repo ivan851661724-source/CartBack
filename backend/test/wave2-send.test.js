@@ -95,7 +95,7 @@ async function waitFor(api, jobId, timeoutMs = 20000) {
 
 test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（demo 仿真发送同样落 sends）', async (t) => {
   const { api, dir } = await startServer(t, {
-    configObj: { stores: [{ type: 'mock', shop: 'E2E' }], publicBaseUrl: 'https://e2e.example' }
+    configObj: { stores: [{ type: 'mock', shop: 'E2E' }], publicBaseUrl: '' }
   });
   await api('/api/config', { method: 'POST', body: { shopBrand: 'MyBrand' } });
 
@@ -128,9 +128,9 @@ test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（demo 仿�
   assert.ok(s2.json.checklist.all_pass === false);
 });
 
-test('D4① 时段闸：窗口外 → 202 缓发（scheduled_at/run_after 入队，不落 sends、不冻 holdout）', async (t) => {
+test('D4① 时段外且退订配置缺失 → 202 定时发送（不落 sends、不冻 holdout）', async (t) => {
   const { api, dir } = await startServer(t, {
-    configObj: { stores: [{ type: 'mock', shop: 'E2E' }], publicBaseUrl: 'https://e2e.example' },
+    configObj: { stores: [{ type: 'mock', shop: 'E2E' }], publicBaseUrl: '' },
     fakeHour: 3   // 纽约凌晨 3 点 → 时段闸不过
   });
   await api('/api/config', { method: 'POST', body: { shopBrand: 'MyBrand' } });
@@ -138,6 +138,9 @@ test('D4① 时段闸：窗口外 → 202 缓发（scheduled_at/run_after 入队
   // confirm 预检返回时段闸不过（200 仍出卡 —— 闸门只在发送时拦截/缓发）
   const w = c.checklist.items.find(i => i.gate === 'window');
   assert.equal(w.pass, false);
+  const unsubscribe = c.checklist.items.find(i => i.gate === 'unsubscribe');
+  assert.equal(unsubscribe.pass, false);
+  assert.equal(unsubscribe.blocking, false);
 
   const s = await api(`/api/draft/${c.draft_id}/send`, { method: 'POST', body: {} });
   assert.equal(s.status, 202, '时段闸不过 → 缓发（非 409 永久拒绝）');

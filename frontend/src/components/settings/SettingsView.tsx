@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import Tag from '@/components/ui/Tag';
+import AgentProfileSettings from './AgentProfileSettings';
 import {
   CATEGORY_OPTIONS,
   deleteProduct,
@@ -315,6 +316,7 @@ export default function SettingsView() {
           </div>
         </div>
 
+        <AgentProfileSettings />
         <div className="danger-zone">
           <span>重置全部数据（清空对话 / 邮件 / 看板）</span>
           <button className="btn ghost sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger-bg)' }} onClick={resetData}>重置数据</button>

@@ -3,7 +3,8 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '@/state/AppProvider';
 import { Close } from '@/components/ui/icons';
-import { api } from '@/lib/api';
+import { api, saveDraftCopy } from '@/lib/api';
+import { planSendState } from '@/lib/chat-flow';
 import { listProducts, type ProductItem } from '@/lib/products';
 
 /** 按人群/语言预览数据（后端渲染管线同口径产出） */
@@ -35,23 +36,26 @@ function rewriteImageUrls(html: string, imgPath: string): string {
  * 编辑态：双栏（左预览右编辑面板：主题/正文/主图/提示词+生成图片/按人群预览/保存并预览）。
  */
 export default function EditModal() {
-  const { editOpen, editingDraft, setEditOpen, sendEditedDraft, confirmState } = useApp();
+  const { editOpen, editingDraft, setEditOpen, sendEditedDraft, confirmState, loadState } = useApp();
   const [mode, setMode] = useState<'preview' | 'edit'>('preview');
   const [subj, setSubj] = useState('');
   const [body, setBody] = useState('');
   const [imagePrompt, setImagePrompt] = useState('');
   const [imgPath, setImgPath] = useState('');
   const [previewHtml, setPreviewHtml] = useState('');
+  const [businessVersion, setBusinessVersion] = useState<number | undefined>();
   const [preview, setPreview] = useState<DraftPreview | null>(null);
   const [regenerating, setRegenerating] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (editOpen && editingDraft) {
       setMode('preview');
       setSubj(editingDraft.subject || '');
       setBody(editingDraft.body || '');
+      setBusinessVersion(editingDraft.mailgen_meta?.business_version);
       setImagePrompt(editingDraft.image_prompt || '');
       setImgPath((editingDraft as any).image_path || '');
       setPreviewHtml(rewriteImageUrls((editingDraft as any).html || '', (editingDraft as any).image_path || ''));
@@ -74,18 +78,34 @@ export default function EditModal() {
   }, [editOpen, editingDraft]);
 
   // 发送闸门联动（Wave2）：仅当该草稿正是 confirm 流程建的（confirmState.planCard.draft_id 匹配）
-  // 才有核对单数据 → all_pass=false 禁用发送；无关联数据（邮件页其他草稿 / 旧后端）按现行为不禁用，
+  // 才有核对单数据 → 按阻断项禁用发送；时段外允许预约，退订配置暂不拦截。
   // 绝不因数据缺失永久禁用发送。
   const linkedChecklist = editingDraft && confirmState?.planCard?.draft_id === editingDraft.id
     ? confirmState.checklist
     : null;
-  const failCount = linkedChecklist ? linkedChecklist.items.filter((i) => !i.pass).length : 0;
-  const sendBlocked = Boolean(linkedChecklist && linkedChecklist.all_pass === false);
+  const sendState = planSendState(linkedChecklist);
+  const failCount = sendState.failItems.length;
+  const sendBlocked = !sendState.canSend;
 
   // 发送（预览态/编辑态共用；以当前编辑内容为准）
   const onSend = async () => {
-    const ok = await sendEditedDraft(subj.trim(), body);
-    if (!ok) { setMsg('主题和正文不能为空'); setErr(true); }
+    const ok = await sendEditedDraft(subj.trim(), body, businessVersion);
+    if (!ok) { setMsg('发送未完成，请查看提示并核对当前方案'); setErr(true); }
+  };
+
+  const onSave = async () => {
+    if (!editingDraft || saving) return;
+    setSaving(true); setMsg(''); setErr(false);
+    try {
+      const result = await saveDraftCopy(editingDraft.id, subj.trim(), body, businessVersion);
+      const saved = result.draft!;
+      setSubj(saved.subject); setBody(saved.body);
+      setBusinessVersion(saved.mailgen_meta?.business_version);
+      setPreviewHtml(rewriteImageUrls(saved.html || '', saved.image_path || imgPath));
+      await loadState().catch(() => {});
+      setMsg('邮件已保存'); setMode('preview');
+    } catch (e: any) { setMsg(e?.message || '保存失败，修改尚未保存'); setErr(true); }
+    finally { setSaving(false); }
   };
 
   // 「生成图片」：按（可编辑的）提示词重跑主图；文案/主题不动，成功后刷新预览
@@ -94,12 +114,13 @@ export default function EditModal() {
     if (!imagePrompt.trim()) { setMsg('提示词不能为空'); setErr(true); return; }
     setRegenerating(true); setMsg(''); setErr(false);
     try {
-      const r = await api<{ image_path?: string; image_prompt?: string; html?: string; error?: string }>(
+      const r = await api<{ image_path?: string; image_prompt?: string; html?: string; business_version?: number; error?: string }>(
         `/api/draft/${editingDraft.id}/image`,
         { method: 'POST', body: JSON.stringify({ prompt: imagePrompt.trim() }) },
       );
       if (r.error) { setMsg(r.error); setErr(true); return; }
       if (r.image_path) setImgPath(r.image_path);
+      if (r.business_version) setBusinessVersion(r.business_version);
       if (r.image_prompt) setImagePrompt(r.image_prompt);
       if (r.html) setPreviewHtml(rewriteImageUrls(r.html, r.image_path || imgPath));
       setMsg('图片已重新生成');
@@ -137,12 +158,13 @@ export default function EditModal() {
     if (!editingDraft || applyingProductId) return;
     setApplyingProductId(p.id); setMsg(''); setErr(false);
     try {
-      const r = await api<{ image_path?: string; image_prompt?: string; html?: string; error?: string }>(
+      const r = await api<{ image_path?: string; image_prompt?: string; html?: string; business_version?: number; error?: string }>(
         `/api/draft/${editingDraft.id}/image`,
         { method: 'POST', body: JSON.stringify({ product_image_id: p.id, prompt: imagePrompt.trim() }) },
       );
       if (r.error) { setMsg(r.error); setErr(true); return; }
       if (r.image_path) setImgPath(r.image_path);
+      if (r.business_version) setBusinessVersion(r.business_version);
       // 与 onRegenImage 同口径同步 image_prompt：空提示词时服务端快照了按品类自动生成的 prompt，回填保持所见即所存
       if (r.image_prompt && !imagePrompt.trim()) setImagePrompt(r.image_prompt);
       if (r.html) setPreviewHtml(rewriteImageUrls(r.html, r.image_path || imgPath));
@@ -220,7 +242,7 @@ export default function EditModal() {
           disabled={sendBlocked}
           title={sendBlocked ? `核对单 ${failCount} 项未过，修复后再发送` : undefined}
         >
-          发送
+          {sendState.scheduled ? '定时发送' : '发送'}
         </button>
         {sendBlocked && (
           <span style={{ color: 'var(--danger)', fontSize: 12, fontWeight: 600 }}>
@@ -293,7 +315,7 @@ export default function EditModal() {
       </div>
 
       <div className="em-foot">
-        <button className="btn primary" onClick={() => setMode('preview')}>保存并预览</button>
+        <button className="btn primary" disabled={saving || regenerating || !subj.trim() || !body.trim()} onClick={onSave}>{saving ? '保存中…' : '保存并预览'}</button>
       </div>
     </div>
   );

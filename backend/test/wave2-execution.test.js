@@ -241,7 +241,7 @@ test('D4② 频次闸：72h 内灌 emailed 记录 → 全被剔除则拦截；�
   assert.equal(open.items.find(i => i.gate === 'frequency').pass, true);
 });
 
-test('D4③④ 白标/退订闸：品牌缺省（CartBack）与 publicBaseUrl 缺失各自独立拦截', async () => {
+test('D4③④ 白标保持拦截，退订配置缺失记录结果但暂不拦截', async () => {
   const store = tmpStore('wl');
   const noBrand = await runGates(store, { draft: makeDraft({ brand: 'CartBack' }) });
   const wl = noBrand.items.find(i => i.gate === 'whitelabel');
@@ -252,6 +252,8 @@ test('D4③④ 白标/退订闸：品牌缺省（CartBack）与 publicBaseUrl �
   const u = noUnsub.items.find(i => i.gate === 'unsubscribe');
   assert.equal(u.pass, false);
   assert.ok(/publicBaseUrl/.test(u.reason));
+  assert.equal(u.blocking, false);
+  assert.equal(noUnsub.all_pass, true);
 
   // 其余闸不受影响（可独立定位失败项）
   assert.equal(noBrand.items.find(i => i.gate === 'unsubscribe').pass, true);

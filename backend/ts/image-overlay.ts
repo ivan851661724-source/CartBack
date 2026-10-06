@@ -124,6 +124,7 @@ export async function overlayMarketingText(opts: OverlayOpts): Promise<string> {
   } = opts;
 
   const src = imagePath;
+  if (!(Number(discount) > 0)) return path.resolve(src);
   if (!fs.existsSync(src)) return src;
   if (!canvasMod) {
     console.error('[overlay] @napi-rs/canvas 未安装，跳过叠加，返回原图');

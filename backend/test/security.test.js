@@ -55,7 +55,7 @@ async function startServer(openLocal, extraEnv = {}) {
       new Promise(resolve => child.once('exit', resolve)),
       new Promise(resolve => setTimeout(resolve, 1000))
     ]);
-    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   };
   return { baseUrl, dir, stop };
 }

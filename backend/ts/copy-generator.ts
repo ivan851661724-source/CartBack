@@ -383,13 +383,9 @@ export function generateImagePrompt(user: UserRecord, config: Config): string {
 
   const product = (user.product_cn || user.product_en || user.product || '产品').trim();
 
-  let discountPct = 10;
-  const d = Number(user.discount);
-  if (!Number.isNaN(d)) discountPct = Math.trunc(d);
-  const cta = (config.marketing.cta_button || 'Shop Now').toUpperCase().trim();
-
   const extraFlavors = [flavor, priceFlavor, segFlavor].filter(Boolean).join('，');
-  const tail = `底部渲染${discountPct}% OFF和${cta}文字，真实摄影，高级感，8k`;
+  // Consumer claims belong to the reviewed HTML; image models only draw the product.
+  const tail = '只展示真实商品与场景，不生成任何文字、价格、优惠、配送承诺或水印，真实摄影，高级感，8k';
 
   // 人像/机型位仅按品类档案保留：手机壳保留人群+机型（机型与产品间补空格，避免英文兜底名粘连），
   // 服装保留人群（上身展示），饰品/通用为纯摆拍不出现人物与机型

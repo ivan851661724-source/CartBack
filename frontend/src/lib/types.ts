@@ -15,6 +15,18 @@ export type Engine = 'online' | 'degraded';
 /** 回复快捷 chips（SSE done 帧下发，针对最新一条 agent 回复；空数组 = 无 chips） */
 export type Chips = string[];
 
+export interface AvailableAction {
+  id: string;
+  kind: 'preview_email' | 'save_preview' | 'save_choices' | 'tour' | 'other' | 'prepare_plan' | 'accept_candidate' | 'reject_candidate';
+  label: string;
+  targetKind: 'act' | 'draft';
+  targetId: string;
+  targetVersion: number;
+  enabled: boolean;
+  blockedReasons: string[];
+  candidateId?: string;
+}
+
 /** 单个 needs 槽的值：显式/推断来源 + 采集时间（新契约三态对象） */
 export interface NeedValue {
   value: string;
@@ -54,6 +66,7 @@ export interface Needs {
 
 /** act.memory：槽位纠正 / 主动补充 / 偏好 / 追问计数（新契约序列化，本波仅透传） */
 export interface ActMemory {
+  conflicts?: { slot: string; old: string; new: string; asked?: boolean }[];
   corrections: { slot: string; old: string; new: string; at: number }[];
   extras: { key: string; value: string; at: number }[];
   prefs: Record<string, unknown>;
@@ -93,6 +106,7 @@ export interface ChecklistItem {
   gate: ChecklistGate | string;
   label: string;          // 中文
   pass: boolean;
+  blocking?: boolean;   // false = 检测结果保留，但不拦截发送
   reason?: string;        // 未过原因（中文，红字展示）
 }
 
@@ -117,6 +131,7 @@ export interface Checklist {
  * done 帧 / 历史会话仍可能下发，读取处需判空；discount 新旧形态不同，读取处需 typeof 兼容）。
  */
 export interface PlanCard {
+  copy_warning?: string | null;
   // —— 新契约 ——
   draft_id?: string;                // confirm 时后端已建草稿，发送直接 POST /api/draft/:id/send
   audience?: string;
@@ -193,6 +208,9 @@ export interface Message {
 
 /** 一次挽回活动（对话会话 + 采集 + 方案） */
 export interface Act {
+  flow_version?: number;
+  business_version?: number;
+  flow_state?: { actions: AvailableAction[]; resource_error?: string; prepare_error?: string; previous_preview?: PlanCard & { obsolete: boolean }; prepared_version?: number; candidates?: unknown[] };
   id: string;
   stage: Stage;
   needs: Needs;
@@ -217,6 +235,11 @@ export type DraftStatus =
   | 'recovered';
 
 export interface Draft {
+  html?: string;
+  image_path?: string;
+  scheduled_at?: number | null; // 服务端预约发送时间（epoch ms）
+  discount?: number;
+  mailgen_meta?: { flow_version?: number; business_version?: number; recipient_ids?: string[] };
   id: string;
   subject: string;
   body: string;

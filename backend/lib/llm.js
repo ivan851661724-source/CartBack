@@ -270,6 +270,10 @@ class LLMClient {
     }
     parsed = parsed1;
     return {
+      intent: parsed.intent,
+      changes: Array.isArray(parsed.changes) ? parsed.changes : [],
+      preview: parsed.preview,
+      profileOperations: Array.isArray(parsed.profileOperations) ? parsed.profileOperations : [],
       reply: typeof parsed.reply === 'string' ? parsed.reply : (Array.isArray(parsed.reply) ? parsed.reply.filter(x => typeof x === 'string').join('') : (res.content || '')),
       needs: (parsed.needs && typeof parsed.needs === 'object') ? parsed.needs : {},
       // PRD v2 envelope 扩展：结构化槽位更新 / 长期事实 / 明确纠正（引擎侧做依据校验与冲突合并）
@@ -355,6 +359,10 @@ class LLMClient {
     }
     return {
       reply: typeof parsedN.reply === 'string' ? parsedN.reply : (this._cleanReply(full) || ''),
+      intent: parsedN.intent,
+      changes: Array.isArray(parsedN.changes) ? parsedN.changes : [],
+      preview: parsedN.preview,
+      profileOperations: Array.isArray(parsedN.profileOperations) ? parsedN.profileOperations : [],
       needs: (parsedN.needs && typeof parsedN.needs === 'object') ? parsedN.needs : {},
       // PRD v2 envelope 扩展：结构化槽位更新 / 长期事实 / 明确纠正（引擎侧做依据校验与冲突合并）
       slotUpdates: Array.isArray(parsedN.slot_updates) ? parsedN.slot_updates

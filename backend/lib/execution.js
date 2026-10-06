@@ -9,7 +9,7 @@
  *  - E2 真实建码决策：offer 文案 → percent_off 解析；code 一律来自店铺连接器真实回执，
  *    禁止本地拼码（卡面绝不出现未真实存在的折扣码 —— 共同红线）。
  *  - D4 五道发送闸门：window(时段/E3 时区) / frequency(72h) / whitelabel(署名) /
- *    unsubscribe(退订) / amount_code(金额与码核对)；任一不过阻止发送并给中文原因；
+ *    unsubscribe(退订检测，暂不拦截) / amount_code(金额与码核对)；阻断项不过给中文原因；
  *    时段闸不过 → 缓发（返回下一个合理时刻，非永久拒绝）；店铺校验超时 → 视为不过。
  *  - holdout 对照组：按 10% 从闸门过滤后的净值名单圈定（确定性哈希序），<200 人不冻结。
  *
@@ -131,8 +131,9 @@ function parseOfferCodeName(offer) {
 /* ------------------------------ D3 estGmv 公式 ------------------------------ */
 /** 客单价：extras「客单价」解析（'35美元'→35）；缺失用行业默认并标 demo（PRD D3） */
 function parseAov(extras) {
-  for (const e of Array.isArray(extras) ? extras : []) {
-    if (!e || e.key !== '客单价') continue;
+  const entries = (Array.isArray(extras) ? extras : []).filter(e => e && ['客单价', 'aov'].includes(e.key));
+  entries.sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
+  for (const e of entries) {
     const m = String(e.value || '').match(/(\d+(?:\.\d+)?)/);
     if (m) return { aov: +m[1], source: 'store' };
   }
@@ -189,7 +190,7 @@ function buildPlanCard({
   let text;
   if (status === 'created') text = `折扣码 ${code}（已在你的店铺创建 ✅）`;
   else if (status === 'reused') text = `折扣码 ${code}（店内现成码，已校验有效）`;
-  else if (status === 'pending') text = offerText ? `${offerText}（折扣码将在确认后创建）` : '折扣码将在确认后创建';
+  else if (status === 'pending') text = !offerText || /待定|未决定|再想/.test(offerText) ? '优惠尚未决定' : /无优惠|不放优惠|不打折|none/i.test(offerText) ? '无优惠（无需创建折扣码）' : /%|折/.test(offerText) ? `${offerText}（折扣码将在确认后创建）` : `${offerText}（准备时核对执行方式）`;
   else text = offerText && parseOfferPercent(offerText) == null ? offerText : '本方案无折扣码';
   const discount = { text, code: code || null, code_status: status, percent_off: percentOff };
   if (note) discount.note = note;
@@ -203,6 +204,7 @@ function buildPlanCard({
     goal: b.goal || '',
     subject: b.subject || '',
     body: b.body || '',
+    product: b.product || '', category: b.category || '', copy_warning: b.copy_warning || null,
     discount,
     discountNum: percentOff || b.discountNum || 0,  // 邮件文案用数值口径（无码方案为 0）
     coupon: code || '',                              // 草稿/mailgen 消费别名（= discount.code）
@@ -364,10 +366,10 @@ async function evaluateChecklist(o = {}) {
     ...(wlPass ? {} : { reason: '还未设置商家品牌，署名会显示工具默认名「CartBack」。去设置页填品牌名，或在对话里告诉我们品牌名' })
   });
 
-  // ④ 退订：退订 URL 可解析（publicBaseUrl）+ 发送时附 List-Unsubscribe 头
+  // ④ 退订：保留实际检测结果；按当前产品要求暂不作为发送阻断项。
   const unsubOk = Boolean(config && config.publicBaseUrl) && Boolean(draft && draft.id);
   items.push({
-    gate: 'unsubscribe', label: GATE_LABELS.unsubscribe, pass: unsubOk,
+    gate: 'unsubscribe', label: GATE_LABELS.unsubscribe, pass: unsubOk, blocking: false,
     ...(unsubOk ? {} : { reason: '未配置对外公网基址（publicBaseUrl），退订链接无法解析、List-Unsubscribe 头不可用' })
   });
 
@@ -409,7 +411,7 @@ async function evaluateChecklist(o = {}) {
   const holdoutPlan = selectHoldout(net, (config && config.holdoutRatio) || HOLDOUT_RATIO);
   return {
     items: GATE_ORDER.map(g => items.find(i => i.gate === g)), // 恒 5 项、固定顺序
-    all_pass: items.every(i => i.pass),
+    all_pass: items.every(i => i.pass || i.blocking === false),
     net,
     skippedByFrequency: freq.skipped,
     windowRetryAt,

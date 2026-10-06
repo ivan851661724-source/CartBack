@@ -169,6 +169,10 @@ function migrateAct(act, now = Date.now()) {
  *  memory.prefs.reuse_cleared 列出的槽允许清空（引擎清空同轮打标，落库后旧值被覆盖为空）。 */
 function mergeMonotonicAct(act, old, now = Date.now()) {
   migrateAct(act, now);
+  if (act.flow_version === 6) {
+    act.filled_count = countFilled(act.needs);
+    return act;
+  }
   if (!old || typeof old !== 'object') {
     act.filled_count = countFilled(act.needs);
     return act;

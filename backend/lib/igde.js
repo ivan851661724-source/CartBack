@@ -163,11 +163,17 @@ const FALLBACK_CATCH_POOL = [
 
 // —— S2 满卡待确认期的闲聊/不识别输入专用池（10-05 截图循环连带修复）：原非确认输入轮换到
 //    FALLBACK_POOL 完整句——内嵌罐头接住语（「卡了一下」）且重问已填满的受众。满卡态既不追问
-//    也不该装掉线，一律引向确认卡/自由改。 ——
+//    也不该装掉线，一律引向确认卡/自由改。NO_CARD 变体：降级轮确认卡尚未产出（剧本 #13），
+//    话术不得引用不存在的卡（10-05 用户实测反馈）。 ——
 const S2_IDLE_POOL = [
   '方案四样都在下面确认卡里了，想改哪样直接说，没问题就点确认。',
   '你在下面的确认卡上核对就行——哪样不对点哪样改，想补细节（比如发送时段）也可以直接打字。',
   '配置都在下面确认卡里。要调哪里说一声，都 OK 就点确认。'
+];
+const S2_IDLE_POOL_NO_CARD = [
+  '四样我都记齐了，想改哪样直接打字说，改完等我这边恢复稳了就给你出确认卡。',
+  '这几样先记着——要调整直接说改哪样；确认卡等我恢复稳了摆出来，你过目点确认就行。',
+  '先这样记下了。想补细节（比如发送时段）或改哪样，直接打字说就行。'
 ];
 
 // —— 业务关键词（邮件营销/店铺生意），命中即非离题（D 类/离题判断的排除项，统一复用）——
@@ -616,7 +622,9 @@ class IGDE {
   }
 
   /** 防呆强制确认卡（2026-10-05）：缺槽推断补满（复用出口意图的 C6 补满）→ 进 S2。
-   *  reason 仅用于话术分型；与 WRITE_INTENT 共用补满口径（0 编造数值，全 inferred 可改）。 */
+   *  reason 仅用于话术分型；与 WRITE_INTENT 共用补满口径（0 编造数值，全 inferred 可改）。
+   *  卡感知（10-05 用户实测）：卡在本函数内产出——能出卡（aiEnabled 档位）才用「确认卡核对」话术；
+   *  出不了卡（无 key 桩引擎，剧本 #13）改用诚实的无卡话术，绝不引用不存在的卡。返回 { reply, card }。 */
   _forceConfirmTurn(act, opts = {}, reason = 'impatient') {
     const now = Date.now();
     act.memory = ensureMemory(act.memory, now);
@@ -631,13 +639,22 @@ class IGDE {
     put('offer', '待定');
     put('goal', '先跑通流程');
     this._advanceStage(act, '');
-    const lines = {
+    let card = null;
+    if (this.aiEnabled && opts.previewAvailable !== false && act.stage === 'S2' && this.missingFields(act).length === 0) {
+      card = this.producePlanCard(act, { locale: opts.locale, code: null });
+    }
+    const lines = card ? {
       impatient: '好，不磨叽了——缺的几样我按常见打法先补上（都是我推断的，可改），你直接在下面的确认卡里核对、改完点确认。',
       overflow: '咱聊了不少轮啦，剩下几样我先按常见打法补齐（推断的，可改），你直接在确认卡上核对，哪样不对点哪样改。',
       loop: '咱俩想法对上了，就是说法绕了点——缺的我先补齐（推断的，可改），你看下面的确认卡，不行在上面改。',
       stalled: '行，具体数不急着定——先按「先跑通流程」跑起来也行。缺的我先补齐（推断的，可改），你在下面的确认卡上核对，哪样不对点哪样改。'
+    } : {
+      impatient: '好，不磨叽了——缺的几样我按常见打法先补上（都是我推断的，可改），哪样不对直接跟我说；等我恢复稳了就把确认卡给你摆出来。',
+      overflow: '咱聊了不少轮啦，剩下几样我先按常见打法补齐（推断的，可改），哪样不对直接说；确认卡等我恢复稳了摆出来。',
+      loop: '咱俩想法对上了，就是说法绕了点——缺的我先补齐（推断的，可改），哪样要改直接说；等我恢复稳了就给你出确认卡。',
+      stalled: '行，具体数不急着定——先按「先跑通流程」跑起来也行。缺的我先补齐（推断的，可改），哪样不对直接说；确认卡等我恢复稳了摆出来。'
     };
-    return { reply: lines[reason] || lines.impatient };
+    return { reply: lines[reason] || lines.impatient, card };
   }
 
   /** F5 功能导览（独立旁路，2026-10-03 新增 P1 可裁）。
@@ -646,6 +663,10 @@ class IGDE {
    *  被依赖标注挡住的话术段（发送策略 / 检索能力未落地）不出现在导览序列里。 */
   _tourTurn(act, userText) {
     const t = String(userText || '').trim();
+    if (TOUR_TRIGGER_RE.test(t)) {
+      act.pending_tour = true;
+      return { reply: '你需要了解哪个功能？', chips: TOUR_MENU.slice() };
+    }
     // ① 菜单挂起轮：命中菜单项 → 讲解；否则让路
     if (act.pending_tour) {
       act.pending_tour = null;
@@ -657,11 +678,6 @@ class IGDE {
         ? `${picked}是这样用的：\n${lines.map(l => `· ${l}`).join('\n')}`
         : `${picked}在左侧导航里，点开就能用。`;
       return { reply, chips: (script && script.exampleChips) || [] };
-    }
-    // ② 触发轮：入口问句 + 菜单 chips（挂起，等下一轮选中）
-    if (TOUR_TRIGGER_RE.test(t)) {
-      act.pending_tour = true;
-      return { reply: '你需要了解哪个功能？', chips: TOUR_MENU.slice() };
     }
     return null;
   }
@@ -771,6 +787,7 @@ class IGDE {
    *  权威 reply 一律以返回值为准，由交付层做 replace 校正）。
    *  opts.persist：async (act) => void —— B3 落库钩子（upsertAct），失败抛错 → 本轮不发回复。 */
   async handle(act, userText, opts = {}) {
+    if (act.flow_version === 6) return require('./conversation-v6').handle(this, act, userText, opts);
     const guardrailHits = [];
     act.needs = migrateNeeds(act.needs);
     act.messages = act.messages || [];
@@ -778,7 +795,6 @@ class IGDE {
     act.summary_cursor = Number(act.summary_cursor) || 0;
     act.context_version = Number(act.context_version) || 1;
     // 防呆计数：S1 采集期每轮 +1（超阈值触发强制确认卡）
-    if (act.stage === 'S1') act.memory.s1_turns = (Number(act.memory.s1_turns) || 0) + 1;
     if (act.code_status == null) act.code_status = 'none';
     const nowMs = Date.now();
     const runtime = {
@@ -841,55 +857,39 @@ class IGDE {
       }
     }
 
+    // 只统计采集轮；导览不会耗尽防呆预算。
+    if (act.stage === 'S1') act.memory.s1_turns = (Number(act.memory.s1_turns) || 0) + 1;
+    const forceReason = act.stage === 'S1' && this.missingFields(act).length > 0
+      ? (IMPATIENCE_RE.test(String(userText || '')) ? 'impatient'
+        : act.memory.s1_turns >= S1_TURN_LIMIT ? 'overflow'
+          : act.memory.loop_breaks >= LOOP_BREAK_LIMIT ? 'loop' : null)
+      : null;
+    const writeIntent = WRITE_INTENT_RE.test(String(userText || '').trim());
+
     // —— F1 出口意图「好，帮我写一封」：缺槽 C6 推断补满（推断项卡上标「我推断的，可改」）
     //     → D1 确认卡（不给「缺槽直出邮件」开口）；四槽已齐则交回正常 S2 流程。——
-    if (WRITE_INTENT_RE.test(String(userText || '').trim()) && this.missingFields(act).length > 0) {
+    if (writeIntent && this.missingFields(act).length > 0 && !act.memory.conflicts.length && !act.pending_ops?.e1) {
       const writeTurn = this._writeIntentTurn(act, opts);
       act.messages.push({ role: 'user', content: userText, ts: nowMs });
       act.messages.push({ role: 'assistant', content: writeTurn.reply, ts: nowMs });
       act.updated_at = nowMs;
       // F1 处理逻辑 4：推断补满 → D1 确认卡——在线档位产出 S2 无码预览卡（确认卡数据源，
       // 推断项带「我推断的，可改」）；降级档位不出卡（剧本 #13，S2 停住明示方案生成暂停）
+      // 卡感知（10-05）：出不了卡时话术不得引用「确认卡」（用户实测反馈：降级话术撒谎）
       let writePlanCard = null;
       if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
         writePlanCard = this.producePlanCard(act, { locale: opts.locale, code: null });
       }
+      let writeReply = writeTurn.reply;
+      if (!writePlanCard && /确认卡/.test(writeReply)) {
+        writeReply = writeReply.replace(/哪样不对在下面的确认卡里直接改，改完再确认。?/, '哪样不对直接跟我说；等我恢复稳了就把确认卡给你摆出来。');
+      }
       await doPersist();
       return {
-        reply: writeTurn.reply, stage: act.stage, needs: act.needs, planCard: writePlanCard,
+        reply: writeReply, stage: act.stage, needs: act.needs, planCard: writePlanCard,
         guardrailHits: [], engine: this._engineOf(this.aiEnabled),
         chips: writeTurn.chips, askedSlot: null, agentMeta: this._agentMeta(runtime)
       };
-    }
-
-    // —— 防呆与强制终止循环（2026-10-05）：S1 采集期触发任一条件 → 不再追问，缺槽推断
-    //    补满 → 强制弹确认卡（在线档位出预览卡，降级档位 S2 停住）。放在离题拦截之前，
-    //    否则「嗯/不知道」类消息会被离题短路、超轮数兜底永远够不着。本句内带的信息
-    //    （含修正语气）先经 applyNeeds 落账再补满，绝不丢用户刚说的话。 ——
-    if (act.stage === 'S1' && this.missingFields(act).length > 0) {
-      const impatient = IMPATIENCE_RE.test(String(userText || ''));
-      const overflow = (Number(act.memory.s1_turns) || 0) >= S1_TURN_LIMIT;
-      const loopOut = (Number(act.memory.loop_breaks) || 0) >= LOOP_BREAK_LIMIT;
-      if (impatient || overflow || loopOut) {
-        const reason = impatient ? 'impatient' : overflow ? 'overflow' : 'loop';
-        if (userText && String(userText).trim()) {
-          this.applyNeeds(act, extractNeeds(userText), userText, null); // 同句信息先落账
-        }
-        const fc = this._forceConfirmTurn(act, opts, reason);
-        act.messages.push({ role: 'user', content: userText, ts: nowMs });
-        act.messages.push({ role: 'assistant', content: fc.reply, ts: nowMs });
-        act.updated_at = nowMs;
-        let fcCard = null;
-        if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
-          fcCard = this.producePlanCard(act, { locale: opts.locale, code: null });
-        }
-        await doPersist();
-        return {
-          reply: fc.reply, stage: act.stage, needs: act.needs, planCard: fcCard,
-          guardrailHits: [], engine: this._engineOf(this.aiEnabled),
-          chips: [], askedSlot: null, agentMeta: this._agentMeta(runtime)
-        };
-      }
     }
 
     // —— goal 槽自家 chips / 口标应答（2026-10-05 截图循环根治）：引擎下发的 goal chips 里
@@ -898,7 +898,7 @@ class IGDE {
     //    口语变体（先试发一封/先跑起来）直接入槽收口；「我自己定」引导自由输入。
     //    仅在 goal 是当前追问目标（B4 探问指向 goal，即 chips 正挂着 goal 项）时触发——
     //    采集早期聊别的槽时说「跑起来」不该被误吞成目标。 ——
-    if (act.stage === 'S1' && this.missingFields(act).includes('goal') && this._nextProbeSlot(act) === 'goal') {
+    if (act.stage === 'S1' && !act.memory.conflicts.length && this.missingFields(act).includes('goal') && this._nextProbeSlot(act) === 'goal') {
       const raw = String(userText || '').trim();
       const tRun = /^(?:先跑通流程|跑通流程|先跑起来|跑起来|先试发一封|试发一封|先发一封(?:试试|看看)?|发一封试试)[。.！!～~\s]*$/.test(raw);
       const tBare = /^(?:挽回订单|具体金额)[。.！!～~\s]*$/.test(raw);
@@ -946,11 +946,7 @@ class IGDE {
             return out;
           }
           const fc = this._forceConfirmTurn(act, opts, 'stalled');
-          let card = null;
-          if (this.aiEnabled && act.stage === 'S2' && this.missingFields(act).length === 0) {
-            card = this.producePlanCard(act, { locale: opts.locale, code: null });
-          }
-          const out = earlyReturn(fc.reply, [], card);
+          const out = earlyReturn(fc.reply, [], fc.card);
           await doPersist();
           return out;
         }
@@ -987,7 +983,7 @@ class IGDE {
 
     // —— 离题 / 元问题 / 身份询问（四槽全空、无业务指向）：给温和、不重复的接住拉回 ——
     //    不甩死模板、不追问字段、guardrailHits 记空（非边界拒绝）；一旦有业务上下文则交给正常收集。
-    const routed = this._routeOffTopic(act, userText);
+    const routed = forceReason ? null : this._routeOffTopic(act, userText);
     if (routed) {
       const reply = this._rotateReply(act, routed.primary, routed.pool);
       act.messages.push({ role: 'user', content: userText, ts: nowMs });
@@ -1069,7 +1065,7 @@ class IGDE {
     //    自由输入出口等商家打字），文本明确保旧值时整段跳过。
     const askedCf = (act.memory && Array.isArray(act.memory.conflicts) ? act.memory.conflicts : [])
       .find(c => c && c.asked === true && c.slot);
-    if (askedCf && !bySlot[askedCf.slot] && !/维持|保持|原来的|之前的|按旧|不换/.test(String(userText || ''))) {
+    if (askedCf && !bySlot[askedCf.slot] && !/维持|保持|原来(?:的|那)|之前的|按旧|不换|不改|不要改/.test(String(userText || ''))) {
       const chip = (conflictChips(askedCf.slot) || []).find(ch => ch && String(userText || '').includes(ch));
       if (chip && !/维持|保持|原来的|之前的|我自己|我来说/.test(chip)) {
         const chipVal = askedCf.slot === 'audience' && /^\d/.test(chip) ? `${chip}岁` : chip;
@@ -1081,7 +1077,8 @@ class IGDE {
       updates: Object.values(bySlot),
       corrections: env.corrections || [],
       extras: turnExtras,
-      conflictCandidates: []
+      conflictCandidates: [],
+      deferConflicts: Boolean(forceReason || writeIntent)
     };
 
     // —— Wave 5 预检短轮（B2 合并前，命中即短路）：#12 语种越权拦截 / E1 冲动折扣拦截 ——
@@ -1168,7 +1165,7 @@ class IGDE {
 
     // 弱信号离题兜底：仅桩模式使用（无模型时才需引擎判断 stalled）。
     // 有真模型时，_aiCoach 已自然接住离题，此处若兜底会覆盖模型的正常回复 → 必须跳过。
-    if (!usedAI && this._offTopicWeak(act, userText, filledBefore)) {
+    if (!forceReason && !usedAI && this._offTopicWeak(act, userText, filledBefore)) {
       const reply2 = this._rotateReply(act, D_REDIRECT_POOL[0], D_REDIRECT_POOL);
       act.messages.push({ role: 'user', content: userText, ts: nowMs });
       act.messages.push({ role: 'assistant', content: reply2, ts: nowMs });
@@ -1197,6 +1194,20 @@ class IGDE {
       runtime.profileAccepted += profileResult.stats.accepted;
       runtime.profileRejected += profileResult.stats.rejected;
       runtime.profileChanged = profileResult.stats.accepted > 0;
+    }
+
+    // 出口兜底也必须先经过提取、折扣预检和记忆落账；未决冲突仍优先澄清。
+    if ((forceReason || writeIntent) && act.stage === 'S1' && !act.memory.conflicts.length) {
+      const fc = this._forceConfirmTurn(act, { ...opts, previewAvailable: !aiDead }, forceReason || 'write');
+      act.messages.push({ role: 'user', content: userText, ts: nowMs });
+      act.messages.push({ role: 'assistant', content: fc.reply, ts: nowMs });
+      act.updated_at = nowMs;
+      await doPersist();
+      return {
+        reply: fc.reply, stage: act.stage, needs: act.needs, planCard: fc.card,
+        guardrailHits, engine: this._engineOf(usedAI && !aiDead),
+        chips: [], askedSlot: null, agentMeta: this._agentMeta(runtime)
+      };
     }
 
     // —— B4 选问决策（合并后）：问槽 / 冲突澄清 / 不问；question 可被下方对齐防护重绑 ——
@@ -1235,8 +1246,10 @@ class IGDE {
     // S2 收口引导兜底（B5）：四要素齐且在 S2，模型回复缺确认引导时补一句（真模型 30 轮实测
     // 「这就帮你生成」类抢跑——生成动作只能走 /confirm 端点，话术必须把用户引向确认卡）。
     // 例外：本轮是冲突澄清轮（C6.5②）——澄清优先于引导确认，不许混入收口话术。
+    // 卡感知（10-05）：降级轮不出卡（剧本 #13），stub 话术已按卡感知生成——不再拼任何后缀；
+    // 在线轮才拼「确认卡」收口句。
     if (act.stage === 'S2' && this.missingFields(act).length === 0 && question.kind !== 'conflict' && !/确认|核对|行不/.test(reply)) {
-      reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
+      if (usedAI && !aiDead) reply += ' 四样都在下面的确认卡里，你核对一遍，没问题就点确认。';
     }
 
     // B5 硬约束落实：本轮选了追问但模型回复没带任何问句 → 引擎补一句该槽探问。
@@ -1946,7 +1959,7 @@ class IGDE {
       //  答 chips 的其它选项会再挂一轮冲突：账本滞后一轮 + B4 反问刚解决的冲突，一轮两问）
       const askedCf = (mem.conflicts || []).find(c => c.slot === slot && c.asked === true);
       if (askedCf) {
-        if (/维持|保持|原来的|之前的|按旧|不换/.test(turn.userText || '')) continue;
+        if (/维持|保持|原来(?:的|那)|之前的|按旧|不换|不改|不要改/.test(turn.userText || '')) continue;
         const cfOld = prev ? prev.value : '';
         needs[slot] = { value, source: 'explicit', at: now };
         corrected.add(slot);
@@ -1995,13 +2008,15 @@ class IGDE {
     }
 
     // ③ C6 兜底：上一轮冲突追问未被回应 → 接受候选新值 inferred（inferred 槽回复带「不对请纠正」）
+    const retainedConflicts = [];
     for (const cf of (mem.conflicts || []).slice(0, MAX_CONFLICTS)) {
-      if (cf.asked !== true) continue;
+      if (cf.asked !== true) { retainedConflicts.push(cf); continue; }
       const slot = cf.slot;
       if (corrected.has(slot)) continue;
       if ((turn.updates || []).some(x => x.slot === slot)) continue; // 本轮已回应
       // 「维持/保持/原来的」→ 用户选择保留旧值，候选丢弃（矩阵 m10 实测：chips 选项「维持当前年龄定位」）
-      if (/维持|保持|原来的|之前的|按旧|不换/.test(turn.userText || '')) continue;
+      if (/维持|保持|原来(?:的|那)|之前的|按旧|不换|不改|不要改/.test(turn.userText || '')) continue;
+      if (turn.deferConflicts) { retainedConflicts.push(cf); continue; }
       const cur = needs[slot];
       const curVal = cur ? cur.value : '';
       const candVal = clampNeedValue(cf.new);
@@ -2010,7 +2025,7 @@ class IGDE {
         acceptedInferred.push(slot);
       }
     }
-    mem.conflicts = [];
+    mem.conflicts = retainedConflicts;
 
     // ④ 本轮新冲突候选入记忆（asked 标记由 B4 追问后打上）
     for (const c of (turn.conflictCandidates || []).slice(0, MAX_CONFLICTS)) {
@@ -2033,7 +2048,7 @@ class IGDE {
       runtime.correctionsAdded += correctionsAdded;
       runtime.conflictsRaised += (turn.conflictCandidates || []).length;
     }
-    return { corrected, conflictsNew: turn.conflictCandidates || [], acceptedInferred, correctionsAdded };
+    return { corrected, conflictsNew: mem.conflicts, acceptedInferred, correctionsAdded };
   }
 
   /** B5 硬约束：本轮接受了 inferred 槽 → 回复必须含「我理解为…不对请纠正」类表述（缺则引擎补一句） */
@@ -2151,6 +2166,9 @@ class IGDE {
 
   /** 弱信号离题兜底：多轮无任何新字段 + 无业务关键词 + 非确认/调整意图 → 视为 stalled/离题，接住拉回 */
   _offTopicWeak(act, userText, filledBefore) {
+    // S2 满卡态不适用「stalled 采集」语义：确认/否认/调整由 S2 stub 分支全权处理
+    // （10-05 用户实测：「按这个配」在 S2 被误判离题甩到闲聊池）
+    if (act.stage === 'S2' || act.stage === 'S3') return false;
     const t = (userText || '').trim();
     if (!t) return false;
     // 业务关键词命中 → 绝非离题
@@ -2160,7 +2178,8 @@ class IGDE {
       if (filledAfter === 0) return false; // 还没聊出任何字段，用户在想，不判离题
       const userTurns = act.messages.filter(m => m.role === 'user').length;
       if (userTurns < 3) return false; // 至少 3 轮用户发言仍无进展才兜底
-      if (/(对|是的|可以|确认|改|调|换|发|生成|方案|配置|不对|好|行)/.test(t.toLowerCase())) return false; // 在推进的不算
+      // 在推进的不算（10-05 补：配/按这/就这/这样/搞定 等确认意图短句曾被漏判）
+      if (/(对|是的|可以|确认|改|调|换|发|生成|方案|配置|不对|好|行|配|按这|就这|这样|搞定|开配|ok)/.test(t.toLowerCase())) return false;
       return true;
     }
     return false;
@@ -2245,7 +2264,7 @@ class IGDE {
       return { reply: `${this._rotateCatchLine(act)}${ask}`, slot: question.slot };
     }
     const miss = this.missingFields(act);
-    if (!miss.length) return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_CATCH_POOL), slot: null };
+    if (!miss.length) return { reply: this._replyFresh(act, this._readyLine(act), FALLBACK_CATCH_POOL), slot: null };
     const slot = this._nextProbeSlot(act);
     return { reply: `${this._rotateCatchLine(act)}${this._probe(act, slot)}`, slot };
   }
@@ -2328,29 +2347,37 @@ class IGDE {
     if (act.stage === 'S0') {
       // 阶段推进统一由 _advanceStage 负责；此处只产出首轮澄清话术
       if (probeSlot) return { reply: this._probe(act, probeSlot), asked: true };
-      return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
+      return { reply: this._replyFresh(act, this._readyLine(act), FALLBACK_POOL), asked: false };
     }
     if (act.stage === 'S1') {
       if (nonInfo) {
         return { reply: this._replyFresh(act, '没事，这块本来就乱。你就想着「谁快丢了、想让他们回来干啥」就行，别的我来帮你理。', FALLBACK_POOL), asked: false };
       }
-      if (!probeSlot) return { reply: this._replyFresh(act, this._readyLine(), FALLBACK_POOL), asked: false };
+      if (!probeSlot) return { reply: this._replyFresh(act, this._readyLine(act), FALLBACK_POOL), asked: false };
       return { reply: this._probe(act, probeSlot), asked: true };
     }
     if (act.stage === 'S2') {
       // 对齐 / 确认 / 否认；对话里不暴露字段（字段只在确认标签出现）
       // Wave 2：确认动作走 /confirm 端点（先建码后出卡），聊天里的「对/生成」只做引导
+      // 卡感知（10-05）：act.plan_card 存在 = 卡在屏上可引用；降级轮卡未产出（剧本 #13），
+      // 话术不得引用不存在的卡/按钮——诚实说等恢复再摆卡。
+      const hasCard = Boolean(act.plan_card);
+      const idlePool = hasCard ? S2_IDLE_POOL : S2_IDLE_POOL_NO_CARD;
       const t = userText.trim();
-      const deny = /不对|错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
-      if (deny) return { reply: '好，哪点要改？四样都在下面确认卡里，说改哪样就行，其它对的我留着。', asked: false };
+      const deny = /不对|错了|说错|弄错|搞错|改|不是|纠正|重新|等下|等等|再想想/.test(t);
+      if (deny) return { reply: hasCard
+        ? '好，哪点要改？四样都在下面确认卡里，说改哪样就行，其它对的我留着。'
+        : '好，哪点要改？直接说改哪样、改成啥，其它对的我先留着。', asked: false };
       if (this.missingFields(act).length === 0) {
-        const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
-        if (confirm) return { reply: '好，四样都核对齐了。点下面的「确认」按钮，我去你的店铺创建折扣码并生成方案卡。', asked: false };
+        const confirm = /对|是的|可以|确认|没问题|ok|好|行|就这样|按这|配吧|就这么?配|generate|生成|出方案|方案|配置/.test(t.toLowerCase());
+        if (confirm) return { reply: hasCard
+          ? '好，四样都核对齐了。点下面的「确认」按钮，我去你的店铺创建折扣码并生成方案卡。'
+          : '好，四样我都记下了，哪样想再改直接说。等我这边恢复稳了，就把确认卡给你摆出来，到时点确认就开配。', asked: false };
         // 满卡非确认输入 → 待确认专用池（10-05：原 FALLBACK_POOL 完整句带罐头接住语且重问已填槽）
-        return { reply: this._replyFresh(act, S2_IDLE_POOL[0], S2_IDLE_POOL), asked: false };
+        return { reply: this._replyFresh(act, idlePool[0], idlePool), asked: false };
       }
       if (nonInfo) {
-        return { reply: this._replyFresh(act, '没事，咱不急。方案在下面确认卡里，想调哪样直接说。', S2_IDLE_POOL), asked: false };
+        return { reply: this._replyFresh(act, '没事，咱不急。' + (hasCard ? '方案在下面确认卡里，想调哪样直接说。' : '哪样想调直接说，等我恢复稳了就给你出确认卡。'), idlePool), asked: false };
       }
       return { reply: this._probe(act, probeSlot || this.missingFields(act)[0]), asked: true };
     }
@@ -2380,8 +2407,11 @@ class IGDE {
   }
 
   /** 主要信息收集完时的自然收口话术（不在对话里列字段 — 字段只在确认标签里出现；含「确认/核对」引导） */
-  _readyLine() {
-    return '四样都齐了。我帮你按这个配一封挽回邮件，你在下面确认卡里核对一遍，没问题就点确认。';
+  _readyLine(act) {
+    // 卡感知（10-05 用户实测：降级会话整段引用「确认卡」但剧本 #13 降级不出卡 → 话术撒谎）。
+    // act.plan_card 存在 = 之前在线轮已产出、卡在屏上 → 可引用；否则诚实说等恢复再摆卡。
+    if (act && act.plan_card) return '四样都齐了。我帮你按这个配一封挽回邮件，你在下面确认卡里核对一遍，没问题就点确认。';
+    return '四样都齐了——受众、挽回原因、钩子、目标我都记下了。哪样想改直接说；等我这边恢复稳了，就把确认卡给你摆出来。';
   }
 
   _criticRequired(text) {

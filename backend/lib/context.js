@@ -23,6 +23,37 @@ const TEMPORARY_SIGNAL_RE = /(这次|本次|这一封|这封|这轮|当前活动
 const CORRECTION_SIGNAL_RE = /(不是|不对|改成|改为|纠正|更新|换成|其实|之前说错|rather|instead|actually|correction)/i;
 const PII_RE = /[^\s@]+@[^\s@]+\.[^\s@]+|(?:\+?86[- ]?)?1[3-9]\d{9}/i;
 
+// 引文存在不等于值有依据。只接受原文值或明确的同义归一化，拒绝自由编造。
+function memoryValueText(value) {
+  return String(value || '').toLowerCase().replace(/免邮|包邮|free shipping/gi, '免邮')
+    .replace(/[\s，,。；;：:！!？?、"'“”‘’]|都/g, '');
+}
+
+function valueIsGrounded(value, evidence) {
+  const val = memoryValueText(value), quote = memoryValueText(evidence);
+  const at = quote.lastIndexOf(val);
+  if (!val || at < 0) return false;
+  // 不把否定句里的正向词误记成肯定事实。
+  return !/(?:不允许|不可以|不得|不许|不|不要|不能|禁止|不是|not|no)(?:提供|使用|采用|默认|给|用)?$/.test(quote.slice(0, at));
+}
+
+function temporaryEvidence(userText, evidence) {
+  // 使用引文所属完整分句，防止模型截掉“这次”；其他分句的长期事实仍可入库。
+  return String(userText || '').split(/[，,。；;\n]/).some(clause =>
+    clause.includes(evidence) && TEMPORARY_SIGNAL_RE.test(clause));
+}
+
+function samePolicySubject(a, b) {
+  const subject = value => memoryValueText(value).replace(/^(?:不允许|不可以|不要|不能|禁止|允许|可以|不)/, '');
+  return subject(a) && subject(a) === subject(b);
+}
+
+function replacesReferencedPolicy(old, evidence) {
+  const quote = memoryValueText(evidence);
+  const correction = /改成|改为|换成|纠正|更新|instead|rather/.exec(quote);
+  return Boolean(correction && quote.slice(0, correction.index).includes(memoryValueText(old)));
+}
+
 function clampInt(value, fallback, min, max) {
   const n = Number(value);
   if (!Number.isFinite(n)) return fallback;
@@ -160,17 +191,20 @@ function applyAgentProfilePatch(profile, patch, options = {}) {
   function admit(field, raw) {
     const value = String(raw && raw.value || '').trim().slice(0, field === 'constraints' ? 160 : 120);
     const evidence = String(raw && raw.evidence || '').trim();
-    if (!PROFILE_FIELDS.includes(field) || !value || PII_RE.test(value) || !evidenceIsGrounded(userText, evidence)) {
+    if (!PROFILE_FIELDS.includes(field) || !value || PII_RE.test(value) || !evidenceIsGrounded(userText, evidence) || !valueIsGrounded(value, evidence)) {
       stats.rejected++;
       return;
     }
-    if (TEMPORARY_SIGNAL_RE.test(evidence)) { stats.rejected++; return; }
+    if (TEMPORARY_SIGNAL_RE.test(evidence) || temporaryEvidence(userText, evidence)) { stats.rejected++; return; }
     if ((field === 'default_offer' || field === 'constraints') && !DURABLE_SIGNAL_RE.test(userText)) {
       stats.rejected++;
       return;
     }
     if (field === 'constraints') {
-      const values = Array.isArray(next.constraints) ? next.constraints : [];
+      let values = Array.isArray(next.constraints) ? next.constraints : [];
+      if (CORRECTION_SIGNAL_RE.test(evidence)) {
+        values = values.filter(old => !replacesReferencedPolicy(old, evidence) && !samePolicySubject(old, value));
+      }
       if (!values.includes(value)) values.push(value);
       next.constraints = values.slice(-5);
       stats.accepted++;
@@ -317,7 +351,7 @@ function applyMemoryPatch(act, patch, options = {}) {
     const key = String(raw.key || '').trim().slice(0, 48);
     const value = String(raw.value || '').trim().slice(0, 240);
     const evidence = String(raw.evidence || '').trim();
-    if (!key || !value || !/^[\w\u3400-\u9fff.-]+$/u.test(key) || !evidenceIsGrounded(userText, evidence)) {
+    if (!key || !value || !/^[\w\u3400-\u9fff.-]+$/u.test(key) || !evidenceIsGrounded(userText, evidence) || !valueIsGrounded(value, evidence)) {
       stats.rejected++;
       return;
     }

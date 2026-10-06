@@ -15,6 +15,8 @@ import type { NextConfig } from 'next';
 const BACKEND_URL = process.env.BACKEND_URL || 'http://localhost:4180';
 
 const nextConfig: NextConfig = {
+  // Dev and production builds must not overwrite each other's manifests.
+  distDir: process.env.NODE_ENV === 'development' ? '.next-dev' : '.next',
   output: 'standalone',
   reactStrictMode: true,
   // /api/draft 同步等万相出图可达 60-120s，默认代理超时会 ECONNRESET；放宽到 240s（与 mailgen guard 一致）

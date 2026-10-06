@@ -12,6 +12,7 @@ const { Store, uid } = require('./lib/store');
 const igdeMod = require('./lib/igde');
 const { IGDE, guardrailL2 } = igdeMod;
 const needsMod = require('./lib/needs');
+const flowV6 = require('./lib/conversation-v6');
 const execution = require('./lib/execution');   // Wave 2：D3 planCard 同源 / D4 五道闸门 / E2 建码决策 / holdout / E3 时区
 const { LLMClient } = require('./lib/llm');
 const { normalizeAgentProfile } = require('./lib/context');
@@ -185,6 +186,9 @@ function emitRecoverReceipt({ draftId, campaignId, audience, audienceId, coupon,
 function latestPrefsFor(userId, excludeActId, opts) {
   const acts = store.getActsByUser(userId, opts).filter(a => a.id !== excludeActId);
   for (const a of acts) {   // getActsByUser 已按 updated_at 降序
+    if (a.flow_version === 6 && a.execution_snapshot && a.plan_card && !a.plan_card.preview) {
+      return { ...needsMod.plainNeeds(a.needs), offer_text: needsMod.slotText(a.needs, 'offer'), source: 'activity_history', act_id: a.id };
+    }
     const p = a.memory && a.memory.prefs;
     if (p && typeof p === 'object' && String(p.audience || '').trim()) return p;
   }
@@ -432,7 +436,20 @@ async function generateMailHtml(draft, card, opts = {}) {
   });
 
   if (result.success) {
-    draft.html = result.html || '';
+    // 图片/文案生成可能晚于商家编辑；以落库的编辑文案为准，不复活旧 HTML。
+    const latest = store.getDraft(draft.id);
+    if (latest) {
+      for (const key of ['status', 'sent_at', 'esp_message_id', 'cost', 'fail_reason', 'gate_checklist', 'scheduled_at']) {
+        draft[key] = latest[key];
+      }
+    }
+    const edits = latest && latest.mailgen_meta && latest.mailgen_meta.copy_edits;
+    if (edits) {
+      draft.subject = latest.subject;
+      draft.body = latest.body;
+      draft.variants = latest.variants;
+    }
+    draft.html = edits ? '' : result.html || '';
     draft.image_path = result.image_path || '';
     // 万相提示词快照：EditModal 编辑态展示「真实提示词」，重跑「生成图片」时复用
     if (result.image_prompt) draft.image_prompt = result.image_prompt;
@@ -441,10 +458,12 @@ async function generateMailHtml(draft, card, opts = {}) {
     if (result.subject && !(card && card.subject)) draft.subject = result.subject;
     if (result.body    && !(card && card.body))    draft.body    = result.body;
     draft.mailgen_meta = {
+      ...(latest?.mailgen_meta || draft.mailgen_meta || {}),
       copy_provider: result.copy_provider,
       image_method:  result.image_method,
       warnings:      result.warnings || null,
       config_source: result.config_source,
+      ...(edits ? { copy_edits: edits } : {}),
     };
     store.upsertDraft(draft);
     return result;
@@ -592,6 +611,7 @@ async function llmCoach(messages, opts) {
     : await client.chatStructured({ messages, maxTokens: config.aiMaxOutputTokens });
   return {
     reply: r.reply,
+    intent: r.intent, changes: r.changes, preview: r.preview, profileOperations: r.profileOperations,
     needs: r.needs,
     slotUpdates: r.slotUpdates || [],
     extras: r.extras || [],
@@ -652,7 +672,7 @@ async function fetchResend(draft, messages, c) {
     // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
     if (r.html) msg.html = applyFooterLinks(personalizeHtml(r.html, r), draft.id, r.email);
     else if (!r.tier || r.tier === 'standard') {
-      if (draft.html && !String(draft.html).startsWith('ERROR')) msg.html = applyFooterLinks(personalizeHtml(draft.html, r), draft.id, r.email);
+      if (draftHtmlCurrent(draft)) msg.html = applyFooterLinks(personalizeHtml(draft.html, r), draft.id, r.email);
     }
     // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
     const unsub = emailFooterUrls(draft.id, r.email);
@@ -696,7 +716,7 @@ async function fetchBrevo(draft, messages, c) {
       subject: String(r.subject || '').slice(0, 200),
       textContent: String(r.body || '').slice(0, 20000),
     };
-    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draftHtmlCurrent(draft) ? draft.html : '');
     // M10 + M3：standard 档共享 html 注入逐收件人称呼，再刷新页脚退订链接（带该收件人 e 参数）
     const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
     if (html) body.htmlContent = html;
@@ -718,7 +738,7 @@ async function fetchBrevo(draft, messages, c) {
 async function fetchSmtp(draft, messages, c) {
   const ids = [];
   for (const r of messages) {
-    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draft.html && !String(draft.html).startsWith('ERROR') ? draft.html : '');
+    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draftHtmlCurrent(draft) ? draft.html : '');
     // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
     const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
     // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
@@ -779,6 +799,11 @@ function matchAudienceByDesc(desc, aud) {
 }
 function resolveRecipients(draft) {
   const scope = ownerScope(draft.user_id);
+  if (draft.mailgen_meta?.flow_version === 6) {
+    const ids = new Set(draft.mailgen_meta.recipient_ids || []);
+    return filterTargetable(store.getAudienceForUser(scope.userId, scope).filter(a => ids.has(a.id)))
+      .filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
+  }
   return filterTargetable(matchAudienceByDesc(draft.audience, store.getAudienceForUser(scope.userId, scope))).slice(0, 200);
 }
 // Wave 2 D3：净名单唯一口径（可发送上限 200 与 reach_count / matchedCount / holdout 圈定同源）
@@ -880,9 +905,11 @@ async function renderForDraft(draft, recipients) {
     // M4：品牌优先草稿固化快照（设置页 > 方案卡，创建时已解析），兜底配置链
     brand: draft.brand || resolveBrand({})
   };
-  const variants = (Array.isArray(draft.variants) && draft.variants.length)
+  const baseVariants = (Array.isArray(draft.variants) && draft.variants.length)
     ? draft.variants
     : variantsMod.standardVariants({ brand: draftFacts.brand, discount: draft.discount, coupon: draft.coupon, product: draftFacts.product });
+  const edits = draft.mailgen_meta && draft.mailgen_meta.copy_edits;
+  const variants = edits ? baseVariants.map(v => ({ ...v, ...edits })) : baseVariants;
   return render.renderCampaign({
     draft: draftFacts,
     variants,
@@ -892,6 +919,26 @@ async function renderForDraft(draft, recipients) {
     translateFn: translateText,
     cache: translationCache
   });
+}
+
+function draftHtmlCurrent(draft) {
+  return Boolean(draft.html && !String(draft.html).startsWith('ERROR') && !(draft.mailgen_meta && draft.mailgen_meta.copy_edits));
+}
+
+// 编辑只覆盖商家实际改过的字段，保留其他字段的分层文案；旧 HTML 不再携带旧正文。
+function applyDraftCopyEdits(draft, body) {
+  const changed = {};
+  if (body && typeof body.subject === 'string' && body.subject.trim()) {
+    const subject = applySubjectTone(body.subject.trim(), draft.audience);
+    if (subject !== draft.subject) changed.subject = subject;
+  }
+  if (body && typeof body.body === 'string' && body.body.trim() && body.body.trim() !== draft.body) changed.body = body.body.trim();
+  if (!Object.keys(changed).length) return;
+  const variants = Array.isArray(draft.variants) && draft.variants.length ? draft.variants : variantsMod.standardVariants({ brand: draft.brand, discount: draft.discount, coupon: draft.coupon, product: productFallbackFor(draft) });
+  Object.assign(draft, changed);
+  draft.variants = variants.map(v => ({ ...v, ...changed }));
+  draft.mailgen_meta = { ...draft.mailgen_meta, copy_edits: { ...(draft.mailgen_meta && draft.mailgen_meta.copy_edits), ...changed } };
+  draft.html = '';
 }
 
 // 仿真归因事件（演示模式驱动看板；真实模式仅在有回执时写入）——事件打上 draft 归属（安全整改）
@@ -946,7 +993,7 @@ function upsertDraftPreservingAsync(draft) {
 
 // —— D4 五道闸门不过时的 draft 失败收口（人话原因 + checklist 留痕）——
 function failDraftByGates(draft, checklist) {
-  const failing = checklist.items.filter(i => !i.pass);
+  const failing = checklist.items.filter(i => !i.pass && i.blocking !== false);
   draft.status = 'failed';
   draft.fail_reason = '发送闸门未通过：' + failing.map(f => f.reason || f.label).join('；');
   draft.gate_checklist = checklist.items;
@@ -954,6 +1001,21 @@ function failDraftByGates(draft, checklist) {
   metricsInc('send_fail');
   logEvent('send_gate_fail', { draft_id: draft.id, gates: failing.map(f => f.gate) });
   return { error: draft.fail_reason, checklist: checklist.items, recipients: 0, cost: 0, estGmv: draft.estGmv };
+}
+
+function sendActCurrent(act, draft) {
+  if (!act) return false;
+  const current = store.getAct(act.id);
+  return Boolean(current && current.execution_snapshot && (current.flow_version === 6 ? current.business_version === act.business_version : current.updated_at === act.updated_at) &&
+    JSON.stringify(current.execution_snapshot) === JSON.stringify(act.execution_snapshot) &&
+    (current.flow_version === 6
+      ? flowV6.readiness(current).prepare && flowV6.sendApprovalCurrent(current, store.getDraft(draft?.id))
+      : !(current.memory && current.memory.conflicts && current.memory.conflicts.length)));
+}
+
+function failChangedSend(draft, checklist) {
+  return failDraftByGates(draft, { ...checklist, items: checklist.items.map(i => i.gate === 'amount_code'
+    ? { ...i, pass: false, reason: '方案已经变化或作废，请回到对话重新确认后再发送' } : i) });
 }
 
 async function sendDraft(draft, opts = {}) {
@@ -973,8 +1035,9 @@ async function sendDraft(draft, opts = {}) {
   //    唯一闸门=时段且不过 → 缓发（返回 deferred，由队列带 run_after 重新入队，非永久拒绝）；
   //    其余任一不过 → 永久拒绝并说明原因；店铺 API 校验超时在闸门⑤内视为不过（宁缓发不错发）。
   const checklist = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: all });
+  if (!sendActCurrent(act, draft)) return failChangedSend(draft, checklist);
   if (!checklist.all_pass) {
-    const failing = checklist.items.filter(i => !i.pass);
+    const failing = checklist.items.filter(i => !i.pass && i.blocking !== false);
     if (failing.length === 1 && failing[0].gate === 'window' && !opts.noReschedule) {
       return { deferred: true, retryAt: checklist.windowRetryAt, checklist: checklist.items };
     }
@@ -995,6 +1058,10 @@ async function sendDraft(draft, opts = {}) {
   const real = (config.mode === 'real' && espReady());
   draft.status = 'sending'; upsertDraftPreservingAsync(draft);
   if (!real) {
+    if (!sendActCurrent(act, draft)) return failChangedSend(draft, checklist);
+    if (inFlightActWrites.has(act.id)) return act.flow_version === 6 ? { deferred: true, retryAt: Date.now() + 1000 } : failChangedSend(draft, checklist);
+    inFlightActWrites.add(act.id);
+    try {
     draft.status = 'sent';
     draft.sent_at = Date.now();
     draft.esp_message_id = 'sim_' + uid();
@@ -1016,6 +1083,9 @@ async function sendDraft(draft, opts = {}) {
     metricsInc('send_sim');
     logEvent('send', { real: false, recipients: allow.length, skipped_by_frequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost });
     return { real: false, recipients: allow.length, skippedByFrequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost, estGmv: draft.estGmv };
+    } finally {
+      inFlightActWrites.delete(act.id);
+    }
   }
   // ④ 渲染管线（真实模式）：变体→语种→模板展开→G0
   const rendered = await renderForDraft(draft, allow);
@@ -1038,6 +1108,10 @@ async function sendDraft(draft, opts = {}) {
   let attempt = 0, lastErr;
   while (attempt < 3) {
     attempt++;
+    // 渲染/重试期间允许改参；真正提交 ESP 前重读并同步取得同会话门禁。
+    if (!sendActCurrent(act, draft)) return failChangedSend(draft, checklist);
+    if (inFlightActWrites.has(act.id)) return act.flow_version === 6 ? { deferred: true, retryAt: Date.now() + 1000 } : failChangedSend(draft, checklist);
+    inFlightActWrites.add(act.id);
     try {
       const sendViaEsp = (c) => {
         if (c.espProvider === 'brevo') return fetchBrevo(draft, sendable, c);
@@ -1074,7 +1148,9 @@ async function sendDraft(draft, opts = {}) {
       metricsInc('send_real');
       logEvent('send', { real: true, recipients: sendable.length, skipped_by_frequency: checklist.skippedByFrequency, holdout: heldOut, g0_blocked: blockedList.length, attempt, cost: draft.cost });
       return { real: true, id: draft.esp_message_id, recipients: sendable.length, skippedByFrequency: checklist.skippedByFrequency, holdout: heldOut, g0Blocked: blockedList.length, cost: draft.cost, estGmv: draft.estGmv };
-    } catch (e) { lastErr = e; await sleep(1000 * attempt); }
+    } catch (e) { lastErr = e; }
+    finally { inFlightActWrites.delete(act.id); }
+    await sleep(1000 * attempt);
   }
   draft.status = 'failed';
   draft.fail_reason = String(lastErr && lastErr.message || lastErr);
@@ -1279,7 +1355,7 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
     connector: connectors, publicBaseUrl: config.publicBaseUrl
   });
   if (!gates.all_pass) {
-    const failing = gates.items.filter(i => !i.pass);
+    const failing = gates.items.filter(i => !i.pass && i.blocking !== false);
     if (failing.length === 1 && failing[0].gate === 'window') {
       return { deferred: true, retryAt: gates.windowRetryAt, checklist: gates.items };
     }
@@ -1433,12 +1509,12 @@ async function processCampaignSendJob({ job, payload }) {
 // —— Wave 2 D3：草稿创建唯一实现（confirm 同源路径与 /api/draft 兼容路径共用）——
 // authoritative=true：card 来自 act.execution_snapshot/confirm 权威序列化，estGmv/matchedCount 直接取卡上口径，
 // 保证「卡 ↔ 草稿」四字段（audience/discount/count/estGmv）逐字段相等（闸门⑤ diff=0 的前提）。
-async function createDraftFromCard(card, { actId = null, userId = null, authoritative = false, draftId = null } = {}) {
+async function createDraftFromCard(card, { actId = null, userId = null, authoritative = false, draftId = null, frozenRecipients = null } = {}) {
   const scope = ownerScope(userId);
-  const net = audienceNetList(card.audience, scope);
+  const net = frozenRecipients || audienceNetList(card.audience, scope);
   const estGmv = authoritative && card.estGmv ? card.estGmv.amount : +net.reduce((s, a) => s + (a.estGmv || 0), 0).toFixed(2);
-  const matchedCount = authoritative ? (Number(card.reach_count) || net.length) : net.length;
-  const conditions = audienceConditions(card.audience, scope);
+  const matchedCount = authoritative && Number.isFinite(Number(card.reach_count)) ? Number(card.reach_count) : net.length;
+  const conditions = frozenRecipients ? { desc: card.audience, filters: [{ field: 'audience', value: card.audience }, { field: 'email', value: '排除无效邮箱及已退订收件人' }], matchedCount: net.length, estGmv } : audienceConditions(card.audience, scope);
   // ⑥ 竞品套路卡检索（G6：只出结构卡，raw_email 绝不外发）+ 基准库 Top-3
   const refCards = competitorsMod.topCards(store, userId, { audience: card.audience, discount: card.discount, k: 3 });
   const benchLib = benchmarkMod.getBenchmark(store);
@@ -1462,7 +1538,9 @@ async function createDraftFromCard(card, { actId = null, userId = null, authorit
     return { reply: r.reply, needs: r.needs, jsonOk: r.jsonOk, raw: r.raw };
   } : null;
   const strategyHints = refCards.map(c => ({ theme_formula: c.theme_formula, angle: c.angle, discount_range: c.discount_range, timing: c.timing }));
-  const v = await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
+  const v = act?.flow_version === 6
+    ? { variants: variantsMod.standardVariants(draftFacts).map(x => ({ ...x, subject: card.subject, body: card.body })), provider: 'approved_preview' }
+    : await variantsMod.generateVariants({ draft: draftFacts, needs, llmJSON, strategyHints, tagDist });
   if (v.warning) logEvent('variants_fallback', { warning: v.warning });
   metricsInc(v.provider === 'llm' ? 'variants_llm' : 'variants_standard');
   // M5 口径护栏：加购未付人群的主题禁 order/purchase 措辞（生成侧规则 + 出口兜底双保险）
@@ -1485,11 +1563,16 @@ async function createDraftFromCard(card, { actId = null, userId = null, authorit
     strategy_card_ids: refCards.map(c => c.id),
     audience_conditions: conditions
   };
+  if (act?.flow_version === 6) {
+    draft.subject = card.subject;
+    draft.mailgen_meta = { flow_version: 6, business_version: act.business_version, recipient_ids: net.map(r => r.id), product_category: card.category || '' };
+    draft.variants = draft.variants.map(v => ({ ...v, subject: draft.subject, body: draft.body }));
+  }
   store.upsertDraft(draft);
 
   // 同步生成 HTML 邮件 + 营销图片（标准档直出 html；变体在发送环节逐收件人渲染）
   try {
-    await generateMailHtml(draft, card);
+    await generateMailHtml(draft, card, { copyPassthrough: act?.flow_version === 6 });
     draft.image_path = draft.image_path || '';
     store.upsertDraft(draft);
   } catch (err) {
@@ -1519,20 +1602,33 @@ function checklistContract(raw, { frozen = false, note = null } = {}) {
   return { items: raw.items, all_pass: raw.all_pass, holdout };
 }
 
+// —— 已准备方案的发送核对单只读重算（confirm 幂等分支与 GET /api/act/:id/checklist 共用）——
+// 不落库、不发码、不改业务版本；S3+执行快照+权威卡+存活草稿齐备才可算，其余形态返回 null 由调用方定 409/跳过。
+async function preparedChecklistFor(act) {
+  if (act.stage !== 'S3' || !act.execution_snapshot || !act.plan_card || !act.plan_card.draft_id) return null;
+  const draft = store.getDraft(act.plan_card.draft_id);
+  if (!draft) return null;
+  const v6 = act.flow_version === 6;
+  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: v6 ? resolveRecipients(draft) : audienceNetList(draft.audience, ownerScope(act.user_id)) });
+  const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') });
+  return { checklist: cc, holdout: cc.holdout, draft_id: draft.id, draft };
+}
+
 // —— Wave 2：S2 消息轮的「无码预览卡」升级为 planCard 权威形状（与 confirm 出卡同构，前端同一组件渲染）——
 // base（igde 基础卡，discount 为文案字符串）→ 补 reach_count/estGmv/signature/discount 对象（code_status=pending）。
 // S3 轮回传的 act.plan_card 已是权威形状，原样返回。
-function withAuthoritativePreview(act, planCard) {
+function withAuthoritativePreview(act, planCard, codeStatus = 'pending') {
   if (!planCard || (planCard.discount && typeof planCard.discount === 'object')) return planCard;
   const wrapped = execution.buildPlanCard({
-    base: planCard, code: null, codeStatus: 'pending',
-    reachCount: audienceNetList(planCard.audience, ownerScope(act.user_id)).length,
+    base: planCard, code: null, codeStatus,
+    reachCount: act.flow_version === 6 ? flowV6.resolveAudience(planCard.audience, store.getAudienceForUser(act.user_id, ownerScope(act.user_id))).recipients.length : audienceNetList(planCard.audience, ownerScope(act.user_id)).length,
     extras: (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [],
     brand: resolveMerchantBrand(act),
     unsubscribeOk: Boolean(config.publicBaseUrl)
   });
   if (!config.visionKey) wrapped.skip_image = true;
   wrapped.brand = resolveMerchantBrand(act);
+  if (act.flow_version === 6) { wrapped.business_version = act.business_version; wrapped.template_preview = planCard.template_preview; }
   return wrapped;
 }
 
@@ -1543,32 +1639,60 @@ function withAuthoritativePreview(act, planCard) {
 function persistPreviewCard(act, result) {
   if (!result || !result.planCard || act.stage !== 'S2') return;
   act.plan_card = { ...result.planCard, preview: true };
+  if (act.flow_version === 6) flowV6.refreshActions(act);
   store.upsertAct(act);
 }
 
 async function confirmActToStage3(act, body = {}, userId = null) {
   needsMod.migrateAct(act);
+  const v6 = act.flow_version === 6;
+  if (v6 && body.expected_business_version !== act.business_version) return { ok: false, status: 409, error: '方案业务版本已经更新，请刷新后再准备' };
+  if (act.stage === 'closed') return { ok: false, status: 409, error: '会话已收尾归档，不能再确认' };
+  if (Object.prototype.hasOwnProperty.call(body, 'expected_updated_at') &&
+      (!Number.isFinite(body.expected_updated_at) || body.expected_updated_at !== act.updated_at)) {
+    return { ok: false, status: 409, error: '需求已经更新，请刷新并核对最新确认卡后再确认' };
+  }
+  if (v6 && body.nohook === true) {
+    flowV6.applyChanges(act, [{ op: 'set', slot: 'offer', value: '无优惠', evidence: '无优惠' }], '无优惠');
+    const planCard = withAuthoritativePreview(act, flowV6.previewCard(igde, act, config.shopDefaultLocale || 'en'), 'none');
+    act.flow_state.resource_error = null;
+    act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
+    persistPreviewCard(act, { planCard });
+    return { ok: true, preview_only: true, act, planCard };
+  }
+  if (v6 && !flowV6.readiness(act).prepare) return { ok: false, status: 409, error: flowV6.readiness(act).blockedReasons.join('；') };
+  const selected = v6 ? flowV6.resolveAudience(needsMod.slotText(act.needs, 'audience'), store.getAudienceForUser(act.user_id, ownerScope(act.user_id))) : null;
+  if (selected && !selected.resolved) {
+    act.flow_state.prepare_error = selected.reason + '。请在“本次活动信息”中修改受众范围，例如“加购未付客户”，然后重新准备。';
+    store.upsertAct(act);
+    return { ok: false, status: 409, error: act.flow_state.prepare_error };
+  }
+  if (v6) act.flow_state.prepare_error = null;
+  if (!v6 && act.memory && Array.isArray(act.memory.conflicts) && act.memory.conflicts.length) {
+    return { ok: false, status: 409, error: '需求还有未解决的冲突，请先回答对话中的澄清问题再确认' };
+  }
   const locale = config.shopDefaultLocale || 'en';
   const extras = (act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [];
 
-  // 幂等重确认：S3 且快照/卡/草稿都在 → 回已有权威卡（重确认不是新方案，不重复建码）
+  // 幂等重确认：S3 且快照/卡/草稿都在 → 回已有权威卡 + 现算核对单（重确认不是新方案，不重复建码）
   if (act.stage === 'S3' && act.execution_snapshot && act.plan_card && !(body && (body.nohook || body.reuse_code))) {
-    const existing = act.plan_card.draft_id ? store.getDraft(act.plan_card.draft_id) : null;
-    if (existing) {
-      const raw = await execution.evaluateChecklist({ act, draft: existing, store, config, connector: connectors, recipients: audienceNetList(existing.audience, ownerScope(act.user_id)) });
-      const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') });
-      return { ok: true, repeated: true, act, planCard: act.plan_card, checklist: cc, holdout: cc.holdout, draft_id: existing.id, draft: existing };
-    }
+    const rep = await preparedChecklistFor(act);
+    if (rep) return { ok: true, repeated: true, act, planCard: act.plan_card, checklist: rep.checklist, holdout: rep.holdout, draft_id: rep.draft_id, draft: rep.draft };
   }
   if (act.stage === 'closed') return { ok: false, status: 409, error: '会话已收尾归档，不能再确认' };
-  if (needsMod.missingSlots(act.needs).length) return { ok: false, status: 409, error: '四项要素还没齐（针对谁/为什么挽回/给什么钩子/要什么结果），先在对话里补全再确认' };
+  if (!v6 && needsMod.missingSlots(act.needs).length) return { ok: false, status: 409, error: '四项要素还没齐（针对谁/为什么挽回/给什么钩子/要什么结果），先在对话里补全再确认' };
 
   const offerText = needsMod.slotText(act.needs, 'offer');
   let codeStatus = 'none';
   let code = null;
-  let percent = execution.parseOfferPercent(offerText); // null = 非折扣型钩子（包邮/赠品/无额外优惠…）
+  let percent = v6 ? impulse.parseTextPercent(offerText) : execution.parseOfferPercent(offerText);
+  if (v6 && percent == null && !body.nohook && !body.reuse_code) {
+    const named = execution.parseOfferCodeName(offerText) || offerText.match(/\b(SAVE[\w-]+)\b/i)?.[1];
+    if (named) body = { ...body, reuse_code: named };
+  }
   let note = null;
   let createError = null;
+  if (v6 && !body.nohook && !body.reuse_code && /免邮|包邮|赠品|满\s*\d+\s*减/.test(offerText)) createError = '当前店铺执行器尚不支持该优惠资源；预览和优惠选择已保留，请核对履约方式或选择支持的优惠';
 
   if (body && body.nohook === true) {
     // 无钩子重试出口：跳过建码，出无钩子卡
@@ -1579,6 +1703,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     // 自带码出口：校验存在且有效后出卡（code_status=reused）
     const want = body.reuse_code.trim().toUpperCase();
     if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
+      if (v6) createError = '店铺未连接，当前优惠不能执行；请连接店铺或明确选择无优惠';
       createError = '店铺未连接，无法校验现成折扣码「' + want + '」';
     } else {
       try {
@@ -1595,6 +1720,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     }
   } else if (percent != null && percent > 0) {
     if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
+      if (v6) createError = '店铺未连接，当前优惠不能执行；请连接店铺或明确选择无优惠';
       // 未连接店铺 → 过渡期：允许出无钩子 planCard（不含折扣码，卡上明示），发送入口保留
       codeStatus = 'none';
       percent = 0;
@@ -1625,7 +1751,9 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     act.code_status = 'failed';
     act.stage = 'S2';
     act.execution_snapshot = null;
-    act.plan_card = null;
+    if (!v6) act.plan_card = null;
+    if (v6) { act.flow_state.resource_error = createError; flowV6.refreshActions(act); }
+    act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
     store.upsertAct(act);
     return { ok: false, status: 409, code_status: 'failed', reason: createError, options: CONFIRM_FAIL_OPTIONS, act };
   }
@@ -1633,9 +1761,25 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   // —— 成功路径：服务端同源序列化（先序列化 JSON，卡面渲染与草稿渲染都读这一份）——
   const effectivePercent = (codeStatus === 'created' || codeStatus === 'reused') ? (Number(percent) || 0) : 0;
   const base = igde.producePlanCard(act, { locale, code, codeStatus });
+  if (v6) {
+    const preview = act.plan_card || flowV6.previewCard(igde, act, locale);
+    base.subject = preview.subject; base.body = preview.body;
+    base.product = preview.product || ''; base.category = preview.category || '';
+    if (code) {
+      const bind = text => String(text || '').replace(/\{\{\s*(coupon|discount_code)\s*\}\}/gi, () => code)
+        .replace(/\{\{\s*discount(?:_percent)?\s*\}\}/gi, () => `${effectivePercent}%`);
+      base.subject = bind(base.subject); base.body = bind(base.body);
+      if (!base.body.includes(code)) base.body += `\n\nUse code ${code} at checkout for ${effectivePercent}% off.`;
+      if (base.subject !== preview.subject || base.body !== preview.body) {
+        act.business_version += 1;
+        act.flow_state.approval = null;
+      }
+    }
+  }
   base.discountNum = effectivePercent;
   const brand = resolveMerchantBrand(act);
-  const reachCount = audienceNetList(base.audience, ownerScope(act.user_id)).length;
+  const fixedRecipients = v6 ? filterTargetable(selected.recipients).filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed').slice(0, 200) : null;
+  const reachCount = v6 ? fixedRecipients.length : audienceNetList(base.audience, ownerScope(act.user_id)).length;
   const draftId = uid('dr_');
   const planCard = execution.buildPlanCard({
     base, code, codeStatus, reachCount, extras, brand,
@@ -1648,10 +1792,18 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   act.plan_card = planCard;
   act.stage = 'S3';
   act.code_status = codeStatus;
+  act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
+  if (v6) {
+    planCard.business_version = act.business_version;
+    planCard.flow_version = 6;
+    act.flow_state.prepared_version = act.business_version;
+    act.flow_state.resource_error = null;
+    flowV6.refreshActions(act);
+  }
   // —— Wave 4 A3①：S2 确认通过 → 方案关键参数沉淀进 act.memory.prefs（下次「照上次的来」可复用）——
   // 值一律字符串化（memory.prefs 经 normalizeMemory 收口为字符串 map；数值读取侧 Number() 还原）
   act.memory = needsMod.ensureMemory(act.memory);
-  act.memory.prefs = {
+  if (!v6) act.memory.prefs = {
     audience: String(planCard.audience || ''),
     reason: String(planCard.reason || ''),
     goal: String(planCard.goal || ''),
@@ -1668,11 +1820,16 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   };
   store.upsertAct(act);
 
-  const created = await createDraftFromCard(planCard, { actId: act.id, userId, authoritative: true, draftId });
+  const created = await createDraftFromCard(planCard, { actId: act.id, userId, authoritative: true, draftId, frozenRecipients: fixedRecipients });
   const draft = created.draft;
+  if (v6) {
+    draft.mailgen_meta = { ...(draft.mailgen_meta || {}), flow_version: 6, business_version: act.business_version, recipient_ids: fixedRecipients.map(r => r.id) };
+    draft.variants = (draft.variants || []).map(v => ({ ...v, subject: draft.subject, body: draft.body }));
+    store.upsertDraft(draft);
+  }
 
   // confirm 时闸门预检一次返回；holdout 先圈定展示但不落库（真正落库冻结在 send 放行时）
-  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: audienceNetList(draft.audience, ownerScope(act.user_id)) });
+  const raw = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients: v6 ? resolveRecipients(draft) : audienceNetList(draft.audience, ownerScope(act.user_id)) });
   const cc = checklistContract(raw, { frozen: false, note: (raw.holdoutPlan.note || '发送放行时冻结') + '；确认后名单变动不影响，冻结以放行时刻为准' });
   return { ok: true, act, planCard, checklist: cc, holdout: cc.holdout, draft_id: draft.id, draft };
 }
@@ -1772,6 +1929,8 @@ function readBody(req, limit = 1e6) {
 }
 
 // —— 路由 ——（纯 /api；静态前端已拆分到独立 Next.js 应用）
+// 同一会话的聊天和确认共用门禁，避免异步建码/模型调用期间冻结过期需求。
+const inFlightActWrites = new Set();
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname;
@@ -1798,7 +1957,19 @@ const server = http.createServer(async (req, res) => {
     req.authMode = who.authMode;
   }
 
+  let lockedActId = null;
   try {
+    const actWrite = method === 'POST' && pathname.match(/^\/api\/act\/([\w-]+)\/(?:message(?:\/stream)?|confirm|action)$/);
+    if (actWrite) {
+      // 鉴权先于忙碌检查；取得门禁后才读 body，路由随后读取最新会话。
+      if (!canSeeRow(store.getAct(actWrite[1]), req)) return sendJson(res, 404, { error: 'act not found' });
+      if (store.getAct(actWrite[1]).stage === 'closed') return sendJson(res, 409, { error: '会话已收尾归档，不能继续操作' });
+      if (inFlightActWrites.has(actWrite[1])) {
+        return sendJson(res, 409, { error: '这段对话正在处理，请等回复或确认完成后再试' });
+      }
+      lockedActId = actWrite[1];
+      inFlightActWrites.add(lockedActId);
+    }
     // —— bootstrap：配置状态；token 仅本地开放模式（CARTBACK_OPEN_LOCAL=1）下发 ——
     if (pathname === '/api/bootstrap' && method === 'GET') {
       return sendJson(res, 200, { token: authMod.OPEN_LOCAL ? config.localToken : null, status: cfg.status(config) });
@@ -1917,6 +2088,13 @@ const server = http.createServer(async (req, res) => {
       store.deleteAgentProfile(req.userId);
       return sendJson(res, 200, { ok: true, profile: {} });
     }
+    if (pathname === '/api/agent-profile' && method === 'PUT') {
+      if (!req.userId) return sendJson(res, 400, { error: '请登录后管理长期资料' });
+      const body = await readBody(req);
+      const profile = normalizeAgentProfile(body.profile);
+      store.upsertAgentProfile(req.userId, profile);
+      return sendJson(res, 200, { ok: true, profile });
+    }
 
     // —— Wave 4 F3④：通知中心（回执气泡由前端从通知拉取渲染，不写 act.messages，无需改 SSE）——
     if (pathname === '/api/notifications' && method === 'GET') {
@@ -1943,6 +2121,9 @@ const server = http.createServer(async (req, res) => {
       if (todo.done) return sendJson(res, 409, { ok: false, error: '该待办已恢复过（幂等：不重复开新会话）' });
       const src = todo.act_id ? store.getAct(todo.act_id) : null;
       if (!src || !canSeeRow(src, req)) return sendJson(res, 404, { error: '原会话已不存在，无法恢复' });
+      if (store.getActsByUser(req.userId, scopeOpts(req)).some(a => a.stage !== 'closed' && inFlightActWrites.has(a.id))) {
+        return sendJson(res, 409, { error: '当前对话正在处理，请完成后再恢复待办' });
+      }
       const now = Date.now();
       const newAct = zombie.buildResumedAct(src, { now });
       if (req.userId) newAct.user_id = req.userId;
@@ -1958,9 +2139,14 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/act' && method === 'POST') {
       let body = {};
       try { body = await readBody(req); } catch (e) { body = {}; }
+      if (body.flow_version != null && ![2, 6].includes(body.flow_version)) return sendJson(res, 400, { error: '不支持的对话协议版本' });
       // Wave 4 F1：欢迎语资格在新建前判定（该商家名下不存在任何 act，含 closed）——一生只出现一次
       const hasAnyAct = store.getActsByUser(req.userId, scopeOpts(req)).length > 0;
       const storeBanner = await buildStoreBanner(req.userId, scopeOpts(req));
+      // banner 查询有异步边界；关闭旧会话前再次核验，不能覆盖进行中的聊天/发信。
+      if (store.getActsByUser(req.userId, scopeOpts(req)).some(a => a.stage !== 'closed' && inFlightActWrites.has(a.id))) {
+        return sendJson(res, 409, { error: '当前对话正在处理，请完成后再新建会话' });
+      }
       const act = {
         id: uid('act_'), stage: 'S0', needs: needsMod.emptyNeeds(), messages: [],
         memory: { facts: [], decisions: [], corrections: [], extras: [], prefs: {}, ask_count: needsMod.emptyAskCount() },
@@ -1971,6 +2157,12 @@ const server = http.createServer(async (req, res) => {
         user_id: req.userId || null   // 整改 1c：打归属
       };
       const op = igde.opening({ hasAnyAct, storeBanner });
+      if (body.flow_version === 6) {
+        flowV6.initialize(act);
+        act.execution_snapshot = null;
+        op.reply = (hasAnyAct ? '' : '欢迎使用百客，我是你的智能邮件营销助手。\n') + '这批邮件想挽回哪拨客人？你可以直接说需求，也可以先让我写个预览。原因和量化目标暂时不知道也没关系。';
+        op.chips = [];
+      }
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
       // Wave 2 closed 触发点（Wave 1 遗留补齐）：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）
       store.closeOpenActs(req.userId || null, act.id, scopeOpts(req));
@@ -1981,9 +2173,10 @@ const server = http.createServer(async (req, res) => {
         if (presetAud && !igdeMod.looksLikeInjection(presetAud)) {
           igde.applyNeeds(act, { audience: presetAud });
           act.stage = 'S1';
-          act.messages.push({ role: 'assistant', content: `收到，这次针对【${act.needs.audience.value}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
+          act.messages.push({ role: 'assistant', content: act.flow_version === 6 ? `已选择【${act.needs.audience.value}】。这次想提供什么优惠，或者明确无优惠？原因和目标可选，也可以先看邮件预览。` : `收到，这次针对【${act.needs.audience.value}】。还想知道：他们为啥快丢、你希望他们回来干啥、想给什么钩子？`, ts: Date.now() });
         }
       }
+      if (act.flow_version === 6) flowV6.refreshActions(act);
       store.upsertAct(act);
       // Wave 4 契约④：chips 随开场下发；welcome 标识本条是否拼了欢迎语（前端eligible=false时不显示）
       return sendJson(res, 200, { act, chips: op.chips || [], welcome: Boolean(op.welcome), store_banner: storeBanner });
@@ -2042,7 +2235,7 @@ const server = http.createServer(async (req, res) => {
           r.guardrailHits.forEach(h => metricsInc('guardrail_' + h));
           logEvent('guardrail', { hits: r.guardrailHits });
         }
-        return sendJson(res, 200, r);
+        return sendJson(res, 200, { ...r, act: store.getAct(act.id) || act });
       } catch (e) {
         if (e && e.code === 'PERSIST_FAIL') return sendJson(res, 503, { error: e.message });
         throw e;
@@ -2139,6 +2332,65 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    const actionRoute = pathname.match(/^\/api\/act\/([\w-]+)\/action$/);
+    if (actionRoute && method === 'POST') {
+      const act = store.getAct(actionRoute[1]);
+      if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
+      if (act.flow_version !== 6 || act.stage === 'closed') return sendJson(res, 409, { error: '当前会话不支持这个动作' });
+      const body = await readBody(req); let action;
+      try { action = flowV6.validateAction(act, body); } catch (e) { return sendJson(res, 409, { error: e.message }); }
+      if (action.kind === 'prepare_plan') {
+        const out = await confirmActToStage3(act, { ...body, expected_business_version: act.business_version }, req.userId);
+        return sendJson(res, out.status || 200, out);
+      }
+      let reply = '';
+      if (action.kind === 'save_choices') {
+        const choices = body.choices;
+        if (!choices || typeof choices !== 'object' || Array.isArray(choices) || Object.entries(choices).some(([k, v]) => !['audience', 'reason', 'offer', 'goal'].includes(k) || typeof v !== 'string' || v.length > 240)) return sendJson(res, 400, { error: '活动信息格式无效' });
+        const changes = Object.entries(choices).map(([slot, value]) => ({ slot, op: value.trim() ? 'set' : 'clear', value: value.trim(), evidence: `${slot}:${value.trim() || '撤销'}` }));
+        flowV6.applyChanges(act, changes, changes.map(c => c.evidence).join('\n'));
+        reply = '已保存本次活动信息；原因和目标仍为可选，这一步不会发送或建券。';
+      }
+      if (action.kind === 'save_preview') {
+        if (typeof body.subject !== 'string' || !body.subject.trim() || typeof body.body !== 'string' || !body.body.trim()) return sendJson(res, 400, { error: '主题和正文不能为空' });
+        const saved = flowV6.previewCard(igde, act, config.shopDefaultLocale || 'en', { subject: body.subject, body: body.body });
+        const result = { planCard: withAuthoritativePreview(act, saved) }; persistPreviewCard(act, result);
+        reply = '预览文案已保存，尚未发送。';
+      }
+      if (action.kind === 'preview_email') {
+        if (!isAdminReq(req) && !llmQuotaTry(req.userId, 1)) return sendJson(res, 429, { error: '今日 AI 使用额度已用完，请明天再试或联系管理员' });
+        igde.aiEnabled = Boolean(config.aiKey);
+        syncAgentConfig();
+        const result = await flowV6.handle(igde, act, '请生成邮件预览', { locale: config.shopDefaultLocale || 'en', requestPreview: true, agentProfile: store.getAgentProfile(req.userId), persist: () => store.upsertAct(act) });
+        consumeAgentMeta(result);
+        if (result.planCard) result.planCard = withAuthoritativePreview(act, result.planCard);
+        persistPreviewCard(act, result);
+        return sendJson(res, 200, { ...result, act: store.getAct(act.id) });
+      }
+      if (action.kind === 'tour') {
+        const result = await flowV6.handle(igde, act, '介绍一下其他功能', { persist: () => store.upsertAct(act) });
+        return sendJson(res, 200, { ...result, act });
+      }
+      if (['accept_candidate', 'reject_candidate'].includes(action.kind)) {
+        const c = flowV6.resolveCandidate(act, action.candidateId, action.kind === 'accept_candidate');
+        if (c.profileField && action.kind === 'accept_candidate') {
+          if (!req.userId) return sendJson(res, 400, { error: '请登录后保存长期资料' });
+          const profile = normalizeAgentProfile(store.getAgentProfile(req.userId));
+          if (c.profileField !== 'constraints' && String(profile[c.profileField] || '') !== String(c.old || '')) return sendJson(res, 409, { error: '长期资料已更新，请重新核对该项' });
+          if (c.profileField === 'constraints' && c.profilePrevious && !(profile.constraints || []).includes(c.profilePrevious)) return sendJson(res, 409, { error: '该长期限制已更新，请重新核对' });
+          if (c.profileField === 'constraints') profile.constraints = [...new Set([...(profile.constraints || []).filter(x => x !== c.profilePrevious), ...(c.profileOp === 'delete' ? [] : [c.new])])];
+          else if (c.profileOp === 'delete') delete profile[c.profileField];
+          else profile[c.profileField] = c.new;
+          store.upsertAgentProfile(req.userId, normalizeAgentProfile(profile));
+        }
+        reply = action.kind === 'accept_candidate' ? '已采用这个选择。' : '已保留原选择。';
+      }
+      flowV6.refreshActions(act);
+      act.messages.push({ role: 'user', content: action.label, ts: Date.now() }, { role: 'assistant', content: reply, ts: Date.now() }); act.updated_at = Math.max(Date.now(), Number(act.updated_at) + 1);
+      store.upsertAct(act);
+      return sendJson(res, 200, { reply, act, stage: act.stage, planCard: act.plan_card, availableActions: act.flow_state.actions });
+    }
+
     // —— 生成草稿（Wave 2 D3：服务端同源为唯一权威）——
     //   actId 路径（权威）：从 act 冻结快照/needs 服务端序列化 planCard → 草稿，不信任前端回传；
     //     已 confirm（有 execution_snapshot）→ 权威卡（含真实码）；未 confirm → 无码预览卡（E2 红线）。
@@ -2151,6 +2403,7 @@ const server = http.createServer(async (req, res) => {
       if (actId) {
         const act = store.getAct(actId);
         if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
+        if (act.flow_version === 6) return sendJson(res, 409, { error: '请通过当前方案的准备操作创建草稿；邮件预览保存在会话中' });
         if (act.execution_snapshot && act.plan_card) {
           card = act.plan_card;             // confirm 产出的权威卡（同源 JSON，含真实码）
           authoritative = true;
@@ -2202,9 +2455,22 @@ const server = http.createServer(async (req, res) => {
         for (const k of ['error', 'code_status', 'reason', 'options', 'act']) if (r[k] !== undefined) payload[k] = r[k];
         return sendJson(res, r.status || 409, payload);
       }
-      logEvent('act_confirmed', { act_id: act.id, code_status: act.code_status, draft_id: r.draft_id, all_pass: r.checklist.all_pass });
+      logEvent(r.preview_only ? 'act_preview_saved' : 'act_confirmed', { act_id: act.id, code_status: act.code_status, draft_id: r.draft_id, all_pass: r.checklist?.all_pass });
       metricsInc('act_confirm_' + (act.code_status || 'none'));
       return sendJson(res, 200, r);
+    }
+
+    // —— 刷新恢复（复测 10-06 P2）：已准备方案的发送核对单只读重算 ——
+    // 前端恢复 S3 方案卡后拉取现算核对单；在此之前发送按钮一律禁用（无核对单不放行）。
+    // closed 会话明确 409：归档会话的发送入口在对话流内关闭（邮件页明确操作路径不受此影响）。
+    const km = pathname.match(/^\/api\/act\/([\w-]+)\/checklist$/);
+    if (km && method === 'GET') {
+      const act = store.getAct(km[1]);
+      if (!canSeeRow(act, req)) return sendJson(res, 404, { error: 'act not found' });
+      if (act.stage === 'closed') return sendJson(res, 409, { ok: false, error: '会话已收尾归档，对话流内的发送入口已关闭' });
+      const r = await preparedChecklistFor(act);
+      if (!r) return sendJson(res, 409, { ok: false, error: '该会话还没有已准备的发送方案' });
+      return sendJson(res, 200, { ok: true, checklist: r.checklist, holdout: r.holdout, draft_id: r.draft_id, business_version: act.business_version });
     }
 
     if (pathname === '/api/drafts' && method === 'GET') {
@@ -2223,6 +2489,37 @@ const server = http.createServer(async (req, res) => {
 
     // —— 删除草稿（邮件卡片操作行「删除」，Figma 406:2955）——
     const dm = pathname.match(/^\/api\/draft\/([\w-]+)$/);
+    if (dm && method === 'PUT') {
+      const draft = store.getDraft(dm[1]);
+      if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
+      if (['sent', 'sending', 'queued', 'recovering'].includes(draft.status)) return sendJson(res, 409, { error: '邮件已发送或正在发送，不能修改' });
+      const body = await readBody(req);
+      if (typeof body.subject !== 'string' || !body.subject.trim() || typeof body.body !== 'string' || !body.body.trim()) return sendJson(res, 400, { error: '主题和正文不能为空' });
+      const act = draft.act_id ? store.getAct(draft.act_id) : null;
+      if (act?.flow_version === 6) {
+        if (inFlightActWrites.has(act.id)) return sendJson(res, 409, { error: '方案正在处理，请稍后再保存' });
+        inFlightActWrites.add(act.id); lockedActId = act.id;
+        if (body.expected_business_version !== act.business_version || draft.mailgen_meta?.business_version !== act.business_version || !act.execution_snapshot) return sendJson(res, 409, { error: '草稿已失效，请刷新后再保存' });
+      }
+      const before = flowV6.copyHash(draft);
+      applyDraftCopyEdits(draft, body);
+      draft.html = applyFooterLinks(require('./dist/email-builder').buildEmailHtml({
+        subject: draft.subject, body: draft.body, brand_name: draft.brand, discount: draft.discount,
+        image_url: draft.image_path ? '/api/image/' + encodeURIComponent(draft.image_path) : '',
+        cart_url: config.shopCartUrl || 'https://cartback.demo', lang: draft.locale || config.shopDefaultLocale || 'en', use_cid: false,
+      }), draft.id);
+      if (act?.flow_version === 6 && before !== flowV6.copyHash(draft)) {
+        act.business_version++;
+        draft.mailgen_meta.business_version = act.business_version;
+        act.plan_card = { ...act.plan_card, subject: draft.subject, body: draft.body, business_version: act.business_version };
+        act.flow_state.prepared_version = act.business_version; act.flow_state.approval = null;
+        act.updated_at = Math.max(Date.now(), Number(act.updated_at) + 1);
+        flowV6.refreshActions(act);
+        store.upsertAct(act);
+      }
+      store.upsertDraft(draft);
+      return sendJson(res, 200, { ok: true, draft, act });
+    }
     if (dm && method === 'DELETE') {
       const draft = store.getDraft(dm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
@@ -2246,6 +2543,12 @@ const server = http.createServer(async (req, res) => {
       if (['sent', 'sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，不能再修改' });
       }
+      const imageAct = draft.act_id ? store.getAct(draft.act_id) : null;
+      if (imageAct?.flow_version === 6) {
+        if (inFlightActWrites.has(imageAct.id)) return sendJson(res, 409, { error: '方案正在处理，请稍后再生成图片' });
+        inFlightActWrites.add(imageAct.id); lockedActId = imageAct.id;
+        if (draft.mailgen_meta?.business_version !== imageAct.business_version || !imageAct.execution_snapshot) return sendJson(res, 409, { error: '草稿已失效，请重新准备方案' });
+      }
       let prompt = draft.image_prompt || '';
       let productImageId = '';
       try {
@@ -2259,7 +2562,7 @@ const server = http.createServer(async (req, res) => {
         const pseudoCard = {
           subject: draft.subject, body: draft.body, discountNum: draft.discount,
           coupon: draft.coupon, audience: draft.audience, locale: draft.locale,
-          brand: draft.brand, product: draft.product,
+          brand: draft.brand, product: draft.product, category: draft.mailgen_meta?.product_category || imageAct?.plan_card?.category || '',
         };
         if (productImageId) {
           const prod = store.getProduct(productImageId);
@@ -2272,9 +2575,18 @@ const server = http.createServer(async (req, res) => {
           if (prod.category) pseudoCard.category = prod.category;   // 批次 2：品类随商品记录带入（构图按品类）
         }
         await generateMailHtml(draft, pseudoCard, { imagePromptOverride: prompt, copyPassthrough: true });
+        if (imageAct?.flow_version === 6) {
+          imageAct.business_version++;
+          imageAct.flow_state.prepared_version = imageAct.business_version;
+          imageAct.flow_state.approval = null;
+          imageAct.plan_card.business_version = imageAct.business_version;
+          imageAct.updated_at = Math.max(Date.now(), Number(imageAct.updated_at) + 1);
+          draft.mailgen_meta.business_version = imageAct.business_version;
+          store.upsertDraft(draft); store.upsertAct(imageAct);
+        }
         logEvent('draft_image_regen', { draft_id: draft.id, prompt_len: prompt.length, product_image_id: productImageId || null, image_method: (draft.mailgen_meta || {}).image_method });
         return sendJson(res, 200, {
-          image_path: draft.image_path, image_prompt: draft.image_prompt || prompt, html: draft.html,
+          image_path: draft.image_path, image_prompt: draft.image_prompt || prompt, html: draft.html, business_version: draft.mailgen_meta?.business_version,
         });
       } catch (e) {
         logEvent('draft_image_regen_fail', { draft_id: draft.id, error: String(e && e.message || e) });
@@ -2336,12 +2648,43 @@ const server = http.createServer(async (req, res) => {
     // —— 发送（PRD §0.6：改 202 入队；预检 + D4 五道闸门 + holdout 冻结 + 幂等键 send:{userId}:{draftId}）——
     const sm = pathname.match(/^\/api\/draft\/([\w-]+)\/send$/);
     if (sm && method === 'POST') {
-      const draft = store.getDraft(sm[1]);
+      let draft = store.getDraft(sm[1]);
       if (!draft) return sendJson(res, 404, { error: 'draft not found' });
       if (!canSeeRow(draft, req)) return sendJson(res, 404, { error: 'draft not found' });
       // 状态检查前置：已发送/发送中的草稿不接受编辑落库（避免 409 前把编辑内容写进已发出的邮件）
       if (['sent', 'sending', 'queued'].includes(draft.status)) {
         return sendJson(res, 409, { error: '该邮件已发送或正在发送，请勿重复操作' });
+      }
+      const act = draft.act_id ? store.getAct(draft.act_id) : null;
+      let sendBody = {};
+      try { sendBody = await readBody(req); } catch { return sendJson(res, 400, { error: '发送请求格式无效' }); }
+      if (act?.flow_version === 6) {
+        if (inFlightActWrites.has(act.id)) return sendJson(res, 409, { error: '方案正在更新，请稍后重试' });
+        inFlightActWrites.add(act.id); lockedActId = act.id;
+        draft = store.getDraft(sm[1]);
+        if (!draft || ['sent', 'sending', 'queued'].includes(draft.status)) return sendJson(res, 409, { error: '邮件已发送或正在发送，请勿重复操作' });
+        if (sendBody.expected_business_version !== act.business_version || draft.mailgen_meta?.business_version !== act.business_version || !act.execution_snapshot || !flowV6.readiness(act).prepare) {
+          return sendJson(res, 409, { error: '方案已变化，请刷新并重新准备后确认发送' });
+        }
+        const threshold = impulse.inSaleWindow(store) ? cfg.E1_THRESHOLD_SALE : cfg.E1_THRESHOLD;
+        if (Number(draft.discount) >= threshold && sendBody.acknowledge_risk !== true && !(act.flow_state.approval?.version === act.business_version && act.flow_state.approval?.risk_acknowledged)) {
+          return sendJson(res, 409, { error: `本次折扣为 ${draft.discount}% off，可能显著降低利润。毛利未知，请明确确认该风险后再发送`, requires_risk_confirmation: true });
+        }
+        const before = flowV6.copyHash(draft);
+        applyDraftCopyEdits(draft, sendBody);
+        draft.html = applyFooterLinks(draft.html, draft.id);
+        if (before !== flowV6.copyHash(draft)) {
+          act.business_version++;
+          draft.mailgen_meta.business_version = act.business_version;
+          act.plan_card.subject = draft.subject; act.plan_card.body = draft.body;
+          act.plan_card.business_version = act.business_version;
+          act.flow_state.prepared_version = act.business_version;
+        }
+        act.flow_state.approval = { kind: 'send', draftId: draft.id, version: act.business_version, copyHash: flowV6.copyHash(draft), recipient_ids: draft.mailgen_meta.recipient_ids, risk_acknowledged: sendBody.acknowledge_risk === true, at: Date.now() };
+        act.updated_at = Math.max(Date.now(), Number(act.updated_at) + 1);
+        store.upsertDraft(draft); store.upsertAct(act);
+      } else {
+        applyDraftCopyEdits(draft, sendBody); store.upsertDraft(draft);
       }
       // —— Wave 3 I2：发送入口统一停发检查（高于一切单批操作）——
       //   日历命中 → 顺延重排（202，复用 run_after；不删除不丢弃）；紧急全停 → 409（无已知恢复时刻，
@@ -2364,12 +2707,6 @@ const server = http.createServer(async (req, res) => {
       }
       // 前端邮件页编辑：发送前把最新主题/正文落库（P0-1：避免「界面显示新内容、实际发出旧内容」）
       // 注：主题/正文不在 D3 四字段 diff 口径内（audience/discount/count/estGmv），不破坏快照同源
-      try {
-        const body = await readBody(req);
-        if (body && typeof body.subject === 'string' && body.subject.trim()) draft.subject = applySubjectTone(body.subject.trim(), draft.audience);
-        if (body && typeof body.body === 'string' && body.body.trim()) draft.body = body.body.trim();
-        store.upsertDraft(draft);
-      } catch (e) { /* 无 body 或非 JSON：维持存储原稿 */ }
       // M3：发送前刷新固化页脚链接（存量草稿生成时是 cart_url 兜底；publicBaseUrl 未配则原样）
       const refreshedHtml = applyFooterLinks(draft.html, draft.id);
       if (refreshedHtml !== draft.html) { draft.html = refreshedHtml; store.upsertDraft(draft); }
@@ -2382,10 +2719,9 @@ const server = http.createServer(async (req, res) => {
       }
       // —— D4 五道闸门（服务端重跑；前端按钮本就该被禁用，这里是兜底）——
       //    仅时段闸不过 → 缓发（重新入队带 scheduled_at，202）；其余任一不过 → 409 {ok:false, checklist}
-      const act = draft.act_id ? store.getAct(draft.act_id) : null;
-      const recipients = audienceNetList(draft.audience, ownerScope(draft.user_id));
+      const recipients = act?.flow_version === 6 ? resolveRecipients(draft) : audienceNetList(draft.audience, ownerScope(draft.user_id));
       const gateCheck = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients });
-      const failing = gateCheck.items.filter(i => !i.pass);
+      const failing = gateCheck.items.filter(i => !i.pass && i.blocking !== false);
       if (failing.length) {
         if (failing.length === 1 && failing[0].gate === 'window') {
           const retryAt = gateCheck.windowRetryAt || (Date.now() + 3600 * 1000);
@@ -2525,7 +2861,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 202, { ok: true, job_id: job.id, queued: true, campaign: campaignsMod.publicCampaign(store, camp) });
       }
       const gates = await campaignsMod.evaluateCampaignGates(store, camp, { connector: connectors, publicBaseUrl: config.publicBaseUrl });
-      const failing = gates.items.filter(i => !i.pass);
+      const failing = gates.items.filter(i => !i.pass && i.blocking !== false);
       if (failing.length === 1 && failing[0].gate === 'window') {
         const retryAt = gates.windowRetryAt || (Date.now() + 3600 * 1000);
         camp.status = 'scheduled';
@@ -3056,7 +3392,7 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, {
         id: job.id, type: job.type, status: job.status, retry_count: job.retry_count,
         result: job.result || null, error: job.error || null,
-        created_at: job.created_at, updated_at: job.updated_at
+        created_at: job.created_at, updated_at: job.updated_at, run_after: job.run_after
       });
     }
 
@@ -3306,6 +3642,8 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 404, { error: 'route not found' });
   } catch (e) {
     return sendJson(res, 500, { error: String(e && e.message || e) });
+  } finally {
+    if (lockedActId) inFlightActWrites.delete(lockedActId);
   }
 });
 

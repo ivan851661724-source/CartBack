@@ -204,6 +204,15 @@ test('products: 上传→落库→可访问→删除，非图片/超限被拒，
   }
 });
 
+test('images: zero-discount default prompts do not render commercial claims', () => {
+  const { fromPlanCard } = require('../dist/data-loader');
+  const { generateImagePrompt } = require('../dist/copy-generator');
+  const user = fromPlanCard({ discount: 0, product_cn: '瑜伽裤', category: 'apparel' });
+  const prompt = generateImagePrompt(user, { marketing: { image_style: '', cta_button: 'Shop Now' } });
+  assert.match(prompt, /瑜伽裤/);
+  assert.doesNotMatch(prompt, /0%|% OFF|SHOP NOW|免邮|Free Shipping/i);
+});
+
 test('products: 品类化构图——同一画像不同品类构图不同，非手机壳无 iPhone/手机壳残留', async () => {
   const { fromPlanCard } = require('../dist/data-loader');
   const { generateImagePrompt } = require('../dist/copy-generator');

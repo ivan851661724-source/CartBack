@@ -26,8 +26,8 @@ export class ApiAuthError extends Error {
   }
 }
 
-/** 统一 JSON 请求；401/403 → 抛 ApiAuthError（引导登录），其余错误由响应体/调用方处理 */
-export async function api<T = any>(path: string, opts: RequestInit = {}): Promise<T> {
+/** 统一 JSON 请求；401/403 抛 ApiAuthError。创建等调用可要求其他 HTTP 错误也抛出，其余调用保留响应体处理。 */
+export async function api<T = any>(path: string, opts: RequestInit = {}, rejectHttpErrors = false): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(opts.headers as Record<string, string> | undefined),
@@ -36,11 +36,53 @@ export async function api<T = any>(path: string, opts: RequestInit = {}): Promis
   // 同源显式带 cookie：登录后自动携带 cb_session（session 优先鉴权）
   const res = await fetch(path, { ...opts, headers, credentials: 'same-origin' });
   if (res.status === 401 || res.status === 403) throw new ApiAuthError();
-  return res.json() as Promise<T>;
+  const data = await res.json();
+  if (rejectHttpErrors && !res.ok) throw new Error(data?.error || data?.reason || `请求失败（${res.status}）`);
+  return data as T;
+}
+
+/** Risk text comes from the server for this exact business revision. */
+export async function sendWithApproval<T>(draftId: string, payload: Record<string, unknown>): Promise<T> {
+  const path = `/api/draft/${draftId}/send`;
+  let result = await api<any>(path, { method: 'POST', body: JSON.stringify(payload) });
+  if (result.requires_risk_confirmation && window.confirm(result.error + '\n确认承担该风险并发送？')) {
+    result = await api<any>(path, { method: 'POST', body: JSON.stringify({ ...payload, acknowledge_risk: true }) });
+  }
+  return result as T;
+}
+
+export function sendFailureReason(reply: { error?: string; ok?: boolean; checklist?: Checklist }): string | null {
+  if (reply.error) return reply.error;
+  if (reply.ok === false) {
+    const reasons = reply.checklist?.items.filter(i => !i.pass && i.blocking !== false && i.gate !== 'unsubscribe').map(i => i.reason || i.label).join('；');
+    return reasons ? '发送未通过核对单：' + reasons : '发送未通过核对单，请检查发送条件';
+  }
+  return null;
+}
+
+/** 轮询等待结束不代表发送失败，任务仍由服务端队列继续执行。 */
+export async function pollSendJob(jobId: string, timeoutMs = 120000): Promise<{ ok: boolean; pending?: boolean; result?: any; error?: string }> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const j = await api<{ status: string; result?: any; error?: string; run_after?: number }>(`/api/jobs/${jobId}`);
+      if (j.status === 'done') {
+        if (j.result?.error) return { ok: false, error: j.result.error };
+        if (j.result?.deferred || j.result?.rescheduled || j.result?.skipped === 'global_paused') return { ok: true, pending: true };
+        if (j.result?.skipped && j.result.skipped !== 'already sent') return { ok: false, error: '发送任务未执行：' + j.result.skipped };
+        return { ok: true, result: j.result };
+      }
+      if (j.status === 'failed') return { ok: false, error: j.error || '任务执行失败' };
+      if (j.run_after && j.run_after > Date.now()) return { ok: true, pending: true };
+    } catch { /* 网络抖动继续轮询 */ }
+    await new Promise(r => setTimeout(r, 900));
+  }
+  return { ok: true, pending: true };
 }
 
 /** SSE 流式 done 帧的 payload（与后端 finalize 结构一致） */
 export interface StreamDone {
+  act?: Act;
   reply: string;
   stage: Stage;
   needs: Needs;
@@ -107,14 +149,14 @@ export async function streamMessage(
           throw new Error(data.error || 'stream error');
         } else if (data.type === 'done') {
           clearTimeout(timer);
-          return data.result as StreamDone;
+          return data.act?.id === actId ? { ...data.result, act: data.act } as StreamDone : data.result as StreamDone;
         }
       }
     }
     clearTimeout(timer);
     if (!full) throw new Error('空流');
-    // 流式降级：服务端未发 done 帧，但有 token 文本 → 用累计全文构造结果
-    return { reply: full, stage: 'S0' as Stage, needs: {} as Needs, planCard: null };
+    // 没有 done 就没有权威状态；调用方保留已收到的文字并重新读取会话。
+    throw new Error('流式回复未完成');
   } finally {
     clearTimeout(timer);
   }
@@ -133,18 +175,30 @@ export interface CreateActResult {
 export async function createAct(preset?: { audience?: string }): Promise<CreateActResult> {
   return api<Record<string, unknown>>('/api/act', {
     method: 'POST',
-    body: JSON.stringify(preset ? { preset } : {}),
-  }).then((r): CreateActResult => ({
-    act: ((r && (r as { act?: Act }).act) ?? r) as Act,
-    chips: Array.isArray(r?.chips) ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string') : [],
-    welcome: Boolean(r?.welcome),
-    store_banner: ((r?.store_banner ?? null) as StoreBanner | null) || null,
-  }));
+    body: JSON.stringify({ flow_version: 6, ...(preset ? { preset } : {}) }),
+  }, true).then((r): CreateActResult => {
+    const act = ((r && (r as { act?: Act }).act) ?? r) as Act;
+    if (!act || typeof act.id !== 'string' || !act.id) throw new Error('创建会话响应无效，请重试');
+    return {
+      act,
+      chips: Array.isArray(r?.chips) ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string') : [],
+      welcome: Boolean(r?.welcome),
+      store_banner: ((r?.store_banner ?? null) as StoreBanner | null) || null,
+    };
+  });
+}
+
+export async function saveDraftCopy(draftId: string, subject: string, body: string, version?: number) {
+  const result = await api<{ ok?: boolean; draft?: import('./types').Draft; act?: Act; error?: string }>(`/api/draft/${draftId}`, {
+    method: 'PUT', body: JSON.stringify({ subject, body, expected_business_version: version }),
+  }, true);
+  if (!result.ok || !result.draft) throw new Error(result.error || '保存邮件失败');
+  return result;
 }
 
 /** POST /api/act/:id/confirm 的三种结局：ok=确认成功 / conflict=建码失败(409) / unsupported=旧后端无此接口(404) */
 export type ConfirmOutcome =
-  | { kind: 'ok'; act?: Act; planCard: PlanCard; checklist?: Checklist }
+  | { kind: 'ok'; act?: Act; planCard: PlanCard; checklist?: Checklist; previewOnly?: boolean }
   | { kind: 'conflict'; reason: string; options: string[]; act?: Act }
   | { kind: 'unsupported' };
 
@@ -160,22 +214,23 @@ export async function confirmAct(actId: string, body?: Record<string, unknown>):
   if (authToken) headers['x-local-token'] = authToken;
   let res: Response;
   try {
-    res = await fetch(`/api/act/${actId}/confirm`, {
+    res = await fetch(`/api/act/${actId}/${body?.id ? 'action' : 'confirm'}`, {
       method: 'POST',
       headers,
       body: JSON.stringify(body ?? {}),
       credentials: 'same-origin',
     });
   } catch {
-    return { kind: 'unsupported' };   // 网络层失败交给旧路径兜底（旧路径失败会 toast）
+    throw new Error('确认请求中断，请刷新方案后重试');
   }
   if (res.status === 401 || res.status === 403) throw new ApiAuthError();
   let data: any = null;
   try { data = await res.json(); } catch { data = null; }
   if (res.ok && data && data.ok && data.planCard) {
-    return { kind: 'ok', act: data.act, planCard: data.planCard as PlanCard, checklist: data.checklist as Checklist | undefined };
+    return { kind: 'ok', act: data.act, planCard: data.planCard as PlanCard, checklist: data.checklist as Checklist | undefined, previewOnly: data.preview_only === true };
   }
   if (res.status === 409 && data) {
+    if (data.code_status !== 'failed') throw new Error(data.error || data.reason || '方案状态已变化，请重新核对');
     return {
       kind: 'conflict',
       reason: typeof data.reason === 'string' ? data.reason : '折扣码创建失败',
@@ -183,6 +238,39 @@ export async function confirmAct(actId: string, body?: Record<string, unknown>):
       act: data.act,
     };
   }
-  if (res.status === 404 || !data) return { kind: 'unsupported' };
+  if (res.status === 404) return { kind: 'unsupported' };
   throw new Error((data && typeof data.error === 'string' && data.error) || `确认失败（HTTP ${res.status}）`);
+}
+
+/** GET /api/act/:id/checklist 的结果：ok=现算核对单 / refused=会话归档或方案不在可发送形态 */
+export type ChecklistOutcome =
+  | { kind: 'ok'; checklist: Checklist; holdout?: Checklist['holdout'] }
+  | { kind: 'refused'; reason: string }
+  | { kind: 'unsupported' };
+
+/**
+ * 刷新恢复（复测 10-06 P2）：已准备方案卡的核对单现算拉取（只读，不产生副作用）。
+ * - 200 {ok, checklist, holdout} → ok（核对单绑定当前业务状态，按钮据此禁用/放行）
+ * - 409（会话已归档 / 无已准备方案）→ refused（前端保持发送按钮禁用）
+ * - 404 / 响应体不可解析（旧后端）→ unsupported（调用方维持无核对单禁用态）
+ */
+export async function fetchActChecklist(actId: string): Promise<ChecklistOutcome> {
+  let res: Response;
+  try {
+    res = await fetch(`/api/act/${actId}/checklist`, {
+      method: 'GET',
+      headers: authToken ? { 'x-local-token': authToken } : undefined,
+      credentials: 'same-origin',
+    });
+  } catch {
+    return { kind: 'refused', reason: '网络异常，暂时无法核对发送条件' };
+  }
+  if (res.status === 401 || res.status === 403) return { kind: 'refused', reason: '请先登录' };
+  let data: any = null;
+  try { data = await res.json(); } catch { data = null; }
+  if (res.ok && data && data.ok && data.checklist && Array.isArray(data.checklist.items)) {
+    return { kind: 'ok', checklist: data.checklist as Checklist, holdout: data.holdout };
+  }
+  if (res.status === 404) return { kind: 'unsupported' };
+  return { kind: 'refused', reason: (data && typeof data.error === 'string' && data.error) || '发送条件核对失败' };
 }

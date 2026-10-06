@@ -99,6 +99,13 @@ function sweepZombieActs(store, opts = {}) {
 function buildResumedAct(srcAct, { id, now } = {}) {
   const at = Number(now) || Date.now();
   const memory = JSON.parse(JSON.stringify(srcAct.memory || {}));
+  // 恢复业务进度，不继承旧对话已经耗尽的追问预算。
+  memory.s1_turns = 0;
+  memory.loop_breaks = 0;
+  memory.goal_bare = 0;
+  memory.ask_count = { audience: 0, reason: 0, offer: 0, goal: 0 };
+  memory.clarif_count = { audience: 0, reason: 0, offer: 0, goal: 0 };
+  for (const conflict of (memory.conflicts || [])) conflict.asked = false;
   if (memory.prefs && typeof memory.prefs === 'object') {
     for (const k of ['reuse_at', 'reuse_slots', 'reuse_cleared', 'reused_from']) delete memory.prefs[k];
   }
@@ -118,6 +125,14 @@ function buildResumedAct(srcAct, { id, now } = {}) {
   const opener = `接着上次的进度继续（${zombieSummary(srcAct, { now: at })}）。`
     + (missing.length ? `先补一块：${ZOMBIE_PROBE[missing[0]] || ''}` : '四样都齐了，在下面确认卡里核对一下就行。');
   act.messages.push({ role: 'assistant', content: opener, ts: at });
+  if (srcAct.flow_version === 6) {
+    const flow = require('./conversation-v6');
+    act.flow_version = 6;
+    act.business_version = 1;
+    act.flow_state = { intent: true, candidates: JSON.parse(JSON.stringify(srcAct.flow_state?.candidates || [])), actions: [] };
+    flow.initialize(act); flow.refreshActions(act);
+    act.messages[0].content = '已恢复上次保存的信息。原因和量化目标可选，你可以继续修改，或先看邮件预览。';
+  }
   return act;
 }
 

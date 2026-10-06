@@ -27,6 +27,7 @@ node_modules/
 
 # ===== Next.js 构建产物 =====
 .next/
+.next-dev/
 out/
 next-env.d.ts
 *.tsbuildinfo

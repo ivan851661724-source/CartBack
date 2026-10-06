@@ -7,13 +7,14 @@
  * 声明式 state。对话流卡片（confirm/sent）的 planShown 状态机原样保留。
  */
 import React, { createContext, useContext, useCallback, useEffect, useRef, useState } from 'react';
-import { api, setToken, streamMessage, createAct, confirmAct, ApiAuthError } from '@/lib/api';
+import { api, setToken, streamMessage, createAct, confirmAct, fetchActChecklist, pollSendJob, sendFailureReason, sendWithApproval, ApiAuthError } from '@/lib/api';
 import type {
-  Act, Audience, Blackout, BatchPreview, Campaign, Checklist, Chips, Draft, Engine, Holdout,
+  Act, AvailableAction, Audience, Blackout, BatchPreview, Campaign, Checklist, Chips, Draft, Engine, Holdout,
   Kpis, LastPlan, Me, Metrics, Mode, NotificationItem, NotificationsResp, Opportunities, Prefs,
   PlanCard, SendResult, Status, StoreBanner, TodoItem, TrendPoint, WelcomeState,
 } from '@/lib/types';
 import { CHAT_PLACEHOLDER, intentToAudience } from '@/lib/constants';
+import { confirmationRecoveryFor, hasUnresolvedConflicts, mergeReplyAct, preparedStateFor } from '@/lib/chat-flow';
 
 export type Tab = 'chat' | 'mail' | 'data' | 'aud' | 'comp' | 'set';
 /** 对话流卡片状态机：confirm=确认卡 / sent=发送回执条（'plan' 成员已随 EmailConfigPanel 死代码清理删除，Wave5） */
@@ -25,6 +26,8 @@ export interface ConfirmState {
   planCard: PlanCard;
   checklist: Checklist | null;
   holdout: Holdout | null;
+  /** 复测 10-06 P2：刷新恢复时核对单拉取失败/被拒的原因（非 null = 不再重拉，发送按钮保持禁用） */
+  checklistError?: string | null;
 }
 
 /** confirm 409（建码失败）的三出口状态：重试建码 / 改用店内现成码 / 改发无钩子提醒信 */
@@ -142,7 +145,7 @@ function mergeAct(base: Act, inc?: Partial<Act>): Act {
  *  S2 无码预览卡（preview 标记）与 S3 权威卡都随 /api/state 下发，刷新后可召回（A2/P0-N2） */
 function withPlanCard(a: any): Act {
   if (!a || typeof a !== 'object') return a;
-  return { ...a, planCard: a.planCard ?? a.plan_card ?? null };
+  return { ...a, planCard: a.flow_version !== 6 && hasUnresolvedConflicts(a) ? null : a.planCard ?? a.plan_card ?? null };
 }
 
 /** B4 合法槽位（done 帧 askedSlot 白名单） */
@@ -224,9 +227,10 @@ interface AppContextValue extends AppState {
   authLogout: () => Promise<void>;
   jumpToConfig: (intent: string, aud?: Audience) => Promise<void>;
   confirmPlan: (body?: { reuse_code?: string; nohook?: boolean }) => Promise<void>;  // 确认卡「可以，去发」/ 409 三出口（带 body 重调）
+  runAction: (action: AvailableAction, edits?: { subject?: string; body?: string; choices?: Record<string, string> }) => Promise<void>;
   sendConfirmedPlan: () => Promise<boolean>;   // 方案卡「确认发送」：POST /api/draft/:id/send，409 时刷新核对单
   createCardDraft: (actId: string, card: PlanCard) => Promise<Draft>;   // 确认卡预建草稿（仅旧后端回退路径用）
-  sendEditedDraft: (subject: string, body: string) => Promise<boolean>;
+  sendEditedDraft: (subject: string, body: string, businessVersion?: number) => Promise<boolean>;
   sendDraft: (d: Draft) => Promise<boolean>;        // 卡片操作行「发送」：按存储原稿直接发送（Figma 406:2955）
   deleteDraft: (d: Draft) => Promise<boolean>;      // 卡片操作行「删除」
   refreshNotifications: () => Promise<void>;        // Z7：拉取通知列表与未读数（60s 轮询 + loadState 后顺带）
@@ -280,8 +284,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // boot 旧闭包里 state.act 恒为 null，ensureAct 读闭包每次刷新都去 createAct → 后端建新会话时把
   // 未完结 act 全部置 closed，进度与上下文全丢。有锚点绝不新建；新建只由「新会话」按钮触发（A1-5）。
   const anchoredActRef = useRef<Act | null>(null);
+  const operationRef = useRef<'message' | 'confirm' | 'action' | 'new' | null>(null);
   // P1-9 方案卡召回只做一次/会话：用户点「再聊聊」关掉确认卡后，后续 loadState 不得强行弹回
   const planRestoredRef = useRef<Set<string>>(new Set());
+  // 复测 10-06 P2：恢复出的 confirmState（checklist=null）逐对象只拉一次核对单；
+  // WeakMap 以 confirmState 对象身份为键——同卡原地 patch 不重拉，重新恢复的新对象允许再拉
+  const checklistTriedRef = useRef<WeakMap<ConfirmState, true>>(new WeakMap());
   const buildActIndex = useCallback((acts: Act[]) => {
     const m = new Map<string, Act>();
     for (const a of acts) m.set(a.id, a);
@@ -296,6 +304,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
     toastTimer.current = setTimeout(() => setState(s => ({ ...s, toast: { ...s.toast, shown: false } })), 3000);
   }, []);
+
+  useEffect(() => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setState(s => ({ ...s, toast: { msg: '', shown: false } }));
+  }, [state.act?.id]);
 
   // —— Z7 通知：拉取（60s 轮询 + loadState 后顺带）——
   // 接口缺失/旧后端 404 / 网络失败时静默保持现值（列表空、角标不出现），不 toast 不阻塞。
@@ -347,9 +360,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const preferId = opts?.preferActId ?? prev.act?.id ?? '';
       const nextActRaw = actIndex.get(preferId) || acts.find(a => a.stage !== 'closed') || null;
       // 同会话沿用内存 planCard：S2 预览卡仅随 done 帧下发、/api/state 可能滞后一拍
-      const nextAct = nextActRaw && prev.act && nextActRaw.id === prev.act.id && prev.act.planCard && !nextActRaw.planCard
-        ? { ...nextActRaw, planCard: prev.act.planCard }
-        : nextActRaw;
+      const nextAct = nextActRaw;
       anchoredActRef.current = nextAct;   // ensureAct 的权威依据：有锚点绝不新建（A1/P0-N1）
       // 锚定结果与会话切换同口径：卡片/chips/confirm 状态属于上一会话，切会话即失效
       const actChanged = (nextAct?.id || null) !== (prev.act?.id || null);
@@ -370,11 +381,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         // 引擎健康态：仅接受合法值，非法/缺省保持现值（初始 online）
         ...(s.engine === 'online' || s.engine === 'degraded' ? { engine: s.engine as Engine } : {}),
         act: nextAct,
+        ...(!nextAct?.planCard ? { planShown: null, planPushed: false } : {}),
+        ...(nextAct?.stage !== 'S3' ? { confirmState: null } : {}),
         ...(actChanged ? {
           planPushed: false, planShown: null,
           confirmState: null, confirmFailed: null,
           chips: [], askedSlot: null, pendingBatches: [],
         } : {}),
+        confirmFailed: confirmationRecoveryFor(nextAct),
+        ...(nextAct?.flow_version === 6 && nextAct.stage === 'S3' && nextAct.planCard ? { confirmState: prev.confirmState?.actId === nextAct.id ? { ...prev.confirmState, planCard: nextAct.planCard } : preparedStateFor(nextAct) } : {}),
       };
       // 刷新后方案卡召回移到独立的纯 effect（见下方 planCardRestore effect）——
       // 不能放进 setState updater：updater 必须纯净，StrictMode 开发态双调用会让
@@ -389,13 +404,41 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 已有草稿的会话不反推（「可以，去发」的草稿说明商家已在邮件页流程中，卡片不再强行弹回）。
   useEffect(() => {
     const a = state.act;
-    if (!a || !a.planCard || state.planShown) return;
-    if ((state.drafts || []).some(d => d.act_id === a.id)) return;
+    if (!a || !a.planCard || (a.flow_version !== 6 && hasUnresolvedConflicts(a)) || state.streaming || state.planShown) return;
+    if (a.flow_version !== 6 && (state.drafts || []).some(d => d.act_id === a.id)) return;
     if (planRestoredRef.current.has(a.id)) return;
     planRestoredRef.current.add(a.id);
-    patch({ planShown: 'confirm', planPushed: true });
+    patch({ planShown: 'confirm', planPushed: true, ...(a.flow_version === 6 && a.stage === 'S3' ? { confirmState: { actId: a.id, planCard: a.planCard, checklist: null, holdout: null } } : {}) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.act?.id, state.act?.planCard, state.planShown, state.drafts, patch]);
+  }, [state.act?.id, state.act?.planCard, state.streaming, state.planShown, state.drafts, patch]);
+
+  // 复测 10-06 P2：恢复出的方案卡（checklist=null）→ GET /api/act/:id/checklist 现算补齐。
+  // 拉到前/失败时发送按钮保持禁用（planSendState 空核对单 fail-safe），杜绝「刷新后无核对单可发送」。
+  // 以 confirmState 对象身份为幂等键：同卡原地 patch 不重拉；切会话再回来产生的新对象允许再拉。
+  useEffect(() => {
+    const cs = state.confirmState;
+    if (!cs || cs.checklist !== null || cs.checklistError) return;
+    if (checklistTriedRef.current.has(cs)) return;
+    checklistTriedRef.current.set(cs, true);
+    let alive = true;
+    fetchActChecklist(cs.actId).then((out) => {
+      if (!alive) return;
+      if (out.kind === 'ok') {
+        setState(prev => {
+          if (prev.confirmState !== cs) return prev;   // 期间已被替换/复位：丢弃迟到结果
+          return { ...prev, confirmState: { ...cs, checklist: out.checklist, holdout: out.holdout ?? cs.holdout } };
+        });
+      } else if (out.kind === 'refused') {
+        setState(prev => {
+          if (prev.confirmState !== cs) return prev;
+          return { ...prev, confirmState: { ...cs, checklistError: out.reason } };
+        });
+      }
+      // unsupported（旧后端无此接口）：保持 checklist=null 禁用态，不出错误文案
+    }).catch(() => { /* 网络异常：保持禁用态，重载页面可重试 */ });
+    return () => { alive = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.confirmState]);
 
   const ensureAct = useCallback(async (): Promise<Act | null> => {
     // P0-N1：有锚点（loadState 刚恢复的未完结会话）绝不新建——旧实现读首帧闭包 state.act（恒 null），
@@ -474,23 +517,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // —— 多会话 #2：切换会话（streaming 中阻止；O(1) Map 查找）——
   const switchAct = useCallback((id: string) => {
-    if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
+    if (operationRef.current) { toast_('当前操作处理中，稍等再切换'); return; }
     const next = actIndexRef.current.get(id);
     if (!next || next.id === state.act?.id) { patch({ historyOpen: false }); return; }
     anchoredActRef.current = next;
     patch({
       act: next, historyOpen: false, activeTab: 'chat',
-      planPushed: false, planShown: null,
-      confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
+      planPushed: Boolean(next.flow_version === 6 && next.planCard), planShown: next.flow_version === 6 && next.planCard ? 'confirm' : null,
+      confirmState: preparedStateFor(next), confirmFailed: confirmationRecoveryFor(next),
       chips: [],   // chips 属于上一会话的最新回复，切会话即失效
       askedSlot: null,   // 追问槽位同属上一会话
       pendingBatches: [],   // done 帧待确认批次同属上一会话的最新回复，一并失效
       chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER,
     });
-  }, [state.streaming, state.act, patch, toast_]);
+  }, [state.act, patch, toast_]);
 
   // —— 多会话 #2：新建会话（新建 act 置顶并直接进入对话） ——
   const newConversation = useCallback(async () => {
+    if (operationRef.current) { toast_('当前操作处理中，稍等再新建会话'); return; }
+    operationRef.current = 'new';
     try {
       const r = await createAct();
       actIndexRef.current.set(r.act.id, r.act);
@@ -507,6 +552,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       });
     } catch (e: any) {
       toast_('新建会话失败：' + (e?.message || e));
+    } finally {
+      operationRef.current = null;
     }
   }, [state.acts, patch, toast_]);
 
@@ -514,8 +561,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 200 {ok, act} → 用响应 act 切换会话（参照 switchAct 清会话级状态）+ loadState({preferActId}) 回合末刷新；
   // 409（该待办已 done）→ 静默刷新待办列表（不切会话不报错）；其余失败 toast。走裸 fetch 取状态码（api() 不透传 status）。
   const resumeTodo = useCallback(async (id: string) => {
-    if (state.streaming) { toast_('回复生成中，稍等再切换'); return; }
+    if (operationRef.current) { toast_('当前操作处理中，稍等再切换'); return; }
     if (!id) return;
+    operationRef.current = 'new';
     try {
       const res = await fetch(`/api/todos/${encodeURIComponent(id)}/resume`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin',
@@ -545,13 +593,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       await loadState({ preferActId: nextAct.id });   // 刷新 campaigns/todos/通知等，锚定新会话防旧闭包抢回
     } catch {
       toast_('继续待办失败，请稍后再试');
+    } finally {
+      operationRef.current = null;
     }
-  }, [state.streaming, state.acts, patch, toast_, loadState]);
+  }, [state.acts, patch, toast_, loadState]);
 
   // —— 发消息（SSE 流式 + 一次性降级） ——
   const sendMsg = useCallback(async (text: string) => {
     const t = text.trim();
-    if (!t || state.streaming) return;
+    if (!t || state.streaming || operationRef.current) return;
+    operationRef.current = 'message';
+    try {
     // 无会话（未登录 / 注册后未重建）先补建；补不了就明确引导注册，绝不静默丢弃（走查 P0-2）
     const act = state.act || await ensureAct();
     if (!act) {
@@ -567,23 +619,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // 用户点「确认建批」chip 后后端真正建批，本轮 done 帧无 batches → pendingBatches 随之清空）
     patch({ act: actWithUser, streaming: true, streamingText: '', chips: [], askedSlot: null, pendingBatches: [] });
 
-    const finalize = (r: { reply: string; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; askedSlot?: unknown; engine?: unknown; batches?: unknown }) => {
+    const finalize = (r: { reply: string; act?: Act; stage?: any; needs?: any; planCard?: PlanCard | null; chips?: unknown; askedSlot?: unknown; engine?: unknown; batches?: unknown }) => {
       setState(prev => {
-        if (!prev.act) return prev;
-        const assistantMsg = { role: 'assistant' as const, content: r.reply };
-        const nextAct: Act = {
-          ...prev.act,
-          stage: r.stage ?? prev.act.stage,
-          needs: r.needs ?? prev.act.needs,
-          messages: [...prev.act.messages, assistantMsg],
-          planCard: r.planCard ?? prev.act.planCard ?? null,
-        };
+        if (!prev.act || prev.act.id !== act.id) return prev;
+        const nextAct = mergeReplyAct(prev.act, r);
         // 确认卡重现：首推（planPushed=false）或用户用文字确认（「可以/好/行，去发」类）时拉卡。
         // 修「卡片永远不再出现」死局：planPushed 全局一次性后，再聊聊/刷新后打字确认无法唤回卡片；
         // 再修「点过一次可以去发后死锁」：planShown 卡在 plan/sent 不复位时同样拉不回卡 → 不再看 planShown。
         // 光杆「好」「行」也算确认（好(的|吧|嘞)? ），但「不好/不行」不算（[^不没] 前置守卫）。
         const CONFIRM_INTENT_RE = /(^|[^不没])(可以|行(的|吧)?|好(的|吧|嘞)?|去发|发送|确认|就这样|生成|ok|yes|send)/i;
-        const pushConfirm = !!r.planCard && (!prev.planPushed || CONFIRM_INTENT_RE.test(t));
+        const pushConfirm = !!r.planCard && (!prev.planPushed || !prev.act.planCard || CONFIRM_INTENT_RE.test(t));
         // chips：只接受字符串数组（旧 done 帧无此字段/空数组 → 清空不渲染）
         const chips: Chips = Array.isArray(r.chips)
           ? (r.chips as unknown[]).filter((c): c is string => typeof c === 'string')
@@ -600,7 +645,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           // 多会话 #2：acts 里的同一会话同步为新状态（历史列表摘要/时间随之更新）
           acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
-          planShown: pushConfirm ? 'confirm' : prev.planShown,
+          planShown: pushConfirm ? 'confirm' : nextAct.planCard ? prev.planShown : null,
+          ...(r.stage && r.stage !== 'S3' ? { confirmState: null, confirmFailed: null } : {}),
         };
       });
     };
@@ -611,7 +657,10 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // campaigns/blackout/global_paused 只有这里能刷新（对话是驾驶舱，卡片不自调管理 API）
     const refreshBatchDomain = () => { loadState().catch(() => {}); };
     try {
-      const result = await streamMessage(act.id, t, (full) => { got = true; last = full; patch({ streamingText: full }); });
+      const result = await streamMessage(act.id, t, (full) => {
+        got = true; last = full;
+        setState(prev => prev.act?.id === act.id ? { ...prev, streamingText: full } : prev);
+      });
       finalize(result);
       refreshBatchDomain();
     } catch {
@@ -634,6 +683,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         toast_('发送失败：' + (e?.message || e));
         patch({ streaming: false, streamingText: '' });
       }
+    }
+    } finally {
+      operationRef.current = null;
     }
   }, [state.act, state.streaming, patch, ensureAct, toast_, loadState]);
 
@@ -728,6 +780,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   // —— 受众「去聊这拨人」→ 新建 act（预选受众）+ 切对话 + 预填输入 ——
   const jumpToConfig = useCallback(async (intent: string, aud?: Audience) => {
+    if (operationRef.current) { toast_('当前操作处理中，稍等再新建会话'); return; }
+    operationRef.current = 'new';
+    try {
     const r = await createAct({ audience: intentToAudience(intent) });
     actIndexRef.current.set(r.act.id, r.act);
     anchoredActRef.current = r.act;
@@ -740,21 +795,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       chatInput: aud ? `帮我挽回 ${aud.intent || ''} 的人，弃购额约 ¥${+aud.abandoned_value || 0}` : '',
       chatPlaceholder: CHAT_PLACEHOLDER,
     });
-  }, [state.acts, patch]);
+    } catch (e: any) {
+      toast_('新建会话失败：' + (e?.message || e));
+    } finally {
+      operationRef.current = null;
+    }
+  }, [state.acts, patch, toast_]);
 
   // —— 异步任务轮询（发送 202 入队后；GET /api/jobs/:id）——
-  const pollJob = useCallback(async (jobId: string, timeoutMs = 120000): Promise<{ ok: boolean; result?: any; error?: string }> => {
-    const started = Date.now();
-    while (Date.now() - started < timeoutMs) {
-      try {
-        const j = await api<{ status: string; result?: any; error?: string }>(`/api/jobs/${jobId}`);
-        if (j.status === 'done') return { ok: true, result: j.result };
-        if (j.status === 'failed') return { ok: false, error: j.error || '任务执行失败' };
-      } catch { /* 网络抖动继续轮询 */ }
-      await new Promise(r => setTimeout(r, 900));
-    }
-    return { ok: false, error: '任务超时，请稍后在邮件页查看状态' };
-  }, []);
+  const pollJob = pollSendJob;
 
   // —— 确认卡预建草稿（仅旧后端回退路径用）：/confirm 404（部署窗口期）时兜底建稿；新后端流程草稿一律由 confirm 服务端权威创建 ——
   const createCardDraft = useCallback(async (actId: string, card: PlanCard): Promise<Draft> => {
@@ -772,10 +821,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // 404（旧后端无此接口，部署窗口期）→ 回退旧路径：预建草稿 → 邮件 tab → EditModal。
   const confirmPlan = useCallback(async (body?: { reuse_code?: string; nohook?: boolean }) => {
     const act = state.act;
-    if (!act || state.confirmBusy) return;
+    if (!act || state.confirmBusy || operationRef.current || (act.flow_version !== 6 && hasUnresolvedConflicts(act))) return;
+    const prepare = act.flow_state?.actions?.find(a => a.kind === 'prepare_plan');
+    if (act.flow_version === 6 && !body?.nohook && !body?.reuse_code && !prepare?.enabled) { toast_(prepare?.blockedReasons.join('；') || '请先保存邮件预览'); return; }
+    operationRef.current = 'confirm';
     patch({ confirmBusy: true, confirmFailed: null });
     try {
-      const out = await confirmAct(act.id, body);
+      const out = await confirmAct(act.id, { ...(act.flow_version === 6 && prepare && !body?.nohook && !body?.reuse_code ? prepare : {}), ...body, expected_updated_at: act.updated_at, expected_business_version: act.business_version });
       if (out.kind === 'ok') {
         const planCard = out.planCard;
         const checklist = out.checklist ?? null;
@@ -784,19 +836,19 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         pendingCardDraft = null;
         setState(prev => {
           if (!prev.act || prev.act.id !== act.id) return { ...prev, confirmBusy: false };
-          const nextAct: Act = { ...mergeAct(prev.act, out.act), stage: 'S3', planCard: planCard || prev.act.planCard || null };
+          const nextAct: Act = { ...mergeAct(prev.act, out.act), stage: out.previewOnly ? 'S2' : 'S3', planCard: planCard || prev.act.planCard || null };
           return {
             ...prev,
             act: nextAct,
             acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
-            confirmState: { actId: nextAct.id, planCard, checklist, holdout: checklist?.holdout ?? null },
+            confirmState: out.previewOnly ? null : { actId: nextAct.id, planCard, checklist, holdout: checklist?.holdout ?? null },
             confirmFailed: null,
             planShown: 'confirm', planPushed: true,
             confirmBusy: false,
           };
         });
         if (stale) api(`/api/draft/${stale.id}`, { method: 'DELETE' }).catch(() => {});
-        toast_(body?.nohook ? '已改为无钩子提醒信，请在下方方案卡核对后发送' : '方案已确认，请在下方方案卡核对后发送');
+        toast_(out.previewOnly ? '无优惠预览已保存，请核对文案后再准备发送方案' : '方案已确认，请在下方方案卡核对后发送');
         return;
       }
       if (out.kind === 'conflict') {
@@ -805,7 +857,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           confirmFailed: { reason: out.reason, options: out.options },
           confirmState: null,
           confirmBusy: false,
-          ...(out.act && prev.act && out.act.id === prev.act.id ? { act: mergeAct(prev.act, out.act) } : {}),
+          planShown: act.flow_version === 6 ? 'confirm' : null, planPushed: act.flow_version === 6,
+          ...(out.act && prev.act && out.act.id === prev.act.id ? { act: act.flow_version === 6 ? withPlanCard(out.act) : { ...mergeAct(prev.act, out.act), planCard: null } } : {}),
         }));
         return;
       }
@@ -824,11 +877,30 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       patch({ draftGenerating: false });
     } catch (e: any) {
-      toast_('确认失败：' + (e?.message || e));
+      toast_('准备失败：' + (e?.message || e));
+      await loadState().catch(() => {});
     } finally {
+      operationRef.current = null;
       patch({ confirmBusy: false });
     }
   }, [state.act, state.confirmBusy, patch, switchTab, createCardDraft, loadState, toast_]);
+
+  const runAction = useCallback(async (action: AvailableAction, edits?: { subject?: string; body?: string; choices?: Record<string, string> }) => {
+    if (!action.enabled || operationRef.current) return;
+    if (action.kind === 'prepare_plan') { await confirmPlan(); return; }
+    operationRef.current = 'action'; patch({ confirmBusy: true });
+    try {
+      const result = await api<{ act: Act; error?: string }>(`/api/act/${action.targetId}/action`, { method: 'POST', body: JSON.stringify({ ...action, ...edits }) });
+      if (result.error) throw new Error(result.error);
+      if (result.act) setState(prev => {
+        if (prev.act?.id !== result.act.id) return prev;
+        const next = withPlanCard(result.act);
+        return { ...prev, act: next, acts: prev.acts.map(a => a.id === next.id ? next : a), chips: [], askedSlot: null, confirmState: preparedStateFor(next), planShown: next.planCard ? 'confirm' : null, planPushed: Boolean(next.planCard) };
+      });
+      await loadState();
+    } catch (e: any) { toast_(e?.message || '操作失败'); await loadState().catch(() => {}); }
+    finally { operationRef.current = null; patch({ confirmBusy: false }); }
+  }, [confirmPlan, patch, loadState, toast_]);
 
   // —— 方案卡「确认发送」→ POST /api/draft/:id/send（confirm 已在后端建稿，draft_id 直用）：
   // 409 闸门兜底 → 用服务端返回的最新 checklist 刷新 confirmState（方案卡红字标未过原因）；
@@ -850,8 +922,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           ? { ...prev, confirmState: { ...prev.confirmState, planCard: { ...prev.confirmState.planCard, draft_id: draftId } } }
           : prev));
       }
-      const r = await api<{ job_id?: string; queued?: boolean; result?: SendResult; ok?: boolean; checklist?: Checklist; error?: string }>(
-        `/api/draft/${draftId}/send`, { method: 'POST', body: '{}' });
+      const r = await sendWithApproval<{ job_id?: string; queued?: boolean; scheduled_at?: number; result?: SendResult; ok?: boolean; checklist?: Checklist; error?: string }>(draftId, { expected_business_version: state.act?.business_version });
       // 闸门 409：服务端返回最新核对单 → 刷新重渲染（前端按钮本就该禁用，此处为服务端兜底）
       if (r.ok === false && r.checklist && Array.isArray(r.checklist.items)) {
         const fresh = r.checklist;
@@ -862,10 +933,16 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return false;
       }
       if (r.error) { toast_(r.error); return false; }
+      if (r.queued && r.scheduled_at) {
+        await loadState().catch(() => {});
+        toast_('邮件已预约，将在允许发送的时段执行');
+        return true;
+      }
       let res: SendResult | undefined = r.result;
       if (r.queued && r.job_id) {
         const j = await pollJob(r.job_id);
         if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return false; }
+        if (j.pending) { await loadState().catch(() => {}); toast_('发送任务尚未完成，请在邮件页查看状态'); return true; }
         res = j.result;
       }
       // confirm 建稿路径本地没有完整 Draft → 以 planCard 数据拼伪草稿供 SentBanner 展示（loadState 后邮件 tab 有真身）
@@ -876,15 +953,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         currency: cs.planCard.estGmv?.currency || undefined,
         cost: Number((res as any)?.cost) || 0,
       };
-      patch({ planShown: 'sent', lastSent: { res: res || {}, draft: pseudo } });
-      await loadState();
+      setState(prev => prev.act?.id === actId ? { ...prev, planShown: 'sent', lastSent: { res: res || {}, draft: pseudo } } : prev);
+      await loadState().catch(() => {});
       toast_('邮件已发出 · 回流中…');
       return true;
     } catch (e: any) {
       toast_('发送失败：' + (e?.message || e));
       return false;
     }
-  }, [state.confirmState, state.act, patch, loadState, pollJob, toast_]);
+  }, [state.confirmState, state.act, loadState, pollJob, toast_]);
 
   // —— S3 改口复位：用户在对话里改参，后端把 act 弹回 S2（或切到无 confirmState 的会话）→
   // confirm 相关 state 复位，确认卡由 planPushed/act.stage 判断重新出现，不做死缓存。
@@ -899,22 +976,29 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [state.act?.id, state.act?.stage]);
 
   // —— 邮件卡编辑后发送（202 入队 + 轮询）——
-  const sendEditedDraft = useCallback(async (subject: string, body: string) => {
+  const sendEditedDraft = useCallback(async (subject: string, body: string, businessVersion?: number) => {
     const d = state.editingDraft;
     if (!d) return false;
     if (!subject || !body) { toast_('主题和正文不能为空'); return false; }
     try {
-      const r = await api<{ job_id?: string; queued?: boolean; error?: string }>(`/api/draft/${d.id}/send`, {
-        method: 'POST', body: JSON.stringify({ subject, body }),
-      });
-      if (r.error) { toast_(r.error); return false; }
+      const r = await sendWithApproval<{ job_id?: string; queued?: boolean; scheduled_at?: number; ok?: boolean; checklist?: Checklist; error?: string }>(d.id, { subject, body, expected_business_version: businessVersion ?? d.mailgen_meta?.business_version });
+      const failure = sendFailureReason(r);
+      if (failure) { toast_(failure); await loadState().catch(() => {}); return false; }
+      if (r.queued && r.scheduled_at) {
+        patch({ editOpen: false, editingDraft: null });
+        await loadState().catch(() => {}); toast_('邮件已预约，将在允许发送的时段执行'); return true;
+      }
       if (r.queued && r.job_id) {
         const j = await pollJob(r.job_id);
         if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return false; }
+        if (j.pending) {
+          patch({ editOpen: false, editingDraft: null });
+          await loadState().catch(() => {}); toast_('发送任务尚未完成，请在邮件页查看状态'); return true;
+        }
       }
       patch({ editOpen: false, editingDraft: null });
       toast_('邮件已发送（以编辑后内容为准）');
-      await loadState();
+      await loadState().catch(() => {});
       return true;
     } catch (e: any) {
       toast_('发送失败：' + (e?.message || e));
@@ -926,16 +1010,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const sendDraft = useCallback(async (d: Draft) => {
     if (['sent', 'sending', 'queued'].includes(d.status)) { toast_('该邮件已发送或正在发送'); return false; }
     try {
-      const r = await api<{ job_id?: string; queued?: boolean; error?: string }>(`/api/draft/${d.id}/send`, {
-        method: 'POST', body: '{}',
-      });
-      if (r.error) { toast_(r.error); return false; }
+      const r = await sendWithApproval<{ job_id?: string; queued?: boolean; scheduled_at?: number; ok?: boolean; checklist?: Checklist; error?: string }>(d.id, { expected_business_version: d.mailgen_meta?.business_version });
+      const failure = sendFailureReason(r);
+      if (failure) { toast_(failure); await loadState().catch(() => {}); return false; }
+      if (r.queued && r.scheduled_at) { await loadState().catch(() => {}); toast_('邮件已预约，将在允许发送的时段执行'); return true; }
       if (r.queued && r.job_id) {
         const j = await pollJob(r.job_id);
         if (!j.ok) { toast_('发送失败：' + (j.error || '未知错误')); await loadState(); return false; }
+        if (j.pending) { await loadState().catch(() => {}); toast_('发送任务尚未完成，请在邮件页查看状态'); return true; }
       }
       toast_('邮件已发送');
-      await loadState();
+      await loadState().catch(() => {});
       return true;
     } catch (e: any) {
       toast_('发送失败：' + (e?.message || e));
@@ -962,7 +1047,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const value: AppContextValue = {
     ...state,
     switchTab, switchAct, loadState, newConversation, resumeTodo, sendMsg, setMode, saveConfig, resetData, doImport,
-    authSubmit, authLogout, jumpToConfig, confirmPlan, sendConfirmedPlan, createCardDraft, sendEditedDraft, sendDraft, deleteDraft,
+    authSubmit, authLogout, jumpToConfig, confirmPlan, runAction, sendConfirmedPlan, createCardDraft, sendEditedDraft, sendDraft, deleteDraft,
     refreshNotifications, markNotificationsRead,
     setChatInput: (v) => patch({ chatInput: v }),
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),

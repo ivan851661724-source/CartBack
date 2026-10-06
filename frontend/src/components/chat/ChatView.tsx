@@ -7,11 +7,14 @@ import { filledCount, needsValue, needsSource } from '@/lib/needs';
 import { fmtTime } from '@/lib/format';
 import { CHAT_PLACEHOLDER } from '@/lib/constants';
 import { api } from '@/lib/api';
+import { hasUnresolvedConflicts, replyChipsFor, conversationNumber } from '@/lib/chat-flow';
 import type { Draft, LastPlan, NotificationItem, TodoItem } from '@/lib/types';
 import MessageBubble from './MessageBubble';
 import SentBanner from './SentBanner';
 import OpportunityCard from './OpportunityCard';
 import PlanCardView from './PlanCard';
+import PreviewEditor from './PreviewEditor';
+import ChoicesEditor from './ChoicesEditor';
 import BatchCard from './BatchCard';
 import type { BatchPreview } from '@/lib/types';
 
@@ -23,13 +26,14 @@ const RECEIPT_TYPE_LABEL: Record<string, string> = { t0: '发送回执', t24: '�
 /** E1 拦截轮识别组（仅用于「建议」角标）：done 帧 chips 命中其中之一且回复文本含「建议」→ 视为拦截建议气泡 */
 const E1_CHIPS = ['换成替代方案', '就要这个折扣', '换主题行再打', '先不动'];
 
+
 /** 助手（对话）视图 —— 对应 flow.html #view-chat + app.js renderChat/sendMsg UI */
 export default function ChatView() {
   const {
     act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, chips, askedSlot, engine, sendMsg, setChatInput, setChatPlaceholder,
     setPlanShown, setPlanPushed, switchTab, setHistoryOpen,
-    confirmState, confirmFailed, confirmBusy, confirmPlan,
+    confirmState, confirmFailed, confirmBusy, confirmPlan, runAction,
     campaigns, pendingBatches,
     lastPlan, notifications,
     todos, resumeTodo, welcome,
@@ -40,8 +44,12 @@ export default function ChatView() {
   // confirm 409 三出口：「改用店内现成码」的输入行展开 + 码值
   const [reuseOpen, setReuseOpen] = useState(false);
   const [reuseCode, setReuseCode] = useState('');
+  const [choicesDirty, setChoicesDirty] = useState(false);
+  useEffect(() => { setChoicesDirty(false); }, [act?.id, act?.business_version]);
 
   const n = filledCount(act?.needs);
+  // 开场返回的出口选项仅在四项必要信息齐全后显示；槽位采集和澄清选项照常保留。
+  const replyChips = replyChipsFor(act, chips, askedSlot);
   const messages = act?.messages || [];
   // E1 拦截轮「建议」角标：最新 agent 回复含「建议」且当前 chips 命中拦截组（换方案/要折扣/换主题/先不动）时，
   // 给该条气泡加灰色「建议」小标，帮商家一眼认出这是助手的替代建议（纯样式，chips 随下一条消息清空后角标随之消失）。
@@ -57,6 +65,7 @@ export default function ChatView() {
   const hasSentForAct = (drafts || []).some(
     (d) => d.act_id === act?.id && ['queued', 'sending', 'sent', 'recovering'].includes(d.status),
   );
+  const deliveredForAct = (drafts || []).some(d => d.act_id === act?.id && ['sent', 'recovering'].includes(d.status));
   // Wave3 批次域：本会话关联的正式批次（campaign.act_id === act.id）→ 对话流内并列批次状态卡
   const actCampaigns = campaigns.filter((c) => c.act_id === act?.id);
   // Wave4 Z7 回执：通知里属于当前会话且非 system 的条目（接口倒序 → 翻转为时间正序），
@@ -70,13 +79,13 @@ export default function ChatView() {
   const [audConditions, setAudConditions] = useState<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] } | null>(null);
   const planAudience = act?.planCard?.audience || '';
   useEffect(() => {
-    if (planShown !== 'confirm' || !planAudience) { setAudConditions(null); return; }
+    if (act?.flow_version === 6 || planShown !== 'confirm' || !planAudience) { setAudConditions(null); return; }
     let alive = true;
     api<{ matchedCount: number; estGmv: number; filters: { value: string | number }[] }>('/api/audience/preview', {
       method: 'POST', body: JSON.stringify({ audience: planAudience }),
     }).then((r) => { if (alive && r && (r as any).filters) setAudConditions(r); }).catch(() => {});
     return () => { alive = false; };
-  }, [planShown, planAudience]);
+  }, [planShown, planAudience, act?.flow_version]);
 
   // 自动滚到底（消息变化 / 流式 token / 卡片出现 / 回复 chips / 方案卡或建码失败卡出现 / 待确认批次、批次卡、回执气泡出现）
   useEffect(() => {
@@ -114,7 +123,7 @@ export default function ChatView() {
 
   // 确认卡（新契约）：四槽优先读 act.needs（三态对象走 needsValue），planCard 字段兜底；
   // source==='inferred' 的槽在该行显示「（我推断的，可改）」小标。
-  const confirmCard = planShown === 'confirm' && act?.planCard ? act.planCard : null;
+  const confirmCard = !streaming && (act?.flow_version === 6 || (!hasUnresolvedConflicts(act) && !askedSlot)) && planShown === 'confirm' && act?.planCard ? act.planCard : null;
   const needsNow = act?.needs ?? null;
   // planCard reason 兜底：新契约为 reason；旧后端历史数据仍是 pain（键已删，运行时兜底读一次）
   const cardReason = confirmCard ? (confirmCard.reason || (confirmCard as { pain?: string }).pain) : undefined;
@@ -160,13 +169,13 @@ export default function ChatView() {
               onClick={() => setHistoryOpen(true)}
               title="历史会话"
             >
-              会话 {acts.length > 0 ? acts.length : ''}
+              会话 {conversationNumber(acts, act?.id) || ''}
             </button>
           </div>
 
           <div className="chat-area" ref={areaRef} aria-live="polite" aria-label="对话消息区">
             {/* Z4 空态（剧本 #23：不输入也见首条气泡）：welcome.eligible 时渲染后端 opening 预览
-                （欢迎语+数据开场句+清单+出口句，与建会话 messages[0] 同源单点生成）+ 出口 chips 3 项；
+                （欢迎语+数据开场句+清单+出口句，与建会话 messages[0] 同源单点生成），此时不显示出口按钮；
                 上方按需渲染「上次方案」复用卡与待办卡。无 opening（旧后端）→ 退回中性引导。 */}
             {messages.length === 0 && !streaming && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
@@ -177,24 +186,6 @@ export default function ChatView() {
                     <div className="msg agent">
                       <div className="avatar agent"><NavChat /></div>
                       <div className="bubble">{welcome.opening}</div>
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
-                      {(welcome.chips || []).map((c, i) => (
-                        <button
-                          key={`${i}-${c}`}
-                          type="button"
-                          onClick={() => onChipClick(c)}
-                          style={{
-                            display: 'inline-flex', alignItems: 'center', gap: '6px',
-                            padding: '7px 13px', borderRadius: '9px',
-                            border: '0.5px solid #DDE2E8', background: '#fff', color: 'var(--text)',
-                            fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
-                            whiteSpace: 'nowrap', transition: 'all .15s',
-                          }}
-                        >
-                          {c}
-                        </button>
-                      ))}
                     </div>
                   </>
                 ) : (
@@ -214,7 +205,7 @@ export default function ChatView() {
             {messages.map((m, i) => <MessageBubble key={i} m={m} badge={i === lastAssistantIdx ? e1Badge : undefined} />)}
 
             {/* ② 主动轻提示：四要素齐了但一直没触发确认卡 → 轻推一句（非弹窗、非表单） */}
-            {!streaming && n >= 4 && !act?.planCard && !planShown && messages.length > 4 && (
+            {!streaming && act?.flow_version !== 6 && n >= 4 && !act?.planCard && !planShown && messages.length > 4 && (
               <div className="msg agent">
                 <div className="avatar agent"><NavChat /></div>
                 <div className="bubble" style={{ opacity: 0.92 }}>
@@ -234,12 +225,27 @@ export default function ChatView() {
 
             {/* 常驻回复 chips：最新一条 agent 回复的后续快捷操作。
                 来源：SSE done 帧 chips + 建会话响应的开场 chips（AppProvider 存 state，发送新消息即清空）；
-                空 → 不渲染。数量以后端下发为准、不再前端截断（P2-N1：goal 槽 4 项是 C4 槽位级例外，
+                四槽齐全且停留 S2 时补上三个出口按钮；采集期隐藏提前下发的出口选项。
+                数量不做截断（P2-N1：goal 槽 4 项是 C4 槽位级例外，
                 slice(0,3) 会把「我自己定」自由输入出口永久截掉）。
                 goal 槽 chips 走「chips+输入框」复合形态（P2-N4）：点击预填输入框补值，其余点击即发送。 */}
-            {!streaming && chips.length > 0 && (
+            {!streaming && act?.flow_version === 6 && (
+              <div style={{ display: 'flex', gap: 8, padding: '6px 16px', flexWrap: 'wrap' }}>
+                {(act.flow_state?.actions || []).filter(a => !['prepare_plan', 'save_preview', 'save_choices'].includes(a.kind)).map(action => (
+                  <button key={action.id} className="btn ghost sm" disabled={confirmBusy || !action.enabled} title={action.blockedReasons.join('；')} onClick={() => action.kind === 'other' ? onReconsider() : runAction(action)}>{action.label}</button>
+                ))}
+              </div>
+            )}
+            {!streaming && act?.flow_version === 6 && act.stage !== 'S3' && act.flow_state?.actions.find(a => a.kind === 'save_choices') && <ChoicesEditor key={`${act.id}:${act.business_version}:choices`} needs={act.needs} action={act.flow_state.actions.find(a => a.kind === 'save_choices')!} onDirty={setChoicesDirty} />}
+            {act?.flow_state?.previous_preview && <details style={{ margin: '12px 16px', padding: 12, border: '1px solid #DDE2E8', borderRadius: 12 }}>
+              <summary>上一版邮件预览已失效，仅供查看</summary>
+              <strong>{act.flow_state.previous_preview.subject}</strong>
+              <p style={{ whiteSpace: 'pre-wrap' }}>{act.flow_state.previous_preview.body}</p>
+              <p>活动信息已更新，请重新生成并核对当前版本。</p>
+            </details>}
+            {!streaming && replyChips.length > 0 && (
               <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
-                {chips.map((c, i) => (
+                {replyChips.map((c, i) => (
                   <button
                     key={`${i}-${c}`}
                     type="button"
@@ -282,7 +288,8 @@ export default function ChatView() {
                 计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
             {confirmCard && (
               <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
-                <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>⚡ 需求已收集完整！</div>
+                <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>{act?.flow_version === 6 ? '邮件预览 · 尚未发送' : '⚡ 需求已收集完整！'}</div>
+                {act?.flow_version === 6 && <PreviewEditor key={`${act.id}:${act.business_version}`} card={confirmCard} action={act.flow_state?.actions.find(a => a.kind === 'save_preview')} choicesDirty={choicesDirty} />}
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
                   {confirmRows.map(([label, value, inferred]) => (
                     <div key={label} style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'12px',padding:'7px 0',borderBottom: label === '给什么钩子' ? 'none' : '.5px dashed #DDE2E8',fontSize:'13px'}}>
@@ -319,7 +326,7 @@ export default function ChatView() {
                 <div style={{display:'flex',gap:'9px',alignItems:'center',flexWrap:'wrap'}}>
                   {hasSentForAct ? (
                     <>
-                      <span style={{fontSize:'13px',color:'var(--ok2)',fontWeight:600}}>✓ 邮件已发送</span>
+                      <span style={{fontSize:'13px',color:'var(--ok2)',fontWeight:600}}>{deliveredForAct ? '✓ 邮件已发送' : '邮件已排队或正在发送'}</span>
                       <button className="btn ghost" onClick={() => switchTab('data')}>查看数据看板 →</button>
                     </>
                   ) : confirmedHere ? (
@@ -330,9 +337,9 @@ export default function ChatView() {
                     </>
                   ) : (
                     <>
-                      <button className="btn primary" disabled={confirmBusy} onClick={() => confirmPlan()}>
-                        {confirmBusy ? '确认中…' : '可以，去发'}
-                      </button>
+                      {act?.flow_version !== 6 && <button className="btn primary" disabled={confirmBusy || streaming} onClick={() => confirmPlan()}>
+                        {confirmBusy ? '准备中…' : act?.flow_version === 6 ? '准备发送方案（不会发送）' : '可以，去发'}
+                      </button>}
                       <button className="btn ghost" onClick={onReconsider}>再聊聊</button>
                     </>
                   )}
