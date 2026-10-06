@@ -2,6 +2,8 @@
 
 ## Product
 
+- [CartBack PRD v6：自然对话、方案草稿与可靠执行](PRD_CartBack_v6.md) — 2026-10-06 待评审目标设计，重写 B/C/D 并同步记忆、按钮、降级和验收；不代表已实现。
+- [CartBack PRD v5](PRD_CartBack_v5.md) — 历史产品目标与现有实现背景；v6 通过评审后，重叠流程以 v6 为准。
 - [CartBack PRD v1](product/PRD_CartBack_v1.md) — 产品定位、核心体验、商业化路线与风险。
 
 ## Design
