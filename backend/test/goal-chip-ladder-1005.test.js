@@ -112,7 +112,7 @@ test('阶梯⑦ 采集早期 goal 非追问目标时，「先跑起来」不走�
   act.stage = 'S1'; // 四槽全空，B4 指向 audience
   const r = await igde.handle(act, '先跑起来', { persist: async () => {} });
   assert.ok(!/多少单|多少钱/.test(r.reply), 'goal 非当前追问槽 → 不触发收窄阶梯');
-  assert.ok(/召回谁|哪拨/.test(r.reply), `受众照常被问，实际：${r.reply}`);
+  assert.ok(/挽回对象|召回哪拨|哪拨/.test(r.reply), `受众照常被问，实际：${r.reply}`);
 });
 
 test('断路器·问句体比对：换皮前缀（换个说法——/再帮我想想这一项就行：）不再绕过熔断', async () => {
