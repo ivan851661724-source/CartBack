@@ -230,9 +230,34 @@ export default function ChatView() {
                 slice(0,3) 会把「我自己定」自由输入出口永久截掉）。
                 goal 槽 chips 走「chips+输入框」复合形态（P2-N4）：点击预填输入框补值，其余点击即发送。 */}
             {!streaming && act?.flow_version === 6 && (
-              <div style={{ display: 'flex', gap: 8, padding: '6px 16px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '8px', padding: '8px 0 0', flexWrap: 'wrap' }}>
                 {(act.flow_state?.actions || []).filter(a => !['prepare_plan', 'save_preview', 'save_choices'].includes(a.kind)).map(action => (
-                  <button key={action.id} className="btn ghost sm" disabled={confirmBusy || !action.enabled} title={action.blockedReasons.join('；')} onClick={() => action.kind === 'other' ? onReconsider() : runAction(action)}>{action.label}</button>
+                  <button
+                    key={action.id}
+                    disabled={confirmBusy || !action.enabled}
+                    title={action.blockedReasons.join('；')}
+                    onClick={() => action.kind === 'other' ? onReconsider() : runAction(action)}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: '6px',
+                      padding: '7px 13px', borderRadius: '9px',
+                      border: 'none', background: '#E6E9ED', color: 'var(--text)',
+                      fontSize: '12.5px', fontWeight: 500, cursor: action.enabled ? 'pointer' : 'not-allowed',
+                      whiteSpace: 'nowrap', transition: 'background .15s',
+                      opacity: action.enabled ? 1 : 0.5,
+                    }}
+                    onMouseEnter={(e) => {
+                      if (action.enabled) {
+                        e.currentTarget.style.background = '#FF7F4D';
+                        e.currentTarget.style.color = '#FFFFFF';
+                      }
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.background = '#E6E9ED';
+                      e.currentTarget.style.color = 'var(--text)';
+                    }}
+                  >
+                    {action.label}
+                  </button>
                 ))}
               </div>
             )}
