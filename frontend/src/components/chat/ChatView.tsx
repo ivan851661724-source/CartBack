@@ -128,10 +128,10 @@ export default function ChatView() {
   // planCard reason 兜底：新契约为 reason；旧后端历史数据仍是 pain（键已删，运行时兜底读一次）
   const cardReason = confirmCard ? (confirmCard.reason || (confirmCard as { pain?: string }).pain) : undefined;
   const confirmRaw: [string, string | undefined, boolean][] = confirmCard ? [
-    ['针对谁', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
-    ['为什么挽回', needsValue(needsNow?.reason) || cardReason, needsSource(needsNow?.reason) === 'inferred'],
-    ['要什么结果', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
-    ['给什么钩子', needsValue(needsNow?.offer)
+    ['针对谁*必填', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
+    ['为什么挽回*必填', needsValue(needsNow?.reason) || cardReason, needsSource(needsNow?.reason) === 'inferred'],
+    ['要什么结果*必填', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
+    ['给什么钩子*必填', needsValue(needsNow?.offer)
       || (typeof confirmCard.discount === 'string' ? confirmCard.discount : confirmCard.discount?.text)
       || confirmCard.offer, needsSource(needsNow?.offer) === 'inferred'],
   ] : [];
@@ -287,7 +287,7 @@ export default function ChatView() {
                 曾经 旧流程要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
                 计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
             {confirmCard && (
-              <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
+              <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)',maxWidth:'50%'}}>
                 <div style={{fontSize:'16px',fontWeight:700,color:'#1E293B',marginBottom:'12px'}}>{act?.flow_version === 6 ? '邮件预览 · 尚未发送' : '⚡ 需求已收集完整！'}</div>
                 {act?.flow_version === 6 && <PreviewEditor key={`${act.id}:${act.business_version}`} card={confirmCard} action={act.flow_state?.actions.find(a => a.kind === 'save_preview')} choicesDirty={choicesDirty} />}
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
