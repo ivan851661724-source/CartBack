@@ -103,7 +103,7 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
                   src={seg.img}
                   alt="导览示意图"
                   onError={(e) => { e.currentTarget.style.display = 'none'; }}
-                  style={{ display: 'block', marginTop: 8, marginBottom: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
+                  style={{ display: 'block', marginTop: 8, marginBottom: 8, maxWidth: 150, borderRadius: 8, border: '0.5px solid var(--line)' }}
                 />
               )}
             </div>
