@@ -41,7 +41,7 @@ function Checklist({ items }: { items: { label: string; desc: string }[] }) {
         <div key={i} style={{
           display: 'inline-flex', alignItems: 'center', gap: '6px',
           padding: 0, borderRadius: 0,
-          fontSize: '12.5px', fontWeight: 500, color: 'var(--text)',
+          fontSize: '14px', fontWeight: 400, color: 'var(--text)',
           flex: '1 1 auto', minWidth: '80px', maxWidth: '100%',
         }}>
           <span style={{
