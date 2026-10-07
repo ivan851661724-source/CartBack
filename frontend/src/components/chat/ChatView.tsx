@@ -157,7 +157,7 @@ export default function ChatView() {
             <div className="ch-av"><NavChat /></div>
                           <div className="ch-copy">
                             <span className="ch-kicker">当前会话</span>
-                            <span className="ch-t">挽回策略助手</span>
+                            <span className="ch-t">智能邮件助手</span>
                           </div>
                           <span className="ch-s" style={engine === 'degraded' ? { color: 'var(--warn2)' } : undefined}>
                             <span className="dot"></span>
