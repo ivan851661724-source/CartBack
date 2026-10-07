@@ -1,7 +1,6 @@
 'use client';
 
 import type { Message } from '@/lib/types';
-import { NavChat } from '@/components/ui/icons';
 import { TOUR_IMG } from '@/lib/chat-flow';
 
 /** 单条对话气泡：agent（品牌橙头像）或 user（靛蓝头像「我」）；badge 可选（如 E1 拦截轮「建议」角标）
@@ -68,10 +67,9 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
       </div>
     );
   }
+  // agent 侧去掉头像和气泡框——内容直接渲染（10-08 用户指令：只保留文本和卡片，不带聊天 UI 元素）
   return (
-    <div className="msg agent">
-      <div className="avatar agent"><NavChat /></div>
-      <div className="bubble">
+    <div className="msg agent bare">
         {badge && (
           <div style={{ marginBottom: 4 }}>
             <span style={{
@@ -98,7 +96,6 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
             style={{ display: 'block', marginTop: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
           />
         )}
-      </div>
     </div>
   );
 }
