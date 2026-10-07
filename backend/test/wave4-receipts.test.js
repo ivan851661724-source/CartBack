@@ -262,7 +262,7 @@ test('F3：发送完成 T+0 回执 + T+24h 汇总 job 到点产出 + 通知中�
   const act1 = st2.json.acts.find(a => a.id === c.actId);
   assert.ok(act1.plan_card.actual, 'estGmv 翻转数据写回 act.plan_card.actual');
   assert.equal(act1.plan_card.actual.source, 'actual');
-  assert.ok(act1.plan_card.actual.gmv >= 88.5, '实际 GMV ≥ 注入订单（含 demo 仿真转化的同口径聚合）');
+  assert.equal(act1.plan_card.actual.gmv, 88.5, '实际 GMV 只包含注入的归因订单');
   assert.ok(st2.json.last_plan.actual, 'last_plan 带翻转数据（前端预估→实际）');
 });
 

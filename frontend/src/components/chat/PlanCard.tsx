@@ -196,11 +196,11 @@ export default function PlanCardView() {
                 border: '.5px solid var(--line)', borderRadius: 999, padding: '2px 8px',
               }}>预估</span>
             )}
-            {est.source === 'demo' ? (
+            {est.source === 'reference' ? (
               <span style={{
                 fontSize: 10.5, fontWeight: 700, color: 'var(--warn2)', background: 'var(--warn-bg)',
                 border: '.5px solid var(--warn-line)', borderRadius: 999, padding: '2px 8px',
-              }}>演示数据</span>
+              }}>参考估算</span>
             ) : (
               <span style={{
                 fontSize: 10.5, fontWeight: 700, color: 'var(--ok2)', background: 'var(--ok-bg2)',

@@ -90,5 +90,5 @@ test('G6：收集地址按 user 派生（转发制；域名取已验证发件域
   const addr = competitorsMod.collectionAddress('usr_abc123def', 'send@mystore.com');
   assert.match(addr, /^scan\+usrabc123def@mystore\.com$/);
   const fallback = competitorsMod.collectionAddress('usr_x', '');
-  assert.match(fallback, /@inbound\.cartback\.demo$/);
+  assert.equal(fallback, '');
 });

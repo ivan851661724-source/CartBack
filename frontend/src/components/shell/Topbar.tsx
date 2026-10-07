@@ -10,7 +10,6 @@ import ConfirmDialog from '@/components/ui/ConfirmDialog';
 // 09-30 引导收敛：needs 进度 pill（HintPill）与快捷词引导均已移除，采集进度改由对话流承载（F1/F4）。
 export default function Topbar() {
   const { status, me, engine, global_paused, blackout, setAuthOpen, setAuthMode, authLogout, resetData } = useApp();
-  const real = status?.mode === 'real';
 
   // 引擎健康态（done 帧与 GET /api/state 更新；缺省 online）：degraded 时提示去设置页检查模型 Key
   const degraded = engine === 'degraded';
@@ -70,7 +69,6 @@ export default function Topbar() {
         <span className="dot" />
         {degraded ? '降级模式 · AI 未连接' : '在线'}
       </span>
-      <span className={`mode-pill${real ? ' real' : ''}`}>{real ? '真实' : '演示'}</span>
       <button className="tbtn" onClick={onUser} title={me?.user ? (me.user.name || me.user.email) : ''}>
         {me?.user ? '登出' : '登录'}
       </button>

@@ -74,7 +74,7 @@ test('mailgen: 空 subject/body + skip_image → fallback_template + skip', asyn
         planCard: {
           subject: '', body: '',
           discount: 12, brand: 'SmokeBrand',
-          audience: '加购未付', cart_url: 'https://cartback.demo/smoke',
+          audience: '加购未付', cart_url: 'https://shop.test/cart/smoke',
           locale: 'en-US', skip_image: true,
         },
       }),
@@ -109,7 +109,7 @@ test('mailgen: 已有 subject/body → igde_pass_through 直通', async () => {
         planCard: {
           subject: '我的专属挽回主题', body: '回来吧，购物车还在等你',
           discount: 9, brand: 'PassThru',
-          audience: '加购未付', cart_url: 'https://cartback.demo/pt',
+          audience: '加购未付', cart_url: 'https://shop.test/cart/pt',
           locale: 'en-US', skip_image: true,
         },
       }),

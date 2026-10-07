@@ -68,7 +68,7 @@ test('wave5 HTTP：prefs 写入回读 + todos/resume 契约 + 幂等 409', async
     body: JSON.stringify({ prefs: { tone: '亲切口语', discount_habit: '小额阶梯券', signature: 'LunaGlow' } })
   });
   assert.equal(cfgRes.status, 200);
-  assert.equal((await cfgRes.json()).status.mode, 'demo', 'config 响应形状不变（status）');
+  assert.equal((await cfgRes.json()).status.mode, undefined, 'config 响应形状不变（status）');
 
   const state1 = await (await fetch(baseUrl + '/api/state', { headers })).json();
   assert.ok(state1.prefs, 'GET /api/state 顶层 prefs');

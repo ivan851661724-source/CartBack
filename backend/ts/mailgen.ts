@@ -200,7 +200,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Glitter Rhinestone Clear Case', discount: 15.0, goal: 'abandonment_recovery',
     locale: 'en-US', preferred_language: 'English', price_sensitivity: 'value', customer_segment: 'new',
     category: 'phone_case',
-    cart_url: 'https://cartback.demo/u1',
+    cart_url: 'https://shop.test/u1',
   },
   {
     name: 'P2 美国中年硬核科技男(西语裔) — 军工磁吸防摔壳',
@@ -209,7 +209,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Rugged Armor MagSafe Case', discount: 12.0, goal: 'abandonment_recovery',
     locale: 'en-US', preferred_language: 'Spanish', price_sensitivity: 'premium', customer_segment: 'returning',
     category: 'phone_case',
-    cart_url: 'https://cartback.demo/u2',
+    cart_url: 'https://shop.test/u2',
   },
   {
     name: 'P3 德国商务男士 — 真皮卡包翻盖壳',
@@ -218,7 +218,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Premium Leather Wallet Case', discount: 10.0, goal: 'abandonment_recovery',
     locale: 'de-DE', preferred_language: 'German', price_sensitivity: 'premium', customer_segment: 'vip',
     category: 'phone_case',
-    cart_url: 'https://cartback.demo/u3',
+    cart_url: 'https://shop.test/u3',
   },
   {
     name: 'P4 加拿大中年实用女(魁北克法语) — 简约透明软壳',
@@ -227,7 +227,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Simple Transparent Soft Case', discount: 20.0, goal: 'abandonment_recovery',
     locale: 'en-CA', preferred_language: 'French', price_sensitivity: 'value', customer_segment: 'returning',
     category: 'phone_case',
-    cart_url: 'https://cartback.demo/u4',
+    cart_url: 'https://shop.test/u4',
   },
   {
     name: 'P5 澳洲年轻户外男(意裔) — 防水户外防护壳',
@@ -236,7 +236,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Waterproof Rugged Outdoor Case', discount: 8.0, goal: 'abandonment_recovery',
     locale: 'en-AU', preferred_language: 'Italian', price_sensitivity: 'standard', customer_segment: 'new',
     category: 'phone_case',
-    cart_url: 'https://cartback.demo/u5',
+    cart_url: 'https://shop.test/u5',
   },
   // 批次 2 自测补充：非手机壳画像 ×2（退出条件：同一受众画像、不同品类 → 构图不同，
   // 全链路对非手机壳品类无手机壳/iPhone 默认值残留）
@@ -247,7 +247,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Wool Blend Long Coat', discount: 18.0, goal: 'abandonment_recovery',
     locale: 'fr-FR', preferred_language: 'French', price_sensitivity: 'premium', customer_segment: 'vip',
     category: 'apparel',
-    cart_url: 'https://cartback.demo/u6',
+    cart_url: 'https://shop.test/u6',
   },
   {
     name: 'P7 日本优雅女 — 淡水珍珠项链（饰品品类：微距摆拍构图，无人像/机型）',
@@ -256,7 +256,7 @@ const SELFTEST5_PROFILES: Array<Record<string, unknown> & { name: string }> = [
     product: 'Freshwater Pearl Necklace', discount: 10.0, goal: 'abandonment_recovery',
     locale: 'ja-JP', preferred_language: '', price_sensitivity: 'standard', customer_segment: 'returning',
     category: 'jewelry',
-    cart_url: 'https://cartback.demo/u7',
+    cart_url: 'https://shop.test/u7',
   },
 ];
 
@@ -270,7 +270,7 @@ async function selftest(): Promise<number> {
     discount: 12,
     brand: 'CartBack Selftest',
     audience: '加购未付的老客',
-    cart_url: 'https://cartback.demo/selftest',
+    cart_url: 'https://shop.test/selftest',
     locale: 'en-US',
     skip_image: true,
   };

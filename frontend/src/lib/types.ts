@@ -3,8 +3,6 @@
  * 这些类型描述网络边界；组件内部 UI 状态（activeTab / planShown 等）见各组件。
  */
 
-/** 运行模式 */
-export type Mode = 'demo' | 'real';
 
 /** 引导式对话 FSM 阶段（IGDE：S0→S3，逻辑不可改；closed = 会话已闭环结束） */
 export type Stage = 'S0' | 'S1' | 'S2' | 'S3' | 'closed';
@@ -39,7 +37,6 @@ export type NeedSlot = NeedValue | string | null;
 
 /** 配置状态（/api/bootstrap、/api/state 的 status；绝不含密钥明文） */
 export interface Status {
-  mode: Mode;
   aiConfigured: boolean;
   espConfigured: boolean;
   espFrom: string;
@@ -93,12 +90,12 @@ export interface EstGmvFormula {
   discount_cost: number;
 }
 
-/** 新契约 estGmv：source=store 店铺实数 / demo 演示数据 */
+/** 新契约 estGmv：source=store 店铺实数 / reference 行业参考 */
 export interface PlanCardEstGmv {
   amount: number;
   currency: string;       // 'USD'
   formula?: EstGmvFormula;
-  source?: 'store' | 'demo';
+  source?: 'store' | 'reference';
 }
 
 /** 发送前核对单闸门（恒 5 项，服务端 confirm 下发 / send 409 刷新） */

@@ -121,8 +121,8 @@ test('Wave 2 端到端：confirm 建码 → holdout 冻结 → 真发 → sends 
   });
 
   // —— 真实模式 + ESP 配置 + 商家品牌（白标闸）——
-  const cfg = await api('/api/config', { method: 'POST', body: { mode: 'real', espKey: 're_test_key', espFrom: 'send@test.example', shopBrand: 'E2E' } });
-  assert.equal(cfg.json.status.mode, 'real');
+  const cfg = await api('/api/config', { method: 'POST', body: { espKey: 're_test_key', espFrom: 'send@test.example', shopBrand: 'E2E' } });
+  assert.equal(cfg.json.status.mode, undefined);
   assert.equal(cfg.json.status.espConfigured, true);
 
   // —— 灌 220 名加购未付名单（holdout 需 ≥200 净值名单才冻结）——
@@ -150,7 +150,7 @@ test('Wave 2 端到端：confirm 建码 → holdout 冻结 → 真发 → sends 
   assert.match(CODE, /^COMEBACK-[A-Z0-9]{6}$/, '码来自店铺连接器真实回执');
   assert.equal(planCard.reach_count, 200, '净值名单（224 可发送上限 200）');
   assert.equal(planCard.estGmv.formula.people, 200);
-  assert.equal(planCard.estGmv.source, 'demo', '无客单价 extras → 行业默认标注 demo');
+  assert.equal(planCard.estGmv.source, 'reference', '无客单价 extras → 行业默认标注参考估算');
   assert.deepEqual(cf.json.checklist.items.map(i => i.gate), ['window', 'frequency', 'whitelabel', 'unsubscribe', 'amount_code']);
   assert.equal(cf.json.checklist.all_pass, true, '五道闸全过（时段/频次/白标/退订/金额与码）');
   const draft = cf.json.draft;

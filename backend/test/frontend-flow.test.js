@@ -203,3 +203,15 @@ test('done frame carries current memory and version into the next confirmation',
     assert.equal(merged.messages.length, 1);
   } finally { global.fetch = original; }
 });
+
+test('reset API confirms the scope and surfaces refused or invalid reset responses', async () => {
+ const original=global.fetch;
+ try {
+  const client=load('lib/api.ts');
+  global.fetch=async()=>Response.json({error:'正在发送，稍后重置'},{status:409});
+  await assert.rejects(client.resetAccountData(),/正在发送/);
+  global.fetch=async()=>Response.json({ok:false});await assert.rejects(client.resetAccountData(),/重置/);
+  global.fetch=async(url,options)=>{assert.equal(url,'/api/reset');assert.equal(options.method,'POST');assert.deepEqual(JSON.parse(options.body),{confirm:true});return Response.json({ok:true,scope:'current_account'});};
+  assert.equal((await client.resetAccountData()).scope,'current_account');
+ } finally {global.fetch=original;}
+});

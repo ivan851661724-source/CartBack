@@ -159,8 +159,8 @@ test('E2：parseOfferPercent / parseOfferCodeName（offer → percent_off 唯一
 test('D3：estGmv 公式（reach × 客单价 × 12% − 折扣成本）与客单价来源标注', () => {
   const storeAov = execution.parseAov([{ key: '客单价', value: '35美元' }]);
   assert.deepEqual(storeAov, { aov: 35, source: 'store' });
-  const demoAov = execution.parseAov([]);
-  assert.deepEqual(demoAov, { aov: 45, source: 'demo' });
+  const referenceAov = execution.parseAov([]);
+  assert.deepEqual(referenceAov, { aov: 45, source: 'reference' });
 
   const g1 = execution.computeEstGmv({ reachCount: 200, aov: 35, aovSource: 'store', percentOff: 10 });
   // 期望订单 = 200×12% = 24；GMV = 24×35 = 840；折扣成本 = 24×35×10% = 84；净 756
@@ -168,10 +168,10 @@ test('D3：estGmv 公式（reach × 客单价 × 12% − 折扣成本）与客�
   assert.deepEqual(g1.formula, { people: 200, aov: 35, rate: 0.12, discount_cost: 84 });
   assert.equal(g1.currency, 'USD');
   assert.equal(g1.source, 'store');
-  const g2 = execution.computeEstGmv({ reachCount: 200, aov: 45, aovSource: 'demo', percentOff: 0 });
+  const g2 = execution.computeEstGmv({ reachCount: 200, aov: 45, aovSource: 'reference', percentOff: 0 });
   assert.equal(g2.amount, 1080); // 无钩子：无折扣成本
   assert.equal(g2.formula.discount_cost, 0);
-  assert.equal(g2.source, 'demo');
+  assert.equal(g2.source, 'reference');
 });
 
 test('D3：planCard 权威形状（pain 旧键已删、reason 单键、discount 对象、estGmv 结构）', () => {

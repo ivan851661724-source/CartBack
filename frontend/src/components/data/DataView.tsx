@@ -12,12 +12,9 @@ import TagEffectPanel from './TagEffectPanel';
 
 /** 数据看板视图 */
 export default function DataView() {
-  const { status, kpis, trend, metrics, demoAnchorRoi } = useApp();
-  const real = !!status && status.mode === 'real';
+  const { kpis, trend, metrics } = useApp();
   const k: Kpis = kpis || ({} as Kpis);
-  const hint = real
-    ? '北极星：真实回流 GMV / ROI · 只显示真实归因结果'
-    : '北极星：真实回流 GMV / ROI（当前演示数据 · 回流为仿真）';
+  const hint = '北极星：真实回流 GMV / ROI · 只显示真实归因结果';
 
   return (
     <div className="view-body">
@@ -26,7 +23,7 @@ export default function DataView() {
         <span className="desc">{hint}</span>
       </div>
       <AlertBar k={k} />
-      <NarrativeStrip k={k} real={real} />
+      <NarrativeStrip k={k} />
       <KpiGrid k={k} />
       <div className="charts-row">
         <div className="glass-card" style={{ padding: '17px 19px' }}>
@@ -43,7 +40,7 @@ export default function DataView() {
         </div>
       </div>
       <TagEffectPanel />
-      <MetricsStrip k={k} m={metrics} demoAnchorRoi={demoAnchorRoi} />
+      <MetricsStrip k={k} m={metrics} />
     </div>
   );
 }

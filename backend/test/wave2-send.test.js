@@ -4,7 +4,7 @@
  *   D4② 频次闸：72h 内同活动已触达 → 第二场 409 {ok:false, checklist}
  *   D4① 时段闸：窗口外 → 202 缓发（jobs 带 run_after/scheduled_at，非永久拒绝、不落 sends）
  *   D3 快照强制：无 confirm 快照的草稿（legacy planCard 直传）→ 闸门⑤拦截，发不出去
- *   demo 仿真发送也逐收件人落 sends（gate_snapshot 留痕）
+ *   隔离 ESP 发送也逐收件人落 sends（gate_snapshot 留痕）
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -93,13 +93,13 @@ async function waitFor(api, jobId, timeoutMs = 20000) {
   throw new Error('waitFor job timeout');
 }
 
-test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（demo 仿真发送同样落 sends）', async (t) => {
+test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（隔离 ESP 发送同样落 sends）', async (t) => {
   const { api, dir } = await startServer(t, {
     configObj: { stores: [{ type: 'mock', shop: 'E2E' }], publicBaseUrl: '' }
   });
   await api('/api/config', { method: 'POST', body: { shopBrand: 'MyBrand' } });
 
-  // 第一场：确认 + 发送（demo 仿真；未付族种子 9 人）
+  // 第一场：确认 + 发送（隔离 ESP；未付族种子 9 人）
   const c1 = await fillAndConfirm(api, '加购未付');
   assert.equal(c1.planCard.discount.code_status, 'created');
   const s1 = await api(`/api/draft/${c1.draft_id}/send`, { method: 'POST', body: {} });
@@ -108,7 +108,7 @@ test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（demo 仿�
   assert.equal(job1.status, 'done');
   assert.equal(job1.result.recipients, 9, '未付族（加购未付×4+弃购×3+下单未付×2）实发 9 人');
 
-  // demo 仿真发送也逐收件人落 sends（gate_snapshot 留痕）
+  // 隔离 ESP 发送也逐收件人落 sends（gate_snapshot 留痕）
   const db = new DatabaseSync(path.join(dir, 'data.sqlite'));
   const sends1 = db.prepare('SELECT * FROM sends WHERE campaign_id = ?').all(c1.draft_id);
   assert.equal(sends1.length, 9, 'sends 行数 = 实发数');

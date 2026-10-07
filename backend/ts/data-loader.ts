@@ -73,7 +73,7 @@ export function fromPlanCard(card: Record<string, unknown>, draft?: Record<strin
   const productCn = strVal(card.product_cn).trim();
   const brandRaw = strVal(card.brand ?? d.brand, 'CartBack').trim();
   const brand = brandRaw || 'CartBack';
-  const cartUrl = strVal(card.cart_url ?? d.cart_url, 'https://cartback.demo').trim();
+  const cartUrl = strVal(card.cart_url ?? d.cart_url, '').trim();
   const uid = strVal(d.id ?? card.id) || `dr_${String(stableHash(audience + brand) % 1_000_000).padStart(6, '0')}`;
 
   // 受众标签分布快照（server.js 传入）：每类取 count 最高代表值填充画像——
@@ -133,7 +133,7 @@ export function makeUser(overrides: Record<string, unknown>): UserRecord {
     customer_segment: '',
     style_preference: '',
     category: '',
-    cart_url: 'https://cartback.demo',
+    cart_url: '',
     raw: {},
   };
   for (const k of Object.keys(overrides)) {
@@ -181,7 +181,7 @@ export async function loadUserData(filePath: string): Promise<JsonlLoadResult> {
         price_sensitivity: strVal(data.price_sensitivity),
         customer_segment: strVal(data.customer_segment),
         category: normalizeCategory(data.category),
-        cart_url: strVal(data.cart_url, 'https://cartback.demo'),
+        cart_url: strVal(data.cart_url, ''),
         raw: data,
       });
     } catch (e) {

@@ -278,62 +278,6 @@ class GenericRestConnector extends StoreConnector {
   }
 }
 
-/* ------------------------------ Mock 适配器 ------------------------------ */
-/**
- * 本地/开发验证用：返回混合语种 + 混合行为的样本，无需任何凭证即可端到端验证
- * 「语种跟收件人 locale」与「连接器能拉用户+行为」两条链路。
- * Wave 2：折扣码注入缝（参照 callAI 缝模式）——
- *   spec.codes        预置现成码 map（默认含 SAVE10=10%，供 reused 分支）
- *   spec.createFails  置 true 时 createDiscountCode 恒抛错（E2 失败分支测试）
- *   spec.createLatencyMs  建码延迟（超时分支测试用）
- */
-class MockConnector extends StoreConnector {
-  constructor(spec = {}) {
-    super(spec);
-    this.shop = spec.shop || 'Mock Store';
-    this.codes = new Map();
-    const seed = spec.codes || { SAVE10: { percent_off: 10 } };
-    for (const [code, meta] of Object.entries(seed)) {
-      this.codes.set(String(code).toUpperCase(), { percent_off: Number(meta && meta.percent_off) || 10 });
-    }
-  }
-  async health() { return { ok: true, type: 'mock', detail: this.shop }; }
-  async getShopMeta() { return { name: this.shop, defaultLocale: 'en', currency: 'USD', domain: 'mock.local' }; }
-  supportsDiscountCodes() { return true; }
-  async createDiscountCode({ code, percent_off } = {}) {
-    if (this.spec.createLatencyMs) await new Promise(r => setTimeout(r, this.spec.createLatencyMs));
-    if (this.spec.createFails) throw new Error('mock: 店铺建码失败（HTTP 503）');
-    const name = String(code || '').trim().toUpperCase();
-    const pct = Number(percent_off);
-    if (!name || !Number.isFinite(pct) || pct <= 0) throw new Error('mock: code/percent_off 参数非法');
-    if (this.codes.has(name)) throw new Error('mock: 折扣码已存在（' + name + '）');
-    this.codes.set(name, { percent_off: pct });
-    return { code: name, percent_off: pct, price_rule_id: 'mock_' + name.toLowerCase() }; // 模拟店铺回执
-  }
-  async verifyDiscountCode(code) {
-    const name = String(code || '').trim().toUpperCase();
-    const hit = name ? this.codes.get(name) : null;
-    return hit ? { code: name, percent_off: hit.percent_off } : null;
-  }
-  async listCustomers() {
-    return [
-      { id: 'm1', email: 'alice@example.com', name: 'Alice', locale: 'en', country: 'US', tags: ['vip'], totalSpent: 1200, ordersCount: 5 },
-      { id: 'm2', email: 'bob@example.fr', name: 'Bob', locale: 'fr', country: 'FR', tags: [], totalSpent: 80, ordersCount: 1 },
-      { id: 'm3', email: 'chen@example.com', name: 'Chen', locale: 'zh', country: 'CN', tags: [], totalSpent: 320, ordersCount: 2 },
-      { id: 'm4', email: 'diego@example.es', name: 'Diego', locale: 'es', country: 'ES', tags: [], totalSpent: 0, ordersCount: 0 }
-    ];
-  }
-  async listBehaviorEvents() {
-    return [
-      { email: 'alice@example.com', type: 'purchased', value: 1200, ts: Date.now() - 86400000 },
-      { email: 'bob@example.fr', type: 'cart_abandoned', value: 80, ts: Date.now() - 3600000 },
-      { email: 'chen@example.com', type: 'cart_abandoned', value: 320, ts: Date.now() - 7200000 },
-      { email: 'diego@example.es', type: 'cart_abandoned', value: 45, ts: Date.now() - 1800000 },
-      { email: 'diego@example.es', type: 'browse', value: 0, ts: Date.now() - 900000 }
-    ];
-  }
-}
-
 /* ---------------------------- 多店聚合适配器 ---------------------------- */
 class MultiStoreConnector extends StoreConnector {
   constructor(connectors = []) { super({ type: 'multi' }); this.connectors = connectors; }
@@ -375,7 +319,6 @@ function createConnector(spec) {
   switch (spec && spec.type) {
     case 'shopify': return new ShopifyConnector(spec);
     case 'rest': return new GenericRestConnector(spec);
-    case 'mock': return new MockConnector(spec);
     default: throw new Error('未知连接器类型: ' + (spec && spec.type));
   }
 }
@@ -385,7 +328,7 @@ function createConnector(spec) {
  * 配置来源（config.json，绝不回传前端）：
  *   config.shopify = { shopDomain, apiVersion, accessToken }
  *   config.stores  = [ { type:'rest', baseUrl, apiKey, fieldMap }, ... ]  // 多个独立站
- * 没有任何配置 → 返回 null（系统退化为本地种子/演示数据）。
+ * 没有任何配置 → 返回 null（可通过 CSV 导入真实受众）。
  */
 function buildConnectors(config) {
   const specs = [];
@@ -401,7 +344,7 @@ function buildConnectors(config) {
 }
 
 module.exports = {
-  StoreConnector, ShopifyConnector, GenericRestConnector, MockConnector, MultiStoreConnector,
+  StoreConnector, ShopifyConnector, GenericRestConnector, MultiStoreConnector,
   createConnector, buildConnectors, normalizeLocale, COUNTRY_LOCALE,
   fetchJson
 };

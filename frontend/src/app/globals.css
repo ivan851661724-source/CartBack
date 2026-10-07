@@ -92,10 +92,7 @@ input,textarea{font-family:inherit}
 .logo-name b{color:var(--brand)}
 .spacer{flex:1}
 .crumb{color:var(--muted);font-size:12px;flex-shrink:0}
-.mode-pill{display:flex;align-items:center;gap:6px;background:var(--brand-soft);color:var(--brand-deep);
-  font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;border:.5px solid rgba(255,127,77,.25);flex-shrink:0}
-.mode-pill.real{background:var(--ok-bg);color:var(--ok2);border-color:var(--ok-line)}
-/* 引擎健康徽标（Topbar，mode-pill 旁）：online 绿 / degraded 橙 */
+/* 引擎健康徽标（Topbar）：online 绿 / degraded 橙 */
 .engine-pill{display:flex;align-items:center;gap:6px;background:var(--ok-bg2);color:var(--ok2);
   font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;border:.5px solid var(--ok-line);flex-shrink:0;white-space:nowrap}
 .engine-pill .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 3px var(--ok-bg)}
@@ -516,9 +513,6 @@ input,textarea{font-family:inherit}
 .seg{display:inline-flex;background:var(--bg-input);border:.5px solid var(--line);border-radius:10px;padding:3px;gap:3px}
 .seg-btn{flex:1;background:transparent;color:var(--muted);border-radius:7px;padding:8px 15px;font-size:12px;font-weight:600;transition:.15s;white-space:nowrap;font-family:var(--font-disp)}
 .seg-btn.active{background:var(--brand);color:#fff;box-shadow:var(--shadow-btn)}
-.mode-warn{margin-top:10px;font-size:11.5px;line-height:1.65;background:var(--warn-bg);border:.5px solid var(--warn-line);
-  color:var(--warn2);border-radius:10px;padding:9px 13px;display:none}
-.mode-warn.show{display:block}
 .danger-zone{margin-top:8px;display:flex;align-items:center;gap:12px;padding:13px 4px;border-top:.5px dashed var(--line-2);font-size:11.5px;color:var(--soft)}
 
 /* ============================ 抽屉 / 弹窗 ============================ */
@@ -660,8 +654,7 @@ input,textarea{font-family:inherit}
 @media (max-width:640px){
   .topbar{padding:0 10px;gap:8px}
   .crumb{display:none}
-  .mode-pill{display:none}
-  .chat-head{padding:11px 12px}
+    .chat-head{padding:11px 12px}
   .chat-head .ch-s span:last-child{font-size:0}
   .chat-head .ch-s span:last-child::after{content:"在线";font-size:11px}
   .bubble{font-size:13.5px}

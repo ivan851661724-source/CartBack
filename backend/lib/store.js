@@ -240,7 +240,7 @@ function SqliteBackend(dbFile) {
       const stmt = db.prepare(
         `INSERT INTO \`${name}\` (${cols.map(c => '`' + c + '`').join(',')}) VALUES (${ph})`
       );
-      db.exec('BEGIN');
+      db.exec('SAVEPOINT write_table');
       try {
         db.prepare(`DELETE FROM \`${name}\``).run();
         for (const row of rows) {
@@ -251,11 +251,19 @@ function SqliteBackend(dbFile) {
           });
           stmt.run(params);
         }
-        db.exec('COMMIT');
+        db.exec('RELEASE write_table');
       } catch (e) {
-        db.exec('ROLLBACK');
+        db.exec('ROLLBACK TO write_table');
+        db.exec('RELEASE write_table');
         throw e;
       }
+    },
+    writeTables(tables) {
+      db.exec('BEGIN');
+      try {
+        for (const [name, rows] of Object.entries(tables)) this.writeTable(name, rows);
+        db.exec('COMMIT');
+      } catch (e) { db.exec('ROLLBACK'); throw e; }
     },
     close() { db.close(); }
   };
@@ -274,6 +282,13 @@ function JsonBackend(file) {
     kind: 'json',
     readTable(name) { return data[name] || []; },
     writeTable(name, rows) { data[name] = rows; flush(); },
+    writeTables(tables) {
+      const next = { ...data, ...tables };
+      const temp = file + '.reset-tmp';
+      fs.writeFileSync(temp, JSON.stringify(next));
+      fs.renameSync(temp, file);
+      data = next;
+    },
     close() { flush(); }
   };
 }
@@ -292,7 +307,6 @@ class Store {
       console.warn('[store] node:sqlite 不可用，回退 JSON 文件存储：', e.message);
       this.b = JsonBackend(this.file.replace(/\.sqlite$/, '.json'));
     }
-    if (this.b.readTable('audience').length === 0) this.seedAudience();
   }
   // —— 通用表读写 ——
   _read(t) { return this.b.readTable(t); }
@@ -364,10 +378,10 @@ class Store {
   }
 
   // —— drafts ——
-  getDrafts() { return this._read('drafts').sort((a, b) => b.created_at - a.created_at); }
+  getDrafts() { return this._read('drafts').filter(d => !String(d.esp_message_id || '').startsWith('sim_')).sort((a, b) => b.created_at - a.created_at); }
   getDraftsByUser(userId, opts) {   // 安全整改：可见性收紧（同 getActsByUser 口径）
     const incUn = userId == null ? true : Boolean(opts && opts.includeUnowned);
-    return this._read('drafts')
+    return this.getDrafts()
       .filter(d => d.user_id ? d.user_id === userId : incUn)
       .sort((a, b) => b.created_at - a.created_at);
   }
@@ -417,6 +431,7 @@ class Store {
   getAudience() {
     const now = Date.now();
     return this._read('audience')
+      .filter(a => a.source !== 'seed') // 保留历史样本行，但不作为真实收件人
       .map(a => {
         const rate = recoveryRate(a.intent);
         const daysAtRisk = Math.max(0, Math.floor((now - (a.at_risk_at || a.created_at)) / 86400000));
@@ -448,7 +463,7 @@ class Store {
     return list;
   }
   clearImportedAudience() {
-    this._write('audience', this._read('audience').filter(a => a.source === 'seed'));
+    this._write('audience', []);
   }
 
   /** 用户可见受众（安全整改：按账号隔离；空 user_id 历史行仅 opts.includeUnowned 管理员可见） */
@@ -497,7 +512,8 @@ class Store {
     return e;
   }
   getEvents(filter) {
-    let rows = this._read('events');
+    const simulated = new Set(this._read('drafts').filter(d => String(d.esp_message_id || '').startsWith('sim_')).map(d => d.id));
+    let rows = this._read('events').filter(e => !simulated.has(e.draft_id));
     if (filter && filter.draft_id) rows = rows.filter(r => r.draft_id === filter.draft_id);
     return rows;
   }
@@ -508,7 +524,7 @@ class Store {
       this._read('drafts').filter(d => d.user_id === userId).map(d => d.id)
         .concat(this._read('campaigns').filter(c => c.user_id === userId).map(c => c.id))
     );
-    return this._read('events').filter(e =>
+    return this.getEvents().filter(e =>
       e.user_id ? e.user_id === userId
         : (e.draft_id ? ownDraftIds.has(e.draft_id) : incUn));
   }
@@ -897,72 +913,7 @@ class Store {
   deleteSession(id) { this._write('sessions', this._read('sessions').filter(s => s.id !== id)); }
   deleteSessionsByUser(userId) { this._write('sessions', this._read('sessions').filter(s => s.user_id !== userId)); }
 
-  // —— 假种子受众（P0 真实源未接前的占位，§5①） ——
-  seedAudience() {
-    const STYLES = ['tech', 'fashion', 'business', 'outdoor'];
-    const GENDERS = ['female', 'male', 'female', 'male', 'female', 'male', 'male', 'female', 'male', 'female', 'female', 'male'];
-    const AGES = ['18-24', '25-34', '35-44', '45-54', '25-34', '35-44', '18-24', '45-54', '25-34', '35-44', '18-24', '25-34'];
-    const DEVICES = ['iPhone 15', 'iPhone 14', 'iPhone 15 Pro Max', 'iPhone 13', 'iPhone 15 Pro', 'iPhone 14', 'iPhone 15', 'iPhone 13', 'iPhone 15 Pro Max', 'iPhone 14', 'iPhone 15', 'iPhone 13'];
-    const SEGS = ['new', 'returning', 'vip', 'returning', 'new', 'vip', 'new', 'returning', 'new', 'vip', 'returning', 'new'];
-    const seed = [
-      ['林晚','wan.lin@example.com','加购未付','高','高',0.92,1280],
-      ['陈默','mo.chen@example.com','弃购','高','中',0.88,860],
-      ['苏小','xiao.su@example.com','浏览未买','中','高',0.71,540],
-      ['周野','ye.zhou@example.com','下单未付','高','低',0.85,1990],
-      ['何夕','xi.he@example.com','加购未付','中','中',0.69,720],
-      ['顾言','yan.gu@example.com','弃购','中','高',0.74,430],
-      ['白桥','qiao.bai@example.com','浏览未买','低','中',0.55,310],
-      ['夏一','yi.xia@example.com','加购未付','高','高',0.90,1120],
-      ['江临','lin.jiang@example.com','弃购','中','低',0.66,650],
-      ['温言','yan.wen@example.com','下单未付','高','中',0.83,1560],
-      ['宋词','ci.song@example.com','浏览未买','低','高',0.52,280],
-      ['楚河','he.chu@example.com','加购未付','中','中',0.70,940]
-    ].map(([name, email, intent, risk, price, score, abandoned_value], i) => {
-      const atRiskDaysAgo = (i * 2) % 25; // 0~24 天前进入流失风险，制造紧迫度梯度
-      return {
-        id: uid('aud_'), name, email, intent, risk, price, score, abandoned_value,
-        source: 'seed', created_at: Date.now(),
-        at_risk_at: Date.now() - atRiskDaysAgo * 86400000,
-        locale: 'en',                       // UI v4 整改 3：种子补 locale（前端邮件卡片「EN · 跟随收件人」）
-        style: STYLES[i % 4],                // 风格品类轮转分布（style_preference 标签来源）
-        gender: GENDERS[i],                  // 性别轮转（gender 标签来源）
-        age_range: AGES[i],                  // 年龄段轮转（age_range 标签来源）
-        device: DEVICES[i],                  // 设备轮转（device 标签来源）
-        customer_segment: SEGS[i]            // 客户分层轮转（customer_segment 标签来源）
-      };
-    });
-    this._write('audience', seed);
-  }
-
-  // —— 老库种子维度回填：schema 升级加了 gender/age_range/device/customer_segment/style 列后，
-  //    存量种子行（source=seed）这几列是 NULL（seedAudience 只在表空时跑）。按姓名回填规范值，保 ID 不变。
-  backfillSeedDimensions() {
-    const DIMS = {
-      '林晚': { gender: 'female', age_range: '18-24', device: 'iPhone 15', customer_segment: 'new', style: 'tech' },
-      '陈默': { gender: 'male', age_range: '25-34', device: 'iPhone 14', customer_segment: 'returning', style: 'fashion' },
-      '苏小': { gender: 'female', age_range: '35-44', device: 'iPhone 15 Pro Max', customer_segment: 'vip', style: 'business' },
-      '周野': { gender: 'male', age_range: '45-54', device: 'iPhone 13', customer_segment: 'returning', style: 'outdoor' },
-      '何夕': { gender: 'female', age_range: '25-34', device: 'iPhone 15 Pro', customer_segment: 'new', style: 'tech' },
-      '顾言': { gender: 'male', age_range: '35-44', device: 'iPhone 14', customer_segment: 'vip', style: 'fashion' },
-      '白桥': { gender: 'male', age_range: '18-24', device: 'iPhone 15', customer_segment: 'new', style: 'business' },
-      '夏一': { gender: 'female', age_range: '45-54', device: 'iPhone 13', customer_segment: 'returning', style: 'outdoor' },
-      '江临': { gender: 'male', age_range: '25-34', device: 'iPhone 15 Pro Max', customer_segment: 'new', style: 'tech' },
-      '温言': { gender: 'female', age_range: '35-44', device: 'iPhone 14', customer_segment: 'vip', style: 'fashion' },
-      '宋词': { gender: 'female', age_range: '18-24', device: 'iPhone 15', customer_segment: 'returning', style: 'business' },
-      '楚河': { gender: 'male', age_range: '25-34', device: 'iPhone 13', customer_segment: 'new', style: 'outdoor' },
-    };
-    const rows = this._read('audience');
-    let changed = false;
-    for (const a of rows) {
-      if (a.source !== 'seed') continue;
-      const d = DIMS[a.name];
-      if (d && (a.gender == null || a.style == null)) { Object.assign(a, d); changed = true; }
-    }
-    if (changed) this._write('audience', rows);
-    return changed;
-  }
-
-  getKpis(mode, userId, opts) {
+  getKpis(userId, opts) {
     this.refreshDraftStates(userId, opts); // FSM 超时态写回（sent → recovering/timeout）
     const drafts = userId ? this.getDraftsByUser(userId, opts) : this.getDrafts();
     const events = this.getEvents();
@@ -995,19 +946,22 @@ class Store {
       cost: +cost.toFixed(2),
       roi: +roi.toFixed(2),
       estTotal: +estTotal.toFixed(2),
-      failed, timeout,
-      mode
+      failed, timeout
     };
   }
 
   /** 本周聚合（UI v4 整改 2：叙事条「本周回流营收/ROI/花费/净赚」）；口径=近 windowMs 内发送的草稿 */
-  getKpisWeek(mode, userId, windowMs = 7 * 86400000, opts) {
+  getKpisWeek(userId, windowMs = 7 * 86400000, opts) {
     const now = Date.now();
     const drafts = (userId ? this.getDraftsByUser(userId, opts) : this.getDrafts())
       .filter(d => d.sent_at && now - d.sent_at <= windowMs);
     const sent = drafts.length;
     const cost = +drafts.reduce((s, d) => s + (+d.cost || 0), 0).toFixed(2);
-    const gmv = +drafts.reduce((s, d) => s + (+d.estGmv || 0), 0).toFixed(2);
+    const sentAt = new Map(drafts.map(d => [d.id, d.sent_at]));
+    const attributionMs = (appCfg().attributionWindowDays || 7) * 86400000;
+    const gmv = +this.getEventsForUser(userId, opts)
+      .filter(e => e.type === 'convert' && sentAt.has(e.draft_id) && e.ts >= sentAt.get(e.draft_id) && e.ts - sentAt.get(e.draft_id) <= attributionMs)
+      .reduce((sum, e) => sum + (+e.value || 0), 0).toFixed(2);
     return { sent, cost, gmv, roi: cost ? +(gmv / cost).toFixed(2) : 0 };
   }
 
@@ -1050,9 +1004,40 @@ class Store {
     return Object.values(days);
   }
 
+  /** 清空一个账号的业务记录；本地访问可包含无归属历史记录，账号与安全配置保留。 */
+  resetUserData(userId, { includeUnowned = false } = {}) {
+    if (!userId) throw new Error('重置必须指定当前账号');
+    const owns = row => row.user_id === userId || (includeUnowned && !row.user_id);
+    const rows = Object.fromEntries(TABLES.map(t => [t, this._read(t)]));
+    const ids = table => new Set(rows[table].filter(owns).map(r => r.id));
+    const acts = ids('acts'), drafts = ids('drafts'), campaigns = ids('campaigns'), audience = ids('audience');
+    const linked = row => acts.has(row.act_id) || drafts.has(row.draft_id) || drafts.has(row.campaign_id) || campaigns.has(row.campaign_id) || audience.has(row.audience_id);
+    const ownedJob = job => {
+      const p = job.payload || {};
+      const owner = p.userId || p.user_id;
+      if (owner) return owner === userId;
+      return acts.has(p.actId) || drafts.has(p.draftId) || campaigns.has(p.campaignId);
+    };
+    // Queue handlers can hold old snapshots across awaits: refuse reset until they finish.
+    if (rows.jobs.some(j => j.status === 'running' && ownedJob(j))) return { ok: false, busy: true };
+    const next = {};
+    const removed = {};
+    const clear = (table, predicate) => {
+      next[table] = rows[table].filter(row => !predicate(row));
+      removed[table] = rows[table].length - next[table].length;
+    };
+    for (const table of ['acts', 'drafts', 'campaigns', 'audience', 'agent_profiles', 'strategy_cards', 'competitor_sources', 'blackouts', 'products']) clear(table, owns);
+    for (const table of ['events', 'notifications', 'todos']) clear(table, row => owns(row) || (!row.user_id && (linked(row) || row.touch_scope?.user_id === userId)));
+    clear('audience_tags', row => audience.has(row.audience_id));
+    for (const table of ['sends', 'holdouts']) clear(table, linked);
+    clear('jobs', ownedJob);
+    clear('meta', row => row.key === 'benchmark_lib' || row.key === 'user_prefs:' + userId || row.key === 'opp_last_seen:' + userId || (row.key.startsWith('tag_expiry_done:') && drafts.has(row.key.slice('tag_expiry_done:'.length))));
+    this.b.writeTables(next);
+    return { ok: true, scope: includeUnowned ? 'current_account_and_unowned' : 'current_account', removed };
+  }
+
   reset() {
     for (const t of TABLES) this._write(t, []);
-    this.seedAudience();
   }
 }
 

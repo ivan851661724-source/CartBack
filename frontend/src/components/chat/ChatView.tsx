@@ -284,7 +284,7 @@ export default function ChatView() {
             )}
 
             {/* 确认卡：渲染只由数据驱动（planShown='confirm' + 后端 planCard）。
-                曾经 demo 模式要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
+                曾经 旧流程要求「本会话逐字点满 10 条品牌词」才放行 —— 跨会话/自由输入时
                 计数永远不达标，卡被压制而模型仍在说「下面弹出确认标签」（线上实锤），已移除该门禁。 */}
             {confirmCard && (
               <div data-guide-target="guide-confirm" style={{background:'#fff',border:'.5px solid var(--line-2)',borderRadius:'16px',padding:'20px',margin:'12px 0',boxShadow:'var(--shadow-card)'}}>
@@ -416,7 +416,7 @@ export default function ChatView() {
         </section>
 
         {/* F4 进度唯一口径（09-30 报告）：进度全屏仅顶栏 HintPill 一处（n/4）；
-            右栏只承载待处理机会，demo 引导期不再渲染重复的 0/10 checklist */}
+            右栏只承载待处理机会，历史引导期不再渲染重复的 0/10 checklist */}
         {hasOpportunities ? (
           <aside className="opportunity-rail" aria-label="待处理机会">
             <OpportunityCard />

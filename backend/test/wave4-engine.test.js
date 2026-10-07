@@ -115,7 +115,7 @@ test('F2 算账：快照口径（confirm 后）与账本 estGmv 同源，chips=[
 });
 
 test('F2 算账：运行时口径（未确认方案）走执行器圈人 + 挽回率 12% 行业参考（降级路径）', async () => {
-  const e = makeEngine({ executors: { audienceStats: () => ({ count: 100, aov: 45, aov_source: 'demo', currency: 'USD' }) } });
+  const e = makeEngine({ executors: { audienceStats: () => ({ count: 100, aov: 45, aov_source: 'reference', currency: 'USD' }) } });
   const act = makeAct('act_ledger_rt', 'S1');
   act.needs.audience = { value: '浏览未买客户', source: 'explicit', at: 1 };
   const r = await e.handle(act, '这拨人能赚多少？值不值？', {});

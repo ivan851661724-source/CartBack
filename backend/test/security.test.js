@@ -220,7 +220,7 @@ test('安全整改：普通用户 POST /api/config 只能写自己的 prefs，�
     assert.equal(j.scope, 'user', '普通用户的配置写入应被限定在 user 域');
 
     const boot = await (await fetch(baseUrl + '/api/bootstrap')).json();
-    assert.equal(boot.status.mode, 'demo', 'mode 不得被普通用户改成 real');
+    assert.equal(boot.status.mode, undefined, 'mode 不得被普通用户改成 real');
     assert.notEqual(boot.status.aiBaseUrl, 'https://evil.example', 'aiBaseUrl 不得被普通用户改写');
 
     const onDisk = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8'));
@@ -239,7 +239,7 @@ test('安全整改：普通用户 POST /api/config 只能写自己的 prefs，�
     });
     assert.equal(r2.status, 200);
     const boot2 = await (await fetch(baseUrl + '/api/bootstrap')).json();
-    assert.equal(boot2.status.mode, 'real', '管理员可切 real');
+    assert.equal(boot2.status.mode, undefined, '运行模式已移除，管理员也不能启用演示发送');
     assert.equal(boot2.status.aiBaseUrl, 'https://ai.internal.example', '管理员可改全局端点');
   } finally {
     await stop();
@@ -381,4 +381,21 @@ test('安全整改：SMTP 头注入——显示名/地址中的 CR/LF 被剥离�
   const injected = headerLines.filter(l => /^(bcc|x-evil):/i.test(l));
   assert.equal(injected.length, 0, '注入内容只能残留在 From 显示名一行内，不得成为独立头：' + JSON.stringify(injected));
   assert.ok(headerLines[0].startsWith('From: '), 'From 头保持独立一行');
+});
+
+test('session reset clears only the current account business data and keeps login valid', async () => {
+  const {baseUrl,dir,stop}=await startServer(false);
+  try {
+    const cookieA=await register(baseUrl,'reset-a@example.com','A');const cookieB=await register(baseUrl,'reset-b@example.com','B');
+    const meA=await(await fetch(baseUrl+'/api/auth/me',{headers:{cookie:cookieA}})).json();const meB=await(await fetch(baseUrl+'/api/auth/me',{headers:{cookie:cookieB}})).json();
+    const {Store}=require('../lib/store');const s=new Store({dbFile:path.join(dir,'data.sqlite')});s.init();
+    try{
+      for(const user of [meA.user.id,meB.user.id]){s.upsertAct({id:'reset-act-'+user,user_id:user,stage:'S1'});s.upsertCampaign({id:'reset-camp-'+user,user_id:user,status:'scheduled'});s.createJob({type:'send_campaign',payload:{campaignId:'reset-camp-'+user},run_after:Date.now()+86400000,status:'pending'});s.setUserPrefs(user,{tone:'friendly'});s.upsertAgentProfile(user,{market:'US'});}
+    }finally{s.close();}
+    const response=await fetch(baseUrl+'/api/reset',{method:'POST',headers:{cookie:cookieA,'Content-Type':'application/json'},body:JSON.stringify({confirm:true})});
+    assert.equal(response.status,200);assert.equal((await response.json()).scope,'current_account');
+    const after=new Store({dbFile:path.join(dir,'data.sqlite')});after.init();
+    try{assert.equal(after.getAct('reset-act-'+meA.user.id),null);assert.ok(after.getAct('reset-act-'+meB.user.id));assert.equal(after.getCampaign('reset-camp-'+meA.user.id),null);assert.ok(after.getCampaign('reset-camp-'+meB.user.id));assert.equal(after._read('jobs').filter(j=>j.payload?.campaignId==='reset-camp-'+meA.user.id).length,0);assert.deepEqual(after.getUserPrefs(meA.user.id),{});assert.deepEqual(after.getAgentProfile(meA.user.id),{});}finally{after.close();}
+    assert.equal((await fetch(baseUrl+'/api/auth/me',{headers:{cookie:cookieA}})).status,200);
+  }finally{await stop();}
 });

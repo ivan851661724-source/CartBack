@@ -42,7 +42,7 @@ const productsMod = require('./lib/products');
 let config = cfg.load();
 const store = new Store();
 store.init();
-// 店后台连接器集合（架构 §2 B1）：从配置构建；null = 未接入任何店，退化本地种子/演示
+// 店后台连接器集合（架构 §2 B1）：从配置构建；null = 未接入任何店，可导入真实受众
 const connectors = buildConnectors(config);
 
 // —— 熔断注册表（PRD §0.2）：llm / esp / poster 各自独立计数 ——
@@ -275,7 +275,7 @@ function syncAgentConfig() {
 }
 
 // —— 监控计数器（架构 §7 B6：护栏命中率 / 离线降级率 / 发送失败率 / 成本计量）——
-function loadMetrics() { try { return JSON.parse(store.getMeta('metrics') || '{}'); } catch (e) { return {}; } }
+function loadMetrics() { try { const m = JSON.parse(store.getMeta('metrics') || '{}'); delete m.send_sim; return m; } catch (e) { return {}; } }
 function saveMetrics(m) { store.setMeta('metrics', JSON.stringify(m)); }
 function metricsInc(key, n = 1) { const m = loadMetrics(); m[key] = (m[key] || 0) + n; saveMetrics(m); return m; }
 function metricsAdd(values) {
@@ -657,7 +657,7 @@ async function callCritic(text) {
   }
 }
 
-// —— ESP 适配器（Resend 真发 + 仿真回退） ——
+// —— ESP 适配器（Resend / Brevo / SMTP 真实发送） ——
 // 隐私：Batch API 每封独立 to，收件人互不可见（修复 To 群发泄露收件人列表）；
 // 送达率：≤100 封/请求分批（Resend batch 上限；单收件人走普通端点——batch 最少 2 封）。
 // ④ 渲染管线消费：messages = renderCampaign 产物 [{email, subject, body, html?}]，逐收件人内容可不同。
@@ -865,17 +865,15 @@ function espReady() {
 // Wave 2：72h 频控从预检移入 D4 闸门②（409 checklist 口径），本函数只管「配置类」硬故障
 function precheckSend(draft, { dryRun = false } = {}) {
   const problems = [];
-  if (config.mode === 'real') {
-    if (!espReady()) problems.push({ type: 'esp_not_configured', human: config.espProvider === 'smtp' ? 'SMTP 还没配全（服务器 / 用户 / 授权码），去设置页填好再发。' : '还没有配置发信密钥（ESP），去设置页填好再发。' });
-    if (!config.espFrom) problems.push({ type: 'from_missing', human: '还没有设置发件人地址，去设置页填「发件邮箱」。' });
-    else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(config.espFrom)) problems.push({ type: 'from_invalid', human: '发件人地址格式不对，请检查设置页的「发件邮箱」。' });
-    // 域名验证（MVP：与店铺域名/公开基址一致性提示；Resend 域名验证状态经预检调用探测）
-    else if (config.publicBaseUrl) {
-      const fromDomain = config.espFrom.split('@')[1] || '';
-      const siteDomain = (config.publicBaseUrl.replace(/^https?:\/\//, '').split(':')[0] || '').replace(/^www\./, '');
-      if (siteDomain && fromDomain && !siteDomain.endsWith(fromDomain)) {
-        problems.push({ type: 'domain_mismatch', human: `发件域名（${fromDomain}）和站点域名（${siteDomain}）不一致，邮件容易被判垃圾，建议用同域名发件箱。` });
-      }
+  if (!espReady()) problems.push({ type: 'esp_not_configured', human: config.espProvider === 'smtp' ? 'SMTP 还没配全（服务器 / 用户 / 授权码），去设置页填好再发。' : '还没有配置发信密钥（ESP），去设置页填好再发。' });
+  if (!config.espFrom) problems.push({ type: 'from_missing', human: '还没有设置发件人地址，去设置页填「发件邮箱」。' });
+  else if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(config.espFrom)) problems.push({ type: 'from_invalid', human: '发件人地址格式不对，请检查设置页的「发件邮箱」。' });
+  // 域名验证（MVP：与店铺域名/公开基址一致性提示；Resend 域名验证状态经预检调用探测）
+  else if (config.publicBaseUrl) {
+    const fromDomain = config.espFrom.split('@')[1] || '';
+    const siteDomain = (config.publicBaseUrl.replace(/^https?:\/\//, '').split(':')[0] || '').replace(/^www\./, '');
+    if (siteDomain && fromDomain && !siteDomain.endsWith(fromDomain)) {
+      problems.push({ type: 'domain_mismatch', human: `发件域名（${fromDomain}）和站点域名（${siteDomain}）不一致，邮件容易被判垃圾，建议用同域名发件箱。` });
     }
   }
   const all = resolveRecipients(draft);
@@ -934,7 +932,7 @@ function draftCartUrl(draft, card = {}) {
   // Preserve the reviewed primary link for legacy drafts without a URL snapshot.
   const previous = String(draft.html || '').match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>\s*(?:<img\b|Return to your cart|Volver al carrito|Zurück zum Warenkorb|Retour au panier|Torna al carrello|返回购物车)/i)?.[1];
   if (previous) return previous.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-  return card.cart_url || config.shopCartUrl || 'https://cartback.demo';
+  return card.cart_url || config.shopCartUrl || '';
 }
 
 function buildDraftHtml(draft, copy, { delivery = false } = {}) {
@@ -972,22 +970,6 @@ function applyDraftCopyEdits(draft, body) {
   draft.variants = variants.map(v => ({ ...v, ...changed }));
   draft.mailgen_meta = { ...draft.mailgen_meta, cart_url: draftCartUrl(draft), copy_edits: { ...(draft.mailgen_meta && draft.mailgen_meta.copy_edits), ...changed } };
   draft.html = '';
-}
-
-// 仿真归因事件（演示模式驱动看板；真实模式仅在有回执时写入）——事件打上 draft 归属（安全整改）
-function scheduleSimEvents(draft, recipients) {
-  const now = Date.now();
-  recipients.forEach((r, i) => {
-    const base = now + i * 1200;
-    store.addEvent({ type: 'emailed', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base });
-    if (Math.random() < 0.72) store.addEvent({ type: 'open', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base });
-    if (Math.random() < 0.34) store.addEvent({ type: 'click', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, ts: base + 3000 });
-    if (Math.random() < 0.14) {
-      const value = +(r.abandoned_value * (0.1 + Math.random() * 0.2)).toFixed(2);
-      store.addEvent({ type: 'convert', draft_id: draft.id, audience_id: r.id, user_id: draft.user_id || null, value, ts: base + 9000 });
-      tagsMod.weightForConversion(store, r.id);   // ⑤ 标签反哺（演示模式同步演示加权）
-    }
-  });
 }
 
 // ⑤ 窗口期满未转化 → 标签 w −= 0.5（队列周期 job 调用）
@@ -1091,39 +1073,8 @@ async function sendDraft(draft, opts = {}) {
   // 闸门快照（逐收件人 sends.gate_snapshot 共用；五项全过时刻的留痕）
   const gateSnapshot = { items: checklist.items, all_pass: true, at: Date.now(), timezone: checklist.timezone };
   metricsInc('send_volume', allow.length);
-  const real = (config.mode === 'real' && espReady());
   draft.status = 'sending'; upsertDraftPreservingAsync(draft);
-  if (!real) {
-    if (!sendActCurrent(act, draft)) return failChangedSend(draft, checklist);
-    if (inFlightActWrites.has(act.id)) return act.flow_version === 6 ? { deferred: true, retryAt: Date.now() + 1000 } : failChangedSend(draft, checklist);
-    inFlightActWrites.add(act.id);
-    try {
-    draft.status = 'sent';
-    draft.sent_at = Date.now();
-    draft.esp_message_id = 'sim_' + uid();
-    draft.cost = +(allow.length * 0.02).toFixed(2); // 仿真混合成本
-    draft.skipped_by_frequency = checklist.skippedByFrequency;
-    draft.holdout_count = heldOut;
-    draft.g0_blocked = [];   // 仿真档不做 G0 拦截（内容为商家确认过的原稿）
-    upsertDraftPreservingAsync(draft);
-    scheduleSimEvents(draft, allow);
-    // Wave 2：逐收件人落 sends（demo 同口径；tz 按收件人时区）
-    for (const r of allow) {
-      store.recordSendRow({
-        act_id: draft.act_id, campaign_id: draft.id, recipient: r.email,
-        template: 'standard', tag: r.intent || null, code: draft.coupon || null,
-        tz: execution.tzForRecipient(r), gate_snapshot: gateSnapshot, status: 'sent'
-      });
-    }
-    benchmarkMod.rebuildBenchmark(store);
-    metricsInc('send_sim');
-    logEvent('send', { real: false, recipients: allow.length, skipped_by_frequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost });
-    return { real: false, recipients: allow.length, skippedByFrequency: checklist.skippedByFrequency, holdout: heldOut, cost: draft.cost, estGmv: draft.estGmv };
-    } finally {
-      inFlightActWrites.delete(act.id);
-    }
-  }
-  // ④ 渲染管线（真实模式）：变体→语种→模板展开→G0
+  // ④ 渲染管线：变体→语种→模板展开→G0
   const rendered = await renderForDraft(draft, allow);
   const sendable = rendered.messages.filter(m => !m.blocked);
   const blockedList = rendered.messages.filter(m => m.blocked);
@@ -1282,7 +1233,7 @@ function makeCampaignExecutor(userId, opts) {
   const scope = { userId: userId || null, includeUnowned: Boolean(opts && opts.includeUnowned) };
   const matcher = buildCampaignMatcher(scope);
   return {
-    // —— Wave 4 F2：算账口径的人数/客单（audience 表聚合；客单缺省行业默认并标注 demo）——
+    // —— Wave 4 F2：算账口径的人数/客单（audience 表聚合；客单缺省行业默认并标注参考估算）——
     audienceStats(desc) {
       const list = matcher(desc || '');
       const vals = list.map(a => Number(a.abandoned_value) || 0).filter(v => v > 0);
@@ -1290,7 +1241,7 @@ function makeCampaignExecutor(userId, opts) {
         const total = vals.reduce((s, v) => s + v, 0);
         return { count: list.length, aov: +(total / vals.length).toFixed(2), aov_source: 'store', currency: 'USD' };
       }
-      return { count: list.length, aov: cfg.INDUSTRY_DEFAULT_AOV, aov_source: 'demo', currency: 'USD' };
+      return { count: list.length, aov: cfg.INDUSTRY_DEFAULT_AOV, aov_source: 'reference', currency: 'USD' };
     },
     previewBatches(batches) {
       const { plans } = campaignsMod.planBatches(store, batches, { matcher, userId });
@@ -1387,6 +1338,11 @@ function makeCampaignExecutor(userId, opts) {
 
 // —— 批次五道闸门 / 发送执行（复用 execution 原语 + renderCampaign + ESP 适配器；sends 落 campaign_id=campaign.id）——
 async function sendCampaignBatch(camp, { viaJob = false } = {}) {
+  if (!espReady()) {
+    camp.status = 'draft'; camp.gate_note = '发信配置不完整，请到设置页配置 ESP 和发件邮箱。';
+    store.upsertCampaign(camp); metricsInc('send_fail');
+    return { error: camp.gate_note, recipients: 0 };
+  }
   const gates = await campaignsMod.evaluateCampaignGates(store, camp, {
     connector: connectors, publicBaseUrl: config.publicBaseUrl
   });
@@ -1413,7 +1369,6 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
     return { recipients: 0, holdout: holdoutPlan.count, note: '没有可发送的未发收件人' };
   }
   const gateSnapshot = { items: gates.items, all_pass: true, at: Date.now(), timezone: gates.timezone };
-  const real = (config.mode === 'real' && espReady());
   camp.status = 'running';
   store.upsertCampaign(camp);
   metricsInc('send_volume', allow.length);
@@ -1428,25 +1383,7 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
     }
   };
 
-  if (!real) {
-    // demo 仿真：与单方案同口径逐收件人落 sends（幂等键 campaign_id+recipient）
-    recordRows(allow, 'sent');
-    const c = campaignsMod.deriveCounts(store, camp);
-    camp.status = c.pending === 0 ? 'done' : (gates.skippedByFrequency > 0 ? 'paused' : 'done');
-    if (camp.status === 'paused') {
-      camp.pause_scope = 'system';
-      camp.resume_note = `频控窗口内 ${gates.skippedByFrequency} 人已触达，剩余未发明早再试`;
-      camp.frozen_reason = null;
-    }
-    camp.scheduled_at = camp.status === 'done' ? 0 : camp.scheduled_at;
-    camp.gate_note = null;
-    store.upsertCampaign(camp);
-    metricsInc('send_sim');
-    logEvent('campaign_send', { campaign_id: camp.id, real: false, recipients: allow.length, skipped_by_frequency: gates.skippedByFrequency, holdout: holdoutPlan.count });
-    return { real: false, recipients: allow.length, skippedByFrequency: gates.skippedByFrequency, holdout: holdoutPlan.count };
-  }
-
-  // 真实模式：渲染管线（变体→语种→模板→G0）+ ESP（复用 sendDraft 的适配器链）
+  // 渲染管线（变体→语种→模板→G0）+ ESP（复用 sendDraft 的适配器链）
   const percent = Number(camp.percent_off) || execution.resolveDiscountNum({ discount: camp.discount });
   const pseudoDraft = {
     id: camp.id, brand: camp.brand || resolveBrand({}), coupon: (camp.discount && camp.discount.code) || null,
@@ -1476,7 +1413,7 @@ async function sendCampaignBatch(camp, { viaJob = false } = {}) {
     };
     const r = await breakers.get('esp').exec(() => sendViaEsp(config));
     recordRows(sendable.map(m => ({ ...m, email: m.email })), 'sent');
-    // Wave 4 F3：落 emailed 事件（esp_id → Resend 回执反查），打开/点击才能归因到批次（demo 路径无 ESP 回执）
+    // Wave 4 F3：落 emailed 事件（esp_id → Resend 回执反查），打开/点击才能归因到批次
     const espIds = Array.isArray(r.ids) ? r.ids : [];
     for (let i = 0; i < sendable.length; i++) {
       store.addEvent({
@@ -1991,6 +1928,7 @@ function readBody(req, limit = 1e6) {
 // —— 路由 ——（纯 /api；静态前端已拆分到独立 Next.js 应用）
 // 同一会话的聊天和确认共用门禁，避免异步建码/模型调用期间冻结过期需求。
 const inFlightActWrites = new Set();
+const inFlightUserWrites = new Map();
 const server = http.createServer(async (req, res) => {
   const parsed = url.parse(req.url, true);
   const pathname = parsed.pathname;
@@ -2018,6 +1956,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   let lockedActId = null;
+  const tracksUserWrite = req.userId && ['POST', 'PUT', 'DELETE'].includes(method);
+  if (tracksUserWrite) inFlightUserWrites.set(req.userId, (inFlightUserWrites.get(req.userId) || 0) + 1);
   try {
     const actWrite = method === 'POST' && pathname.match(/^\/api\/act\/([\w-]+)\/(?:message(?:\/stream)?|confirm|action)$/);
     if (actWrite) {
@@ -2122,11 +2062,10 @@ const server = http.createServer(async (req, res) => {
         acts: store.getActsByUser(req.userId, so),
         drafts: store.getDraftsByUser(req.userId, so),
         audience: store.getAudienceForUser(req.userId, so),   // 安全整改：受众含客户邮箱，按账号隔离
-        kpis: store.getKpis(config.mode, req.userId, so),
-        week: store.getKpisWeek(config.mode, req.userId, 7 * 86400000, so),   // UI v4 整改 2：叙事条本周口径
+        kpis: store.getKpis(req.userId, so),
+        week: store.getKpisWeek(req.userId, 7 * 86400000, so),   // UI v4 整改 2：叙事条本周口径
         trend: store.getTrend(req.userId, so),
         metrics: loadMetrics(),
-        demoAnchorRoi: 24.9,
         // —— Wave 3 批次域契约③ ——
         campaigns: store.getCampaignsByUser(req.userId).map(c => campaignsMod.publicCampaign(store, c)),
         blackout: blackoutContract(),
@@ -2535,12 +2474,13 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/drafts' && method === 'GET') {
       // UI v4 整改 1：汇总 stats + 每封生命周期进度段（草稿→发送→触达→回流）
-      const drafts = store.getDraftsByUser(req.userId);
+      const so = scopeOpts(req);
+      const drafts = store.getDraftsByUser(req.userId, so);
       const segMap = { draft: [1,0,0], sending: [1,0,0], sent: [1,1,0], recovering: [1,1,1], timeout: [1,1,0], failed: [1,0,0] };
       const stats = {
         count: drafts.length,
-        reached: drafts.reduce((s, d) => s + (d.matchedCount || 0), 0),      // 累计触达（仿真=匹配数）
-        gmv: +drafts.reduce((s, d) => s + (+d.estGmv || 0), 0).toFixed(2),   // 已捞回·预估
+        reached: drafts.reduce((s, d) => s + store.getEvents({ draft_id: d.id }).filter(e => e.type === 'emailed').length, 0),      // 累计触达
+        gmv: store.getKpis(req.userId, so).gmv,   // 实际归因回流
         cost: +drafts.reduce((s, d) => s + (+d.cost || 0), 0).toFixed(2)
       };
       const items = drafts.map(d => ({ ...d, html: applyFooterLinks(d.html, d.id), progressSeg: segMap[d.status] || [1,0,0], locale: d.locale || config.shopDefaultLocale || 'en' }));
@@ -3174,7 +3114,7 @@ const server = http.createServer(async (req, res) => {
     // —— 配置（密钥只存服务端 .server，绝不回传） ——
     // 安全整改：全局服务端配置（密钥 / AI·ESP 端点 / 发信模式 / 引擎参数）仅管理员可写——
     // 此前任意注册用户可改全局 aiBaseUrl/espApiUrl 指向自己的服务器窃取真实 AI key / SMTP 授权码
-    //（密钥外送），或把 mode 改成 real 用全局 ESP 群发。普通登录用户只能写自己的 user 级 prefs。
+    //（密钥外送），或滥用全局 ESP 群发。普通登录用户只能写自己的 user 级 prefs。
     function applyUserPrefs(body, req) {
       if (!(body.prefs && typeof body.prefs === 'object' && !Array.isArray(body.prefs))) return false;
       const cur = store.getUserPrefs(req.userId);
@@ -3196,7 +3136,6 @@ const server = http.createServer(async (req, res) => {
         if (saved) logEvent('user_prefs_saved', { userId: req.userId, scope: 'user' });
         return sendJson(res, 200, { status: cfg.status(config), scope: 'user' });
       }
-      if (typeof body.mode === 'string') config.mode = body.mode === 'real' ? 'real' : 'demo';
       // 空串=不变更（掩码「未修改」约定）：AI/ESP 密钥已由环境变量接管，防止保存其他项时误清密钥
       if (typeof body.aiKey === 'string' && body.aiKey.trim()) config.aiKey = body.aiKey.trim();
       if (typeof body.espKey === 'string' && body.espKey.trim()) config.espKey = body.espKey.trim();
@@ -3364,7 +3303,7 @@ const server = http.createServer(async (req, res) => {
         return sendJson(res, 200, { ok: true, attributed: true });
       }
 
-      // —— C. 旧版简易格式（兼容演示模式/既有测试）——
+      // —— C. 旧版简易格式（兼容既有接入格式）——
       let draftId = body.draft_id || (body.data && body.data.draft_id);
       const type = ['open', 'click', 'convert', 'delivered', 'bounced'].includes(body.type) ? body.type
         : (body.event === 'open' ? 'open' : body.event === 'click' ? 'click' : body.event === 'convert' ? 'convert' : 'open');
@@ -3399,7 +3338,7 @@ const server = http.createServer(async (req, res) => {
     // —— 监控指标（架构 §7 B6）——
     if (pathname === '/api/metrics' && method === 'GET') {
       const m = loadMetrics();
-      const total = m.send_real + m.send_sim || 0;
+      const total = m.send_real || 0;
       return sendJson(res, 200, {
         ...m,
         failRate: total ? +((m.send_fail || 0) / total).toFixed(3) : 0,
@@ -3407,17 +3346,19 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
-    // —— 重置（整改 1c 安全：本地模式保持原行为清全部+重建种子；登录用户只清自己的 acts/drafts，店铺级 audience/events 无权清）——
+    // 重置当前账号业务数据；本地访问包含无归属历史，保留账号、配置和全局运行状态。
     if (pathname === '/api/reset' && method === 'POST') {
-      if (req.authMode === 'local') {
-        store.reset();
-        tagsMod.scoreAudience(store, store.getAudience());   // 重置后重打种子标签
-      } else {
-        store._write('acts', store._read('acts').filter(a => !a.user_id || a.user_id !== req.userId));
-        store._write('drafts', store._read('drafts').filter(d => !d.user_id || d.user_id !== req.userId));
+      const body = await readBody(req);
+      if (body.confirm !== true) return sendJson(res, 400, { error: '请确认清空当前账号业务数据后再重置' });
+      const local = req.authMode === 'local';
+      const acts = store.getActsByUser(req.userId, { includeUnowned: local });
+      if ((inFlightUserWrites.get(req.userId) || 0) > 1 || acts.some(a => inFlightActWrites.has(a.id))) {
+        return sendJson(res, 409, { error: '当前账号正在处理请求，请等回复、生成或发送完成后再重置', busy: true });
       }
-      logEvent('reset', { authMode: req.authMode, userId: req.userId });
-      return sendJson(res, 200, { ok: true });
+      const result = store.resetUserData(req.userId, { includeUnowned: local });
+      if (!result.ok) return sendJson(res, 409, { error: '当前账号有正在执行的任务，请等发送或生成完成后再重置', busy: true });
+      logEvent('reset', { authMode: req.authMode, userId: req.userId, scope: result.scope, removed: result.removed });
+      return sendJson(res, 200, result);
     }
 
     // —— 导出（安全整改：acts/drafts/audience/events 全部按当前用户域导出，防任意账号拖走全部客户 PII）——
@@ -3425,7 +3366,7 @@ const server = http.createServer(async (req, res) => {
       const so = scopeOpts(req);
       return sendJson(res, 200, {
         acts: store.getActsByUser(req.userId, so), drafts: store.getDraftsByUser(req.userId, so),
-        audience: store.getAudienceForUser(req.userId, so), events: store.getEventsForUser(req.userId, so), kpis: store.getKpis(config.mode, req.userId, so)
+        audience: store.getAudienceForUser(req.userId, so), events: store.getEventsForUser(req.userId, so), kpis: store.getKpis(req.userId, so)
       });
     }
 
@@ -3434,7 +3375,6 @@ const server = http.createServer(async (req, res) => {
     if (pathname === '/api/health' && method === 'GET') {
       return sendJson(res, 200, {
         ok: true, uptime_s: Math.floor(process.uptime()),
-        mode: config.mode,
         aiConfigured: Boolean(config.aiKey), espConfigured: espReady(),
         storage: store.b ? store.b.kind : 'unknown',
         queue: queue.stats(),
@@ -3708,6 +3648,10 @@ const server = http.createServer(async (req, res) => {
     return sendJson(res, 500, { error: String(e && e.message || e) });
   } finally {
     if (lockedActId) inFlightActWrites.delete(lockedActId);
+    if (tracksUserWrite) {
+      const remaining = (inFlightUserWrites.get(req.userId) || 1) - 1;
+      if (remaining) inFlightUserWrites.set(req.userId, remaining); else inFlightUserWrites.delete(req.userId);
+    }
   }
 });
 
@@ -3724,18 +3668,14 @@ process.on('uncaughtException', (err) => {
 const PORT = process.env.PORT || 4173;
 server.listen(PORT, () => {
   console.log(`CartBack v3 本地服务已启动: http://localhost:${PORT}`);
-  console.log(`模式: ${config.mode} | AI: ${config.aiKey ? '已配置' : '未配置(桩模型)'} | ESP: ${config.espKey ? '已配置' : '仿真'}`);
+  console.log(`AI: ${config.aiKey ? '已配置' : '未配置(桩模型)'} | ESP: ${espReady() ? '已配置' : '未配置'}`);
   console.log(`本地令牌: ${config.localToken}`);
 
   // —— 周期任务（PRD §0.5 jobs / G6 / ⑤ 标签窗口反哺）——
-  // 老库种子维度回填：schema 升级后存量种子行新列是 NULL，按姓名回填（幂等，只在缺值时写）。
-  // 回填改了行 → 需重打分让 style/age_range/device 等标签补出来（dimsChanged 触发重打）。
-  const dimsChanged = store.backfillSeedDimensions();
-  // 受众标签补打：首次启动（无标签）/ 老库升级新增维度 / 种子维度刚回填。
-  // 用 meta 标记 + dimsChanged 控制只跑一次；upsertAudienceTag 同源取高、manual 不覆盖，幂等安全。
+  // 受众标签补打：首次启动或老库新增维度，只执行必要的迁移。
   if (store.getAllAudienceTags().length === 0) {
     tagsMod.scoreAudience(store, store.getAudience());
-  } else if (dimsChanged || store.getMeta('tag_dims_v2_migrated') !== '1') {
+  } else if (store.getMeta('tag_dims_v2_migrated') !== '1') {
     tagsMod.scoreAudience(store, store.getAudience());
     store.setMeta('tag_dims_v2_migrated', '1');
   }

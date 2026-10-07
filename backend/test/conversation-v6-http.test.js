@@ -6,7 +6,7 @@ const net = require('node:net'); const { spawn } = require('node:child_process')
 const { Store } = require('../lib/store'); const flow = require('../lib/conversation-v6');
 async function fixture(t, config = {}, mailgenHook = false) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-v6-'));
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ mode: 'demo', shopBrand: 'TestShop', publicBaseUrl: 'https://shop.test', ...config }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ shopBrand: 'TestShop', publicBaseUrl: 'https://shop.test', ...config }));
   const socket = net.createServer(); await new Promise(r => socket.listen(0, '127.0.0.1', r)); const port = socket.address().port; await new Promise(r => socket.close(r));
   const args = ['server.js'];
   if (mailgenHook) {

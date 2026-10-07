@@ -7,7 +7,7 @@
     "start": "node server.js",
     "build": "tsc -p tsconfig.json",
     "pretest": "tsc -p tsconfig.json",
-    "test": "node --test test/*.test.js",
+    "test": "node --require ./test/support/runtime.cjs --test test/*.test.js",
     "selftest": "node dist/mailgen.js --selftest",
     "gallery": "node dist/gallery.js",
     "eval:offline": "node eval/runner.js"

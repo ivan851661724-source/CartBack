@@ -12,9 +12,9 @@ import {
   type ProductItem,
 } from '@/lib/products';
 
-/** 设置四步向导（AI / ESP / 店铺 / 模式 / 偏好）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
+/** 配置向导（AI / ESP / 店铺 / 偏好）+ danger zone —— 对应 flow.html #view-set + renderSet/saveConfig。 */
 export default function SettingsView() {
-  const { status, setMode, saveConfig, resetData, prefs } = useApp();
+  const { status, saveConfig, resetData, resetting, resetVersion, prefs } = useApp();
   const s = status || ({} as any);
   // AI 连接已由服务端环境变量接管（CARTBACK_AI_KEY 等），设置页不再暴露 Key/模型/基地址；
   // 保存 payload 也不再携带 aiKey——后端 config POST 对空串会整字覆盖，防止误清环境配置。
@@ -97,7 +97,7 @@ export default function SettingsView() {
     setMsg('已保存（密钥仅存于服务端，不回传前端；AI 连接由服务端环境变量管理）');
   };
 
-  const configStatus = `AI：${s.aiConfigured ? '已配置' : '未配置（离线桩模型）'} · ESP：${s.espConfigured ? '已配置（真实发送）' : '仿真发送'} · 发件域：${s.espFrom || '—'} · 模型：${s.aiModel || 'deepseek-chat'}`;
+  const configStatus = `AI：${s.aiConfigured ? '已配置' : '未配置（离线桩模型）'} · ESP：${s.espConfigured ? '已配置（真实发送）' : '未配置'} · 发件域：${s.espFrom || '—'} · 模型：${s.aiModel || 'deepseek-chat'}`;
 
   // —— G0 白名单维护：增删术语后经 /api/config 保存（merchant 品牌名默认已含）——
   const addG0Term = async () => {
@@ -159,7 +159,7 @@ export default function SettingsView() {
           <div className="s-no">2</div>
           <div className="s-body">
             <div className="s-head"><h3>连接发信服务（ESP）</h3><Tag kind={s.espConfigured ? 'intent' : 'price'}>{s.espConfigured ? '已连接' : '待配置'}</Tag></div>
-            <div className="s-desc">配置后「确认发送」= 真实送达；未配置时走仿真发送，流程可完整体验。</div>
+            <div className="s-desc">配置完成后才能发送邮件；未配置时可以准备和编辑草稿。</div>
             <div className="row">
               <input type="password" placeholder="re_…（Resend 密钥）" value={espKey} onChange={(e) => setEspKey(e.target.value)} />
               <input type="text" placeholder="onear@yourdomain.com" style={{ maxWidth: 225 }} value={espFrom} onChange={(e) => setEspFrom(e.target.value)} />
@@ -243,21 +243,6 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">5</div>
-          <div className="s-body">
-            <div className="s-head"><h3>运行模式</h3><Tag kind={s.mode === 'real' ? 'intent' : 'gray'}>{s.mode === 'real' ? '真实' : '演示'}</Tag></div>
-            <div className="s-desc">演示模式用仿真数据先看效果；真实模式只显示真实归因结果。</div>
-            <div className="row">
-              <div className="seg">
-                <button className={`seg-btn${s.mode !== 'real' ? ' active' : ''}`} onClick={() => setMode('demo')}>演示（仿真回流）</button>
-                <button className={`seg-btn${s.mode === 'real' ? ' active' : ''}`} onClick={() => setMode('real')}>真实（需 ESP 密钥）</button>
-              </div>
-            </div>
-            {s.mode === 'real' && <div className="mode-warn show">切换到真实模式后，看板只显示真实归因数据；ESP 未配置前「确认发送」仅生成草稿。</div>}
-          </div>
-        </div>
-
-        <div className="setup-card glass-card">
           <div className="s-no">7</div>
           <div className="s-body">
             <div className="s-head"><h3>AI 助手偏好</h3><Tag kind={hasAnyPref ? 'intent' : 'gray'}>{hasAnyPref ? '已设置' : '默认'}</Tag></div>
@@ -316,10 +301,10 @@ export default function SettingsView() {
           </div>
         </div>
 
-        <AgentProfileSettings />
+        <AgentProfileSettings key={resetVersion} />
         <div className="danger-zone">
-          <span>重置全部数据（清空对话 / 邮件 / 看板）</span>
-          <button className="btn ghost sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger-bg)' }} onClick={resetData}>重置数据</button>
+          <span>清空当前账号业务数据（含记忆与定时任务；保留账号和服务端配置）</span>
+          <button className="btn ghost sm" style={{ color: 'var(--danger)', borderColor: 'var(--danger-bg)' }} onClick={resetData} disabled={resetting}>{resetting ? '正在清空…' : '清空业务数据'}</button>
         </div>
       </div>
     </div>

@@ -252,7 +252,7 @@ async function suiteJump() {
     const d = await api('POST', '/api/draft', { actId, planCard: r.planCard }, 'F');
     units.push({ name: `F${i + 1}-draft创建`, pass: !!(d.j && d.j.draft && d.j.draft.id), detail: d.j && d.j.draft ? 'id=' + d.j.draft.id.slice(0, 12) : JSON.stringify(d.j).slice(0, 60) });
     if (!(d.j && d.j.draft)) return;
-    // 3) 发送（ESP 未配置 → 仿真发送入队；演示受众全局共享 → 72h 频控拦截属正确产品行为，也计过）
+    // 3) 发送（须提前配置测试 ESP 和导入测试受众；72h 频控拦截属正确产品行为）
     const s = await api('POST', `/api/draft/${d.j.draft.id}/send`, { subject: d.j.draft.subject, body: d.j.draft.body }, 'F');
     const freqBlocked = /72 小时|频控|打扰/.test(JSON.stringify(s.j));
     units.push({ name: `F${i + 1}-send接受`, pass: (!s.j.error && (s.j.queued || s.j.result)) || freqBlocked, detail: freqBlocked ? '频控正确拦截(72h内重复)' : JSON.stringify(s.j).slice(0, 60) });

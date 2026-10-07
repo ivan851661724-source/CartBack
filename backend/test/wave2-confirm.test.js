@@ -111,9 +111,9 @@ test('E2 分支①：确认先真实建码成功 → 卡带店铺回执码、快
   assert.equal(b.planCard.discount.code_status, 'created');
   assert.equal('pain' in b.planCard, false, 'pain 旧键已删除');
   assert.ok(b.planCard.reason, 'reason 单键保留');
-  // estGmv 结构（D3 公式：people × aov × 12% − 折扣成本；无客单价 extras → source=demo）
+  // estGmv 结构（D3 公式：people × aov × 12% − 折扣成本；无客单价 extras → source=reference）
   assert.equal(b.planCard.estGmv.currency, 'USD');
-  assert.equal(b.planCard.estGmv.source, 'demo');
+  assert.equal(b.planCard.estGmv.source, 'reference');
   assert.equal(b.planCard.estGmv.formula.rate, 0.12);
   const f = b.planCard.estGmv.formula;
   assert.ok(Math.abs(b.planCard.estGmv.amount - (f.people * f.aov * f.rate - f.discount_cost)) < 0.01, 'estGmv 与公式自洽');

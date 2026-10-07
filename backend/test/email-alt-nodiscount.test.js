@@ -15,7 +15,7 @@ test('discount=0（无钩子）不产生 0% OFF 文案或 alt', () => {
     image_url: 'https://example.com/hero.png',
     brand_name: 'CozyNest',
     discount: 0,
-    cart_url: 'https://cartback.demo',
+    cart_url: 'https://shop.test/cart',
     lang: 'en',
   });
   assert.ok(!html.includes('0% OFF'), 'no-hook email must not contain 0% OFF');

@@ -19,7 +19,6 @@ const CONFIG_FILE = path.join(SERVER_DIR, 'config.json');
 const DB_FILE = path.join(SERVER_DIR, 'data.sqlite');
 
 const DEFAULTS = {
-  mode: 'demo',                 // 'demo' | 'real'
   aiProvider: 'deepseek',
   aiBaseUrl: 'https://api.deepseek.com',
   aiModel: 'deepseek-chat',
@@ -56,7 +55,7 @@ const DEFAULTS = {
   // —— 店后台连接器（架构 §2 B1）：邮件语种跟「收件人 locale」走，不是跟商家聊天语言 ——
   shopDefaultLocale: 'en',      // 店铺主客群语种（预览/默认）；逐收件人仍按其自身 locale 本地化
   shopBrand: 'CartBack',        // 品牌名（邮件头部 / 营销图叠加 / 文案品牌位）
-  shopCartUrl: 'https://cartback.demo', // 邮件 CTA 跳转默认购物车 URL
+  shopCartUrl: '', // 邮件 CTA 跳转默认购物车 URL
   publicBaseUrl: '',                    // CartBack 对外公网基址（含协议），邮件内联图片 src 用：${publicBaseUrl}/api/image/<path>
   // —— 视觉 / 邮件图像 AI（复用 emailgen；未单独配时可留空，内部走 Pollinations 免费兜底）——
   visionKey: '',
@@ -89,6 +88,7 @@ function load() {
       // 损坏则重建，不致命
     }
   }
+  removeLegacyDemoConfig(cfg);
   if (!cfg.localToken) {
     cfg.localToken = crypto.randomBytes(24).toString('hex');
     save(cfg);
@@ -99,7 +99,14 @@ function load() {
   }
   // 环境变量最后覆盖（部署注入密钥用）；覆盖结果只留在内存，不回写 config.json
   applyEnvOverlay(cfg);
+  removeLegacyDemoConfig(cfg);
   return cfg;
+}
+
+function removeLegacyDemoConfig(cfg) {
+  delete cfg.mode;
+  if (Array.isArray(cfg.stores)) cfg.stores = cfg.stores.filter(s => s?.type !== 'mock');
+  if (/^https?:\/\/cartback\.demo(?:[/?#]|$)/i.test(cfg.shopCartUrl || '')) cfg.shopCartUrl = '';
 }
 
 function save(cfg) {
@@ -115,7 +122,6 @@ function applyEnvOverlay(cfg) {
   const json = (k) => { const v = str(k); if (!v) return null; try { return JSON.parse(v); } catch (e) { return null; } };
   const csv = (k) => { const v = str(k); return v ? v.split(',').map(s => s.trim().toLowerCase()).filter(Boolean) : null; };
   const m = {
-    mode: str('CARTBACK_MODE'),
     adminEmails: csv('CARTBACK_ADMIN_EMAILS'),
     userLlmDailyLimit: int('CARTBACK_USER_LLM_DAILY_LIMIT'),
     aiProvider: str('CARTBACK_AI_PROVIDER'),
@@ -155,11 +161,10 @@ function status(cfg) {
     (Array.isArray(cfg.stores) && cfg.stores.length)
   );
   return {
-    mode: cfg.mode,
     aiConfigured: Boolean(cfg.aiKey),
     espConfigured: cfg.espProvider === 'smtp'
-      ? Boolean(cfg.smtpHost && cfg.smtpUser && cfg.smtpPass)
-      : Boolean(cfg.espKey),
+      ? Boolean(cfg.smtpHost && cfg.smtpUser && cfg.smtpPass && cfg.espFrom)
+      : Boolean(cfg.espKey && cfg.espFrom),
     espFrom: cfg.espFrom ? cfg.espFrom.replace(/(.{2}).*(@.*)/, '$1***$2') : '',
     aiProvider: cfg.aiProvider,
     aiModel: cfg.aiModel || '',          // 回显给前端设置页（P1-3：避免刷新后模型名丢失）

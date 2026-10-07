@@ -31,7 +31,7 @@ email:
   sender_name: "CartBack"
   use_ssl: true
   use_tls: false
-  cart_url: "https://cartback.demo"
+  cart_url: ""
 
 brevo:
   api_key: ""

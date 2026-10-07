@@ -41,6 +41,13 @@ export async function api<T = any>(path: string, opts: RequestInit = {}, rejectH
   return data as T;
 }
 
+/** 清空当前账号业务记录。只有确认成功的响应才能重置前端状态。 */
+export async function resetAccountData(): Promise<{ ok: true; scope: 'current_account' | 'current_account_and_unowned'; removed?: Record<string, number> }> {
+  const result = await api<any>('/api/reset', { method: 'POST', body: JSON.stringify({ confirm: true }) }, true);
+  if (result.ok !== true || !['current_account', 'current_account_and_unowned'].includes(result.scope)) throw new Error('重置结果无效，请刷新页面核对');
+  return result;
+}
+
 /** Risk text comes from the server for this exact business revision. */
 export async function sendWithApproval<T>(draftId: string, payload: Record<string, unknown>): Promise<T> {
   const path = `/api/draft/${draftId}/send`;

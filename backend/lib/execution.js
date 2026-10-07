@@ -129,7 +129,7 @@ function parseOfferCodeName(offer) {
 }
 
 /* ------------------------------ D3 estGmv 公式 ------------------------------ */
-/** 客单价：extras「客单价」解析（'35美元'→35）；缺失用行业默认并标 demo（PRD D3） */
+/** 客单价：extras「客单价」解析（'35美元'→35）；缺失用行业默认并标参考估算（PRD D3） */
 function parseAov(extras) {
   const entries = (Array.isArray(extras) ? extras : []).filter(e => e && ['客单价', 'aov'].includes(e.key));
   entries.sort((a, b) => (Number(b.at) || 0) - (Number(a.at) || 0));
@@ -137,12 +137,12 @@ function parseAov(extras) {
     const m = String(e.value || '').match(/(\d+(?:\.\d+)?)/);
     if (m) return { aov: +m[1], source: 'store' };
   }
-  return { aov: INDUSTRY_DEFAULT_AOV, source: 'demo' };
+  return { aov: INDUSTRY_DEFAULT_AOV, source: 'reference' };
 }
 
 /**
  * estGmv = reach_count × 客单价 × 挽回率(12% 行业参考，标注) − 折扣成本(回流期望×折扣率)。
- * percentOff ≤ 0（无钩子）→ 折扣成本 0。source：store（extras 客单价）| demo（行业默认）。
+ * percentOff ≤ 0（无钩子）→ 折扣成本 0。source：store（extras 客单价）| reference（行业默认）。
  */
 function computeEstGmv({ reachCount, aov, aovSource, percentOff }) {
   const people = Math.max(0, Number(reachCount) || 0);
@@ -156,7 +156,7 @@ function computeEstGmv({ reachCount, aov, aovSource, percentOff }) {
     amount,
     currency: 'USD',
     formula: { people, aov: price, rate, discount_cost: +discountCost.toFixed(2) },
-    source: aovSource === 'store' ? 'store' : 'demo'
+    source: aovSource === 'store' ? 'store' : 'reference'
   };
 }
 

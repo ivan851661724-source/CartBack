@@ -117,7 +117,8 @@ function topCards(store, userId, { audience = '', discount = 0, k = 3 } = {}) {
 
 /** 收集地址（转发制，依赖公网部署）：scan+{uid}@域名；域名取已验证发件域名 espFrom */
 function collectionAddress(userId, espFrom = '') {
-  const domain = (espFrom || '').split('@')[1] || 'inbound.cartback.demo';
+  const domain = (espFrom || '').split('@')[1];
+  if (!domain) return '';
   const short = String(userId || 'anon').replace(/[^a-z0-9]/gi, '').slice(0, 12).toLowerCase() || 'anon';
   return `scan+${short}@${domain}`;
 }

@@ -10,9 +10,9 @@ const { Store } = require('../lib/store');
 const execution = require('../lib/execution');
 const flow = require('../lib/conversation-v6');
 
-async function fixture(t, hold = '', real = false, provider = 'resend', overrides = {}) {
+async function fixture(t, hold = '', provider = 'resend', overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-send-boundaries-'));
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ shopBrand: 'ReviewBrand', publicBaseUrl: 'https://review.example', mode: real ? 'real' : 'demo', espProvider: provider, smtpHost: 'smtp.test', smtpUser: 'test', smtpPass: 'test', espKey: 'test', espFrom: 'sender@review.example', espApiUrl: 'https://esp.test/emails', ...(hold === 'banner' || hold === 'code-failure' ? { stores: [{ type: 'mock', createFails: hold === 'code-failure' }] } : {}), ...overrides }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ shopBrand: 'ReviewBrand', publicBaseUrl: 'https://review.example', espProvider: provider, smtpHost: 'smtp.test', smtpUser: 'test', smtpPass: 'test', espKey: 'test', espFrom: 'sender@review.example', espApiUrl: 'https://esp.test/emails', ...(hold === 'banner' || hold === 'code-failure' ? { stores: [{ type: 'mock', createFails: hold === 'code-failure' }] } : {}), ...overrides }));
   const listener = net.createServer();
   await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
   const port = listener.address().port;
@@ -110,7 +110,7 @@ for (const route of ['message', 'message/stream']) test(`creating or resuming co
 });
 
 for (const hold of ['checklist', 'render']) test(`correction during ${hold} cancels delivery`, async t => {
-  const f = await fixture(t, hold, hold === 'render');
+  const f = await fixture(t, hold);
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   f.arm();
   assert.equal((await f.api(`/api/draft/${cf.json.draft_id}/send`, {})).status, 202);
@@ -124,7 +124,7 @@ for (const hold of ['checklist', 'render']) test(`correction during ${hold} canc
 });
 
 test('ESP submission holds the act guard against editing, confirmation and closing', async t => {
-  const f = await fixture(t, 'esp', true);
+  const f = await fixture(t, 'esp');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const todo = f.db(s => s.addTodo({ user_id: f.act.user_id, act_id: f.act.id, summary: 'resume', reason: 'test' }));
   f.arm(); await f.api(`/api/draft/${cf.json.draft_id}/send`, {});
@@ -140,7 +140,7 @@ test('ESP submission holds the act guard against editing, confirmation and closi
 });
 
 test('edited fields reach ESP and preview while unchanged variant fields retain their tier copy', async t => {
-  const f = await fixture(t, '', true);
+  const f = await fixture(t, '');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   const previous = f.db(s => s.getDraft(did));
@@ -156,7 +156,7 @@ test('edited fields reach ESP and preview while unchanged variant fields retain 
 });
 
 test('saved edited HTML reaches ESP with the approved body', async t => {
-  const f = await fixture(t, '', true);
+  const f = await fixture(t, '');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   const save = await f.api(`/api/draft/${did}`, { subject: 'Saved title', body: 'Saved body' }, 'PUT');
@@ -170,7 +170,7 @@ test('saved edited HTML reaches ESP with the approved body', async t => {
 });
 
 for (const provider of ['resend', 'brevo', 'smtp']) test(`${provider}: saved HTML uses expanded recipient copy, translated language and absolute image URLs`, async t => {
-  const f = await fixture(t, 'translate', true, provider);
+  const f = await fixture(t, 'translate', provider);
   f.db(s => {
     s._write('audience', [
       { id: 'en-person', email: 'alice@example.com', name: 'Alice', intent: '加购未付', locale: 'en', timezone: 'America/New_York', created_at: Date.now() },
@@ -193,7 +193,7 @@ for (const provider of ['resend', 'brevo', 'smtp']) test(`${provider}: saved HTM
     assert.ok(m.html);
     assert.doesNotMatch(m.html, /\{\{|\}\}/);
     assert.match(m.html, /src="https:\/\/review\.example\/api\/image\/hero%20image\.png"/);
-    assert.match(m.html, /<a href="https:\/\/cartback\.demo"><img src=/);
+    assert.match(m.html, /<a href="https:\/\/shop\.test\/cart"><img src=/);
     assert.doesNotMatch(m.html, /[\u4e00-\u9fff]/);
     assert.ok(m.html.includes(m.text), JSON.stringify(m));
     assert.ok(m.html.includes(m.subject));
@@ -206,7 +206,7 @@ for (const provider of ['resend', 'brevo', 'smtp']) test(`${provider}: saved HTM
 });
 
 test('approved queued delivery keeps its saved cart URL after shop settings change', async t => {
-  const f = await fixture(t, 'render', true, 'resend', { shopCartUrl: 'https://original.example/cart' });
+  const f = await fixture(t, 'render', 'resend', { shopCartUrl: 'https://original.example/cart' });
   f.db(s => {
     const a = s.getAct(f.act.id); flow.initialize(a);
     flow.applyChanges(a, [{ op: 'set', slot: 'offer', value: '无优惠', evidence: '无优惠' }], '无优惠');
@@ -238,7 +238,7 @@ test('approved queued delivery keeps its saved cart URL after shop settings chan
 });
 
 test('editing legacy drafts preserves their original HTML cart link', async t => {
-  const f = await fixture(t, '', false);
+  const f = await fixture(t, '');
   const prepared = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = prepared.json.draft_id;
   f.db(s => {
@@ -256,7 +256,7 @@ test('editing legacy drafts preserves their original HTML cart link', async t =>
 });
 
 test('delivery without a public image base preserves a clear cart CTA', async t => {
-  const f = await fixture(t, '', true, 'resend', { publicBaseUrl: '', shopCartUrl: 'https://shop.example/cart' });
+  const f = await fixture(t, '', 'resend', { publicBaseUrl: '', shopCartUrl: 'https://shop.example/cart' });
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   f.db(s => { const d = s.getDraft(did); d.image_path = 'local-hero.png'; s.upsertDraft(d); });
@@ -275,7 +275,7 @@ test('delivery without a public image base preserves a clear cart CTA', async t 
 });
 
 test('stale generated HTML cannot override persistent merchant edits in ESP payload', async t => {
-  const f = await fixture(t, '', true);
+  const f = await fixture(t, '');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   f.db(s => { const d = s.getDraft(did); d.mailgen_meta = { ...d.mailgen_meta, copy_edits: { subject: 'Saved edited subject', body: 'Saved edited body' } }; d.html = '<p>OLD GENERATED BODY</p>'; s.upsertDraft(d); });
@@ -286,7 +286,7 @@ test('stale generated HTML cannot override persistent merchant edits in ESP payl
 });
 
 test('correction during ESP retry backoff prevents the next attempt', async t => {
-  const f = await fixture(t, 'retry', true);
+  const f = await fixture(t, 'retry');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   await f.api(`/api/draft/${cf.json.draft_id}/send`, {});
   await f.phase('first-failed');
@@ -328,7 +328,7 @@ test('SQLite preserves code failure recovery and draft scheduling, variants and 
 });
 
 test('edited body is used across tiers and in ESP HTML/text', async t => {
-  const f = await fixture(t, '', true);
+  const f = await fixture(t, '');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   const previous = f.db(s => s.getDraft(did));
@@ -350,7 +350,7 @@ test('an archived confirmed draft remains sendable with an intact snapshot', asy
 });
 
 test('late image generation preserves merchant edits and sent lifecycle facts', async t => {
-  const f = await fixture(t, 'mailgen', true);
+  const f = await fixture(t, 'mailgen');
   const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
   const did = cf.json.draft_id;
   f.arm();
@@ -369,4 +369,28 @@ test('late image generation preserves merchant edits and sent lifecycle facts', 
   assert.equal(latest.body, 'Final edited body');
   assert.equal(latest.html, '');
   assert.equal(latest.mailgen_meta.copy_edits.body, 'Final edited body');
+});
+
+test('reset refuses an in-flight conversation and preserves its data', async t => {
+  const f = await fixture(t);
+  const pending = f.api(`/api/act/${f.act.id}/message`, {message:'hold'});
+  await f.phase('message');
+  const reset = await f.api('/api/reset', {confirm:true});
+  assert.equal(reset.status,409);assert.ok(f.db(s=>s.getAct(f.act.id)));
+  f.release();await pending;
+});
+test('reset refuses an in-flight ESP submission', async t => {
+  const f=await fixture(t,'esp');const cf=await f.api(`/api/act/${f.act.id}/confirm`,{});f.arm();
+  assert.equal((await f.api(`/api/draft/${cf.json.draft_id}/send`,{})).status,202);
+  await f.phase('sending');
+  const reset=await f.api('/api/reset',{confirm:true});assert.equal(reset.status,409);assert.ok(f.db(s=>s.getDraft(cf.json.draft_id)));
+  f.release();assert.equal((await f.finish(cf.json.draft_id)).status,'sent');
+});
+test('local HTTP reset requires confirmation and preserves account credentials',async t=>{
+ const f=await fixture(t);const owner=f.db(s=>s.getUserById(f.act.user_id));
+ assert.equal((await f.api('/api/reset',{})).status,400);assert.ok(f.db(s=>s.getAct(f.act.id)));
+ const reset=await f.api('/api/reset',{confirm:true});assert.equal(reset.status,200);assert.equal(reset.json.scope,'current_account_and_unowned');
+ assert.equal(f.db(s=>s.getAct(f.act.id)),null);assert.deepEqual(f.db(s=>s.getUserById(owner.id)),owner);
+ assert.equal((await f.api('/api/auth/me')).status,200);
+ const state = await f.state(); assert.equal(state.audience.length,0); assert.equal(state.drafts.length,0); assert.equal(state.campaigns.length,0); assert.equal(state.kpis.gmv,0);
 });
