@@ -256,7 +256,7 @@ test('Wave 4 #1 零配置开场：欢迎语只在首个 act 拼一次；清单 +
     storeBanner: { connected: true, store_name: 'LunaGlow', weekly_abandoned_count: 214, aov: 45, abandoned_value: 9630, currency: 'USD' }
   });
   const iW = data.reply.indexOf('欢迎使用百客');
-  const iD = data.reply.indexOf('已连接LunaGlow');
+  const iD = data.reply.indexOf('我了解到你的品牌名是LunaGlow');
   const iL = data.reply.indexOf('我还需要的信息');
   assert.ok(iW < iD && iD < iL, '数据先于清单（数据先于提问）');
   assert.ok(data.reply.includes('本周214个加购未付'), '数据开场句');

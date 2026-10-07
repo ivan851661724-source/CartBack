@@ -76,7 +76,7 @@ test('F1 opening：已连接店铺 → 数据先于清单 + 出口 chips（剧�
   });
   assert.ok(op.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语仍在开头');
   const idxWelcome = op.reply.indexOf('欢迎使用百客');
-  const idxData = op.reply.indexOf('已连接LunaGlow');
+  const idxData = op.reply.indexOf('我了解到你的品牌名是LunaGlow');
   const idxList = op.reply.indexOf('我还需要的信息');
   assert.ok(idxWelcome < idxData && idxData < idxList, '数据先于清单（数据先于提问）');
   assert.ok(op.reply.includes('本周214个加购未付（客单$45，弃购总额$9630）'), '数据开场句按 PRD 句式');

@@ -600,11 +600,14 @@ class IGDE {
     const parts = [];
     if (!opts.hasAnyAct) parts.push('欢迎使用百客，我是你的专属智能邮件营销助手。');
     if (hasData) {
-      if (banner.store_name) parts.push(`已连接${banner.store_name}。`);
+      // recap 句（UX 481-7578 更新版）：品牌名已知 → 以「我了解到…」承接欢迎语（替换旧「已连接…」句）；
+      // 数据句照旧（F1 数据先于提问），尾句引出清单。无名不硬编。
+      if (banner.store_name) parts.push(`我了解到你的品牌名是${banner.store_name}。`);
       if (count > 0) {
         const fmt = (n) => (Number.isInteger(n) ? String(n) : String(+n.toFixed(2)));
         parts.push(`本周${count}个加购未付（客单${cur}${fmt(aov)}，弃购总额${cur}${fmt(total)}）。`);
       }
+      if (banner.store_name) parts.push('现在可以设计第一批邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。');
     } else {
       // 无店铺数据：开场改问一句话（不弹表单、不硬编数据），清单照常
       parts.push('这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。');
@@ -1257,6 +1260,20 @@ class IGDE {
     if (askedSlot && question.kind !== 'conflict' && !/[?？]/.test(reply)) {
       const p = this.probeFor(askedSlot);
       if (!reply.includes(p)) reply += ' ' + p;
+    }
+
+    // 中段递减清单（UX 481-7578 第二条气泡，2026-10-07）：S1 且部分缺槽 →
+    // 回复尾部附价值化剩余清单（话术 UX 原文；剩余项 = 缺失四槽，标签用 UX 版：挽回对象/流失原因/优惠方式/期待结果）。
+    // 从用户首条消息后的第一条回复即出现（UX 口径：handle 轮即用户已发言，无需另计 messages——
+    // 本轮用户消息此刻尚未 push）。只加展示行——B4/B5 判定零改动（探问仍由上方承担；冲突澄清轮不叠加）。
+    if (act.stage === 'S1' && question.kind !== 'conflict') {
+      const miss = this.missingFields(act);
+      if (miss.length > 0 && miss.length < 4) {
+        const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
+        const names = miss.map(s => UX_LABEL[s] || s).join('、');
+        const line = `还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
+        if (!reply.includes(line)) reply += ` ${line}`;
+      }
     }
 
     // —— 单一 FSM 权威：阶段推进只在此处（桩/AI 两条路径一致），_stubReply/_aiCoach 不碰 stage（P2-1）——
