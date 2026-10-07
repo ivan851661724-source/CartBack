@@ -75,6 +75,25 @@ test('saving draft copy persists text, rendered preview and revision without sen
   assert.equal(state.drafts.find(d => d.id === id).subject, 'Updated subject');
   const stale = await api(`/api/draft/${id}`, { expected_business_version: prepared.data.act.business_version, subject: 'Stale', body: 'Stale' }, 'PUT');
   assert.equal(stale.status, 409);
+  const image = await api(`/api/draft/${id}/image`, { prompt: 'updated artwork' });
+  assert.equal(image.status, 200);
+  assert.match(image.data.html, /Updated body/);
+  assert.match((await api('/api/state')).data.drafts.find(d => d.id === id).html, /Updated body/);
+});
+
+test('v6 explicit conversation brand overrides configured brand for default coupon and signature', async t => {
+  const { api, update } = await fixture(t, { shopBrand: "Leo's PhoneCase" }, true);
+  const a = (await api('/api/act', { flow_version: 6 })).data.act;
+  const ready = update(a.id, x => flow.applyChanges(x, [
+    { op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' },
+    { op: 'set', slot: 'offer', value: '20% off', evidence: '20% off' },
+    { op: 'set', slot: 'brand', value: 'NovaBrew', evidence: 'NovaBrew' },
+  ], 'NovaBrew 加购未付客户 20% off'));
+  const prepared = await api(`/api/act/${a.id}/confirm`, { expected_business_version: ready.business_version });
+  assert.equal(prepared.status, 200);
+  assert.equal(prepared.data.planCard.discount.code, 'NOVABREW20OFF');
+  assert.equal(prepared.data.planCard.signature, 'NovaBrew');
+  assert.equal(prepared.data.draft.brand, 'NovaBrew');
 });
 test('v6 preparation without a connected shop issues a default code and keeps optional fields empty', async t => {
   const { api, update } = await fixture(t);

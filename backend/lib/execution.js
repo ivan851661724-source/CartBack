@@ -294,8 +294,9 @@ function frequencyFilter(store, recipients, draft, opts = {}) {
   const lastTouch = new Map();   // audience_id -> 72h 内最后触达时刻
   for (const e of emailedEvents) {
     const d = draftsById.get(e.draft_id);
-    if (!d || (d.audience || '').toLowerCase() !== campaignKey) continue;
-    if ((d.user_id || null) !== (draft.user_id || null)) continue;
+    const touch = e.touch_scope || d;
+    if (!touch || (touch.audience || '').toLowerCase() !== campaignKey) continue;
+    if ((touch.user_id || null) !== (draft.user_id || null)) continue;
     const prev = lastTouch.get(e.audience_id) || 0;
     if (e.ts > prev) lastTouch.set(e.audience_id, e.ts);
   }
@@ -427,6 +428,9 @@ async function evaluateChecklist(o = {}) {
         if (!hit) {
           amountPass = false;
           amountReason = `折扣码 ${code} 未在你的店铺中找到，不能发送（宁缓发不错发）`;
+        } else if (!Number.isFinite(Number(hit.percent_off)) || hit.percent_off == null || Number(hit.percent_off) !== Number(snapshot.discount.percent_off)) {
+          amountPass = false;
+          amountReason = '店铺券的优惠力度与已确认方案不一致或无法核实，请重新准备并核对优惠后再发送';
         }
       } catch (e) {
         amountPass = false; // 店铺 API 校验超时/失败 → 视为不过（宁缓发不错发）

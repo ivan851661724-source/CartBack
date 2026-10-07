@@ -44,7 +44,7 @@ export interface BuildEmailHtmlOpts {
   preheader?: unknown;
 }
 
-// 「点击图片下单」提示 + 落款，按 preferred_language 本地化（无匹配则中文兜底）
+// Localized image prompt and signature; unsupported explicit languages fall back to English.
 const PROMPT_BY_LANG: Record<string, string> = {
   english: 'Tap the image above to pick up where you left off.',
   spanish: 'Toca la imagen de arriba para continuar con tu pedido.',
@@ -60,6 +60,14 @@ const SIGNATURE_BY_LANG: Record<string, string> = {
   french: "L'équipe {brand}",
   italian: 'Il team di {brand}',
   chinese: '{brand} 团队',
+};
+const CART_LABEL_BY_LANG: Record<string, string> = {
+  english: 'Return to your cart',
+  spanish: 'Volver al carrito',
+  german: 'Zurück zum Warenkorb',
+  french: 'Retour au panier',
+  italian: 'Torna al carrello',
+  chinese: '返回购物车',
 };
 
 // locale 码 → 语言全称（preferred_language 可能是全称如 "English"，也可能只传 locale 如 "en"/"en-US"）
@@ -78,7 +86,7 @@ function resolveLangKey(lang: string): string {
   if (LOCALE_TO_LANG[k]) return LOCALE_TO_LANG[k]; // locale 码映射
   // 处理 "en-US" 这类带连字符的：取主语言
   const main = k.split(/[-_]/)[0];
-  return LOCALE_TO_LANG[main] || 'chinese';
+  return LOCALE_TO_LANG[main] || 'english';
 }
 
 function discountStr(discount: Optional<number>): string {
@@ -131,8 +139,12 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
   // 按习惯语言本地化「点击图片下单」提示与落款
   const langKey = resolveLangKey(safeStr(lang));
   const brandSafeForSig = escapeHtml(brand_name);
-  const promptText = PROMPT_BY_LANG[langKey] ?? PROMPT_BY_LANG.chinese;
-  const signatureText = (SIGNATURE_BY_LANG[langKey] ?? SIGNATURE_BY_LANG.chinese).replace(
+  const promptText = PROMPT_BY_LANG[langKey] ?? PROMPT_BY_LANG.english;
+  const cartLink = safeStr(image_link) || safeStr(cart_url);
+  const actionHtml = imgTag ? promptText : cartLink
+    ? `<a href="${escapeHtml(cartLink)}" style="color:#ff6b35;text-decoration:underline;">${CART_LABEL_BY_LANG[langKey] ?? CART_LABEL_BY_LANG.english}</a>`
+    : '';
+  const signatureText = (SIGNATURE_BY_LANG[langKey] ?? SIGNATURE_BY_LANG.english).replace(
     '{brand}',
     brandSafeForSig,
   );
@@ -182,7 +194,7 @@ export function buildEmailHtml(opts: BuildEmailHtmlOpts): string {
     '        </td></tr>\n' +
     // 「点击图片下单」提示 + 落款 在图片之后
     '        <tr><td style="padding:0 25px 20px;font-family:' + FONT + ';">\n' +
-    `          <p style="margin:20px 0 10px;font-size:15px;font-weight:600;color:#ff6b35;line-height:1.7;">${promptText}</p>\n` +
+    `          <p style="margin:20px 0 10px;font-size:15px;font-weight:600;color:#ff6b35;line-height:1.7;">${actionHtml}</p>\n` +
     `          <p style="margin:0;font-size:14px;color:#888888;line-height:1.6;">${signatureText}</p>\n` +
     '        </td></tr>\n' +
     '        <tr><td style="background-color:#f9f9f9;border-top:1px solid #eeeeee;padding:20px 25px;text-align:center;font-family:' + FONT + ';">\n' +

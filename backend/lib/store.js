@@ -55,6 +55,7 @@ const SCHEMA = {
   },
   events: {
     id: 'TEXT', type: 'TEXT', draft_id: 'TEXT', audience_id: 'TEXT', user_id: 'TEXT', value: 'REAL', ts: 'INTEGER',
+    touch_scope: 'JSON',     // Immutable activity/user scope for frequency history after draft deletion.
     order_id: 'TEXT',        // ⑤ 订单归因幂等键（Shopify order id；同单只归因一次）
     refunded: 'INTEGER',     // ⑤ orders/update 退款标记：1 = 已扣减，防重复扣
     esp_id: 'TEXT'           // ⑤ Resend message_id → 收件人映射（回执定位 / bounced 剔除）
@@ -379,6 +380,17 @@ class Store {
     const rows = this._read('drafts');
     const next = rows.filter(x => x.id !== id);
     if (next.length === rows.length) return false;
+    // Preserve legacy touch scope before its draft disappears; deletion must not erase frequency history.
+    const draft = rows.find(x => x.id === id);
+    const events = this._read('events');
+    let updated = false;
+    for (const event of events) {
+      if (event.type === 'emailed' && event.draft_id === id && !event.touch_scope) {
+        event.touch_scope = { audience: draft.audience || '', user_id: draft.user_id || null };
+        updated = true;
+      }
+    }
+    if (updated) this._write('events', events);
     this._write('drafts', next); return true;
   }
 
@@ -477,6 +489,10 @@ class Store {
   addEvent(e) {
     e.id = e.id || uid('ev_');
     e.ts = e.ts || Date.now();
+    if (e.type === 'emailed' && e.draft_id && !e.touch_scope) {
+      const draft = this.getDraft(e.draft_id);
+      if (draft) e.touch_scope = { audience: draft.audience || '', user_id: draft.user_id || null };
+    }
     const rows = this._read('events'); rows.push(e); this._write('events', rows);
     return e;
   }

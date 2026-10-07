@@ -37,6 +37,46 @@ const CODE_CONNECTOR = {
   async verifyDiscountCode(code) { return code === 'CODE1' ? { code: 'CODE1', percent_off: 10 } : null; }
 };
 
+test('coupon verification rejects changed or unknown discount percentages', async () => {
+  const store = tmpStore('changed-coupon');
+  try {
+    for (const percent of [90, undefined]) {
+      const result = await runGates(store, { connector: { supportsDiscountCodes: () => true, verifyDiscountCode: async () => ({ code: 'CODE1', percent_off: percent }) } });
+      const gate = result.items.find(i => i.gate === 'amount_code');
+      assert.equal(gate.pass, false);
+      assert.match(gate.reason, /优惠力度/);
+    }
+  } finally { store.b.close(); }
+});
+
+test('deleting a sent draft preserves frequency history and user isolation', () => {
+  const store = tmpStore('deleted-frequency');
+  try {
+    const old = { id: 'old-send', audience: '加购未付客户', user_id: 'u1', status: 'sent' };
+    store.upsertDraft(old);
+    // Includes historical events that were recorded before self-contained touch metadata.
+    store._write('events', [{ type: 'emailed', draft_id: old.id, audience_id: 'customer', user_id: 'u1', ts: Date.now() }]);
+    store.deleteDraft(old.id);
+    const recipients = [{ id: 'customer', email: 'customer@example.com' }];
+    assert.equal(execution.frequencyFilter(store, recipients, old).skipped, 1);
+    assert.equal(execution.frequencyFilter(store, recipients, { ...old, user_id: 'u2' }).skipped, 0);
+    assert.equal(execution.frequencyFilter(store, recipients, { ...old, audience: '老客' }).skipped, 0);
+  } finally { store.b.close(); }
+});
+
+test('new touch records preserve their original activity scope if the draft is later edited', () => {
+  const store = tmpStore('touch-snapshot');
+  try {
+    const original = { id: 'touch-send', audience: '加购未付客户', user_id: 'u1' };
+    store.upsertDraft(original);
+    store.addEvent({ type: 'emailed', draft_id: original.id, audience_id: 'customer', ts: Date.now() });
+    store.upsertDraft({ ...original, audience: '老客', user_id: 'u2' });
+    store.deleteDraft(original.id);
+    assert.equal(execution.frequencyFilter(store, [{ id: 'customer' }], original).skipped, 1);
+    assert.equal(execution.frequencyFilter(store, [{ id: 'customer' }], { ...original, user_id: 'u2' }).skipped, 0);
+  } finally { store.b.close(); }
+});
+
 function basePlanCardBase() {
   return {
     audience: '加购未付客户',

@@ -208,7 +208,7 @@ function validateAction(act, body) {
 }
 function refreshActions(act) { act.flow_state.actions = availableActions(act); return act.flow_state.actions; }
 function copyHash(draft) {
-  return crypto.createHash('sha256').update(JSON.stringify({ subject: draft.subject, body: draft.body, html: draft.html, image_path: draft.image_path, audience: draft.audience, discount: draft.discount, coupon: draft.coupon, variants: draft.variants, recipient_ids: draft.mailgen_meta?.recipient_ids })).digest('hex');
+  return crypto.createHash('sha256').update(JSON.stringify({ subject: draft.subject, body: draft.body, html: draft.html, image_path: draft.image_path, audience: draft.audience, discount: draft.discount, coupon: draft.coupon, variants: draft.variants, recipient_ids: draft.mailgen_meta?.recipient_ids, cart_url: draft.mailgen_meta?.cart_url })).digest('hex');
 }
 function sendApprovalCurrent(act, draft) {
   const approval = act?.flow_state?.approval;
@@ -303,7 +303,10 @@ async function handle(engine, act, text, opts = {}) {
   // Model narrative is used only on non-mutating turns; committed state is the authority after changes.
   if (!tour && !applied.length && !act.flow_state.candidates.some(c => !previousCandidates.has(c.id)) && env?.reply && !/已发送|发送成功|已建.*码/.test(env.reply)) reply = env.reply;
   if (env?.intent === 'preview' && card) reply += ` 已保存${card.template_preview ? '模板' : '邮件'}预览；未定项仍保留，这一步不会发送或建券。`;
-  if (act.flow_state.candidates.length) reply += ' 有待确认的选择，你可以采用、保留原值，或继续聊其他内容。';
+  if (act.flow_state.candidates.length) {
+    reply += ' 有待确认的选择，你可以采用、保留原值，或继续聊其他内容。';
+    if (act.flow_state.candidates.some(c => c.slot === 'offer' && Number(parseTextPercent(c.new)) >= E1_THRESHOLD)) reply += ' 候选折扣可能显著降低利润；当前毛利未知，采用前请核对，发送前还会请你确认风险。';
+  }
   if (!env && !tour) reply = `消息已保存，${error ? '当前模型理解暂不可用' : '当前未连接对话模型'}；你可以查看或编辑已有方案，恢复后继续。`;
   if (!reply) reply = '已保存当前信息，你可以继续补充，或先看邮件预览。';
   act.messages.push({ role: 'user', content: text, ts: Date.now() }, { role: 'assistant', content: reply, ts: Date.now() });

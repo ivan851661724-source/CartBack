@@ -364,6 +364,7 @@ async function generateMailHtml(draft, card, opts = {}) {
     visionModel:   config.visionModel || config.wanxModel || 'wan2.7-image-pro',
   };
 
+  const cartUrl = draftCartUrl(draft, card);
   const payload = {
     // IGDE 方案卡文案：作为 LLM 失败时的兜底透传（generateCopy 有 AI key 时一律走专门文案 LLM，
     // 与本地 email-automation 一致；不再「优先复用 Agent 产出省 Token」，那样质量明显更低且与设计不符）
@@ -373,7 +374,7 @@ async function generateMailHtml(draft, card, opts = {}) {
     discount: execution.resolveDiscountNum(card),
     brand: resolveBrand(card),
     audience: card.audience || '',
-    cart_url: card.cart_url || config.shopCartUrl || 'https://cartback.demo',
+    cart_url: cartUrl,
     cta: card.cta || 'Shop Now',
     locale: card.locale || config.shopDefaultLocale || 'en',
     product_en: card.product_en || card.product || '',
@@ -401,7 +402,7 @@ async function generateMailHtml(draft, card, opts = {}) {
     draft: {
       id: draft.id || null,
       brand: config.shopBrand || 'CartBack',
-      cart_url: config.shopCartUrl || 'https://cartback.demo',
+      cart_url: cartUrl,
       locale: card.locale || config.shopDefaultLocale || 'en',
     },
   };
@@ -449,7 +450,8 @@ async function generateMailHtml(draft, card, opts = {}) {
       draft.body = latest.body;
       draft.variants = latest.variants;
     }
-    draft.html = edits ? '' : result.html || '';
+    const generatedCopyCurrent = copyPassthrough && (!latest || draftContentHash(latest) === draftContentHash(card));
+    draft.html = edits && !generatedCopyCurrent ? '' : result.html || '';
     draft.image_path = result.image_path || '';
     // 万相提示词快照：EditModal 编辑态展示「真实提示词」，重跑「生成图片」时复用
     if (result.image_prompt) draft.image_prompt = result.image_prompt;
@@ -459,11 +461,13 @@ async function generateMailHtml(draft, card, opts = {}) {
     if (result.body    && !(card && card.body))    draft.body    = result.body;
     draft.mailgen_meta = {
       ...(latest?.mailgen_meta || draft.mailgen_meta || {}),
+      cart_url: cartUrl,
       copy_provider: result.copy_provider,
       image_method:  result.image_method,
       warnings:      result.warnings || null,
       config_source: result.config_source,
       ...(edits ? { copy_edits: edits } : {}),
+      rendered_copy_hash: draft.html ? draftContentHash(draft) : null,
     };
     store.upsertDraft(draft);
     return result;
@@ -491,8 +495,9 @@ function applyFooterLinks(html, draftId, email) {
     .replace(/(href=")([^"]*)("[^>]*>\s*View in browser\s*<\/a>)/i, (m, a, _b, c) => a + urls.view + c);
 }
 
-// —— M4 白标品牌解析链：设置页 shopBrand（非默认值）> 方案卡 brand > CartBack 兜底 ——
+// v6 uses the activity's resolved brand snapshot; legacy cards retain the settings-first chain.
 function resolveBrand(card) {
+  if (card?.flow_version === 6 && String(card.brand || '').trim()) return String(card.brand).trim();
   if (config.shopBrand && config.shopBrand !== 'CartBack') return config.shopBrand;
   const b = String((card && card.brand) || '').trim();
   return b || 'CartBack';
@@ -668,12 +673,8 @@ async function fetchResend(draft, messages, c) {
       subject: r.subject,
       text: r.body
     };
-    // HTML 邮件仅对生成过 html 的变体附上（mailgen html 为标准档直出；其余档用纯文本，避免跨变体串内容）
-    // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
-    if (r.html) msg.html = applyFooterLinks(personalizeHtml(r.html, r), draft.id, r.email);
-    else if (!r.tier || r.tier === 'standard') {
-      if (draftHtmlCurrent(draft)) msg.html = applyFooterLinks(personalizeHtml(draft.html, r), draft.id, r.email);
-    }
+    const html = deliveryHtml(draft, r);
+    if (html) msg.html = html;
     // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
     const unsub = emailFooterUrls(draft.id, r.email);
     if (unsub) msg.headers = { 'List-Unsubscribe': `<${unsub.unsubscribe}>`, 'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click' };
@@ -716,9 +717,7 @@ async function fetchBrevo(draft, messages, c) {
       subject: String(r.subject || '').slice(0, 200),
       textContent: String(r.body || '').slice(0, 20000),
     };
-    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draftHtmlCurrent(draft) ? draft.html : '');
-    // M10 + M3：standard 档共享 html 注入逐收件人称呼，再刷新页脚退订链接（带该收件人 e 参数）
-    const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
+    const html = deliveryHtml(draft, r);
     if (html) body.htmlContent = html;
     // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
     const unsub = emailFooterUrls(draft.id, r.email);
@@ -738,9 +737,7 @@ async function fetchBrevo(draft, messages, c) {
 async function fetchSmtp(draft, messages, c) {
   const ids = [];
   for (const r of messages) {
-    const baseHtml = r.html || ((!r.tier || r.tier === 'standard') && draftHtmlCurrent(draft) ? draft.html : '');
-    // M10 + M3：称呼注入 + 页脚链接刷新（同 Brevo 口径）
-    const html = baseHtml ? applyFooterLinks(personalizeHtml(baseHtml, r), draft.id, r.email) : '';
+    const html = deliveryHtml(draft, r);
     // M3 合规投递头：一键退订（publicBaseUrl 未配则不加，避免投出死链头）
     const unsub = emailFooterUrls(draft.id, r.email);
     const extraHeaders = unsub
@@ -813,12 +810,13 @@ function audienceNetList(desc, scope) {
     .filter(r => r.email_status !== 'email_invalid' && r.email_status !== 'unsubscribed');
 }
 
-// Wave 2 D4③ 白标：商家品牌解析链（设置页 shopBrand 非默认 > 对话 extras「brand/品牌」 > 工具默认 'CartBack'）。
+// v6: latest explicit activity brand > shop setting > CartBack; legacy keeps settings first.
 // 返回 'CartBack' = 未白标 → 闸门③拦截（署名绝不能落到工具品牌上）。
 function resolveMerchantBrand(act) {
-  if (config.shopBrand && config.shopBrand !== 'CartBack') return config.shopBrand;
   const extras = (act && act.memory && Array.isArray(act.memory.extras)) ? act.memory.extras : [];
-  const hit = extras.find(e => e && (e.key === 'brand' || e.key === '品牌') && String(e.value || '').trim());
+  const hit = [...extras].reverse().find(e => e && (e.key === 'brand' || e.key === '品牌') && String(e.value || '').trim());
+  if (act?.flow_version === 6 && hit) return String(hit.value).trim().slice(0, 40);
+  if (config.shopBrand && config.shopBrand !== 'CartBack') return config.shopBrand;
   if (hit) return String(hit.value).trim().slice(0, 40);
   return 'CartBack';
 }
@@ -921,8 +919,43 @@ async function renderForDraft(draft, recipients) {
   });
 }
 
+function draftContentHash(draft) {
+  const edits = draft.mailgen_meta?.copy_edits;
+  return flowV6.copyHash({ subject: edits?.subject ?? draft.subject, body: edits?.body ?? draft.body });
+}
+
 function draftHtmlCurrent(draft) {
-  return Boolean(draft.html && !String(draft.html).startsWith('ERROR') && !(draft.mailgen_meta && draft.mailgen_meta.copy_edits));
+  return Boolean(draft.html && !String(draft.html).startsWith('ERROR') &&
+    (!draft.mailgen_meta?.copy_edits || draft.mailgen_meta.rendered_copy_hash === draftContentHash(draft)));
+}
+
+function draftCartUrl(draft, card = {}) {
+  if (draft.mailgen_meta?.cart_url) return draft.mailgen_meta.cart_url;
+  // Preserve the reviewed primary link for legacy drafts without a URL snapshot.
+  const previous = String(draft.html || '').match(/<a\b[^>]*href=["']([^"']+)["'][^>]*>\s*(?:<img\b|Return to your cart|Volver al carrito|Zurück zum Warenkorb|Retour au panier|Torna al carrello|返回购物车)/i)?.[1];
+  if (previous) return previous.replace(/&quot;/g, '"').replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  return card.cart_url || config.shopCartUrl || 'https://cartback.demo';
+}
+
+function buildDraftHtml(draft, copy, { delivery = false } = {}) {
+  const base = String(config.publicBaseUrl || '').trim().replace(/\/+$/, '');
+  const imagePath = draft.image_path ? '/api/image/' + encodeURIComponent(draft.image_path) : '';
+  // Relative image URLs are useful in the local preview, but cannot be loaded by email clients.
+  const imageUrl = imagePath && base ? base + imagePath : (delivery ? '' : imagePath);
+  const cartUrl = draftCartUrl(draft);
+  return applyFooterLinks(require('./dist/email-builder').buildEmailHtml({
+    subject: copy.subject, body: copy.body, brand_name: draft.brand, discount: draft.discount,
+    image_url: imageUrl, cart_url: cartUrl,
+    image_link: cartUrl,
+    lang: copy.locale || draft.locale || config.shopDefaultLocale || 'en', use_cid: false,
+  }), draft.id, copy.email);
+}
+
+function deliveryHtml(draft, recipientCopy) {
+  if (recipientCopy.html) return applyFooterLinks(personalizeHtml(recipientCopy.html, recipientCopy), draft.id, recipientCopy.email);
+  if (!draftHtmlCurrent(draft)) return '';
+  // Use the final translated/expanded variant, never the shared draft's template copy.
+  return buildDraftHtml(draft, recipientCopy, { delivery: true });
 }
 
 // 编辑只覆盖商家实际改过的字段，保留其他字段的分层文案；旧 HTML 不再携带旧正文。
@@ -937,7 +970,7 @@ function applyDraftCopyEdits(draft, body) {
   const variants = Array.isArray(draft.variants) && draft.variants.length ? draft.variants : variantsMod.standardVariants({ brand: draft.brand, discount: draft.discount, coupon: draft.coupon, product: productFallbackFor(draft) });
   Object.assign(draft, changed);
   draft.variants = variants.map(v => ({ ...v, ...changed }));
-  draft.mailgen_meta = { ...draft.mailgen_meta, copy_edits: { ...(draft.mailgen_meta && draft.mailgen_meta.copy_edits), ...changed } };
+  draft.mailgen_meta = { ...draft.mailgen_meta, cart_url: draftCartUrl(draft), copy_edits: { ...(draft.mailgen_meta && draft.mailgen_meta.copy_edits), ...changed } };
   draft.html = '';
 }
 
@@ -1528,7 +1561,7 @@ async function createDraftFromCard(card, { actId = null, userId = null, authorit
   const tagDist = tagsMod.tagDistribution(store, net);
   const discountNum = execution.resolveDiscountNum(card);
   const draftFacts = {
-    // M4 品牌链：设置页 shopBrand（非默认）> 方案卡 brand > CartBack 兜底；固化到 draft.brand
+    // Persist the resolved brand; v6 card brand is authoritative for this activity.
     brand: resolveBrand(card),
     // 折扣数值唯一出处 = 方案卡 discountNum（% off；0 = 无钩子方案，文案不虚报折扣）
     discount: discountNum,
@@ -1566,9 +1599,10 @@ async function createDraftFromCard(card, { actId = null, userId = null, authorit
     strategy_card_ids: refCards.map(c => c.id),
     audience_conditions: conditions
   };
+  draft.mailgen_meta = { cart_url: draftCartUrl(draft, card) };
   if (act?.flow_version === 6) {
     draft.subject = card.subject;
-    draft.mailgen_meta = { flow_version: 6, business_version: act.business_version, recipient_ids: net.map(r => r.id), product_category: card.category || '' };
+    draft.mailgen_meta = { ...draft.mailgen_meta, flow_version: 6, business_version: act.business_version, recipient_ids: net.map(r => r.id), product_category: card.category || '' };
     draft.variants = draft.variants.map(v => ({ ...v, subject: draft.subject, body: draft.body }));
   }
   store.upsertDraft(draft);
@@ -2528,12 +2562,11 @@ const server = http.createServer(async (req, res) => {
         if (body.expected_business_version !== act.business_version || draft.mailgen_meta?.business_version !== act.business_version || !act.execution_snapshot) return sendJson(res, 409, { error: '草稿已失效，请刷新后再保存' });
       }
       const before = flowV6.copyHash(draft);
+      const cartUrl = draftCartUrl(draft);
       applyDraftCopyEdits(draft, body);
-      draft.html = applyFooterLinks(require('./dist/email-builder').buildEmailHtml({
-        subject: draft.subject, body: draft.body, brand_name: draft.brand, discount: draft.discount,
-        image_url: draft.image_path ? '/api/image/' + encodeURIComponent(draft.image_path) : '',
-        cart_url: config.shopCartUrl || 'https://cartback.demo', lang: draft.locale || config.shopDefaultLocale || 'en', use_cid: false,
-      }), draft.id);
+      draft.mailgen_meta = { ...draft.mailgen_meta, cart_url: cartUrl };
+      draft.html = buildDraftHtml(draft, draft);
+      draft.mailgen_meta = { ...draft.mailgen_meta, rendered_copy_hash: draftContentHash(draft) };
       if (act?.flow_version === 6 && before !== flowV6.copyHash(draft)) {
         act.business_version++;
         draft.mailgen_meta.business_version = act.business_version;
@@ -2589,6 +2622,7 @@ const server = http.createServer(async (req, res) => {
           subject: draft.subject, body: draft.body, discountNum: draft.discount,
           coupon: draft.coupon, audience: draft.audience, locale: draft.locale,
           brand: draft.brand, product: draft.product, category: draft.mailgen_meta?.product_category || imageAct?.plan_card?.category || '',
+          flow_version: imageAct?.flow_version,
         };
         if (productImageId) {
           const prod = store.getProduct(productImageId);

@@ -7,6 +7,22 @@ const { makeAcceptanceAct } = require('../lib/acceptance/assert');
 function act() { const a = makeAcceptanceAct('v6'); flow.initialize(a); return a; }
 function engine(env) { return new IGDE({ aiEnabled: true, callAI: async () => env, criticMode: 'off' }); }
 
+test('send approval content hash binds the frozen cart URL', () => {
+  const draft = { subject: 'Reminder', body: 'Your cart', mailgen_meta: { cart_url: 'https://original.example/cart' } };
+  const approved = flow.copyHash(draft);
+  draft.mailgen_meta.cart_url = 'https://replacement.example/cart';
+  assert.notEqual(flow.copyHash(draft), approved);
+});
+
+test('high-discount proposals warn about profit without committing the candidate', async () => {
+  const a = act();
+  flow.applyChanges(a, [{ op: 'set', slot: 'offer', value: '10% off', evidence: '10% off' }], '10% off');
+  const r = await engine({ changes: [{ op: 'propose', slot: 'offer', value: '90% off', evidence: '90% off' }] }).handle(a, '改成90% off怎么样');
+  assert.equal(a.needs.offer.value, '10% off');
+  assert.equal(a.flow_state.candidates[0].new, '90% off');
+  assert.match(r.reply, /可能显著降低利润/);
+});
+
 test('common natural audience phrases resolve behavior without ignoring additional constraints', () => {
   const rows = [{ id: 1, intent: '加购未付' }, { id: 2, intent: '下单未付' }];
   for (const label of ['加购了没付款的客人', '加购了没结账的人']) {

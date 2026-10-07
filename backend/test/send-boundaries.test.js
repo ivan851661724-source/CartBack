@@ -8,10 +8,11 @@ const net = require('node:net');
 const { spawn } = require('node:child_process');
 const { Store } = require('../lib/store');
 const execution = require('../lib/execution');
+const flow = require('../lib/conversation-v6');
 
-async function fixture(t, hold = '', real = false) {
+async function fixture(t, hold = '', real = false, provider = 'resend', overrides = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartback-send-boundaries-'));
-  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ shopBrand: 'ReviewBrand', publicBaseUrl: 'https://review.example', mode: real ? 'real' : 'demo', espKey: 'test', espFrom: 'sender@review.example', espApiUrl: 'https://esp.test/emails', ...(hold === 'banner' || hold === 'code-failure' ? { stores: [{ type: 'mock', createFails: hold === 'code-failure' }] } : {}) }));
+  fs.writeFileSync(path.join(dir, 'config.json'), JSON.stringify({ shopBrand: 'ReviewBrand', publicBaseUrl: 'https://review.example', mode: real ? 'real' : 'demo', espProvider: provider, smtpHost: 'smtp.test', smtpUser: 'test', smtpPass: 'test', espKey: 'test', espFrom: 'sender@review.example', espApiUrl: 'https://esp.test/emails', ...(hold === 'banner' || hold === 'code-failure' ? { stores: [{ type: 'mock', createFails: hold === 'code-failure' }] } : {}), ...overrides }));
   const listener = net.createServer();
   await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
   const port = listener.address().port;
@@ -40,11 +41,15 @@ async function fixture(t, hold = '', real = false) {
     const render = require(root + '/lib/render');
     const originalRender = render.renderCampaign;
     render.renderCampaign = async function(o) {
-      const result = await originalRender(o);
+      const result = await originalRender(process.env.TEST_HOLD === 'translate' ? { ...o, translateFn: async (text, locale) => locale === 'fr' ? 'FR: ' + text : locale === 'pt' ? 'PT: ' + text : text } : o);
       if (armed && process.env.TEST_HOLD === 'render') { armed = false; await pause('render'); }
       return result;
     };
     const originalFetch = global.fetch;
+    require(root + '/lib/smtp').sendSmtp = async options => {
+      process.send({ phase: 'esp', payload: { to: [options.to], subject: options.subject, text: options.text, html: options.html } });
+      return { messageId: 'smtp-test' };
+    };
     let failedOnce = false;
     global.fetch = async function(url, options) {
       if (String(url).startsWith('https://esp.test')) {
@@ -79,7 +84,7 @@ async function fixture(t, hold = '', real = false) {
   let token;
   for (let i = 0; i < 50 && !token; i++) { try { token = (await (await fetch(base + '/api/bootstrap')).json()).token; } catch {} if (!token) await new Promise(r => setTimeout(r, 50)); }
   assert.ok(token);
-  const api = async (p, body) => { const response = await fetch(base + p, { method: body === undefined ? 'GET' : 'POST', headers: { 'Content-Type': 'application/json', 'x-local-token': token }, body: body === undefined ? undefined : JSON.stringify(body) }); const raw = await response.text(); return { status: response.status, json: raw.startsWith('data:') ? null : JSON.parse(raw), raw }; };
+  const api = async (p, body, method = body === undefined ? 'GET' : 'POST') => { const response = await fetch(base + p, { method, headers: { 'Content-Type': 'application/json', 'x-local-token': token }, body: body === undefined ? undefined : JSON.stringify(body) }); const raw = await response.text(); return { status: response.status, json: raw.startsWith('data:') ? null : JSON.parse(raw), raw }; };
   const db = change => { const store = new Store({ dbFile: path.join(dir, 'data.sqlite') }); store.init(); try { return change(store); } finally { store.b.close(); } };
   const act = (await api('/api/act', {})).json.act;
   db(s => { act.stage = 'S2'; act.needs = { audience: '加购未付', reason: '忘记结账', offer: '无额外优惠', goal: '挽回100单' }; s.upsertAct(act); });
@@ -148,6 +153,125 @@ test('edited fields reach ESP and preview while unchanged variant fields retain 
   assert.ok(preview.json.tiers.filter(v => v.count > 0).every(v => v.subject === 'Merchant edited subject'));
   assert.equal(saved.html, '', 'edited copy must not attach stale HTML');
   assert.equal(f.db(s => s.getDraft(did)).mailgen_meta.copy_edits.subject, 'Merchant edited subject');
+});
+
+test('saved edited HTML reaches ESP with the approved body', async t => {
+  const f = await fixture(t, '', true);
+  const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
+  const did = cf.json.draft_id;
+  const save = await f.api(`/api/draft/${did}`, { subject: 'Saved title', body: 'Saved body' }, 'PUT');
+  assert.equal(save.status, 200);
+  assert.match(save.json.draft.html, /Saved body/);
+  await f.api(`/api/draft/${did}/send`, {});
+  const esp = await f.phase('esp');
+  assert.ok(esp.payload.some(m => m.html && m.html.includes('Saved body')));
+  assert.ok(esp.payload.every(m => m.subject === 'Saved title' && m.text.includes('Saved body')));
+  assert.equal((await f.finish(did)).status, 'sent');
+});
+
+for (const provider of ['resend', 'brevo', 'smtp']) test(`${provider}: saved HTML uses expanded recipient copy, translated language and absolute image URLs`, async t => {
+  const f = await fixture(t, 'translate', true, provider);
+  f.db(s => {
+    s._write('audience', [
+      { id: 'en-person', email: 'alice@example.com', name: 'Alice', intent: '加购未付', locale: 'en', timezone: 'America/New_York', created_at: Date.now() },
+      { id: 'fr-person', email: 'bob@example.com', name: 'Bob', intent: '加购未付', locale: 'fr', timezone: 'America/New_York', created_at: Date.now() },
+      { id: 'pt-person', email: 'carla@example.com', name: 'Carla', intent: '加购未付', locale: 'pt', timezone: 'America/New_York', created_at: Date.now() },
+    ]);
+  });
+  const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
+  assert.equal(cf.status, 200);
+  const did = cf.json.draft_id;
+  f.db(s => { const d = s.getDraft(did); d.image_path = 'hero image.png'; s.upsertDraft(d); });
+  const saved = await f.api(`/api/draft/${did}`, { subject: 'Hello {{name}}', body: 'Hi {{name}}, your {{product}} from {{brand}}. Code {{coupon}}.' }, 'PUT');
+  assert.equal(saved.status, 200);
+  await f.api(`/api/draft/${did}/send`, {});
+  const esp = await f.phase('esp');
+  const payloads = provider === 'resend' ? esp.payload : [esp.payload, (await f.phase('esp')).payload, (await f.phase('esp')).payload];
+  const messages = payloads.map(m => provider === 'brevo' ? { to: m.to.map(r => r.email), subject: m.subject, text: m.textContent, html: m.htmlContent } : m);
+  assert.equal(messages.length, 3);
+  for (const m of messages) {
+    assert.ok(m.html);
+    assert.doesNotMatch(m.html, /\{\{|\}\}/);
+    assert.match(m.html, /src="https:\/\/review\.example\/api\/image\/hero%20image\.png"/);
+    assert.match(m.html, /<a href="https:\/\/cartback\.demo"><img src=/);
+    assert.doesNotMatch(m.html, /[\u4e00-\u9fff]/);
+    assert.ok(m.html.includes(m.text), JSON.stringify(m));
+    assert.ok(m.html.includes(m.subject));
+  }
+  const french = messages.find(m => m.to.includes('bob@example.com'));
+  assert.match(french.html, /FR:/);
+  assert.match(messages.find(m => m.to.includes('carla@example.com')).html, /PT:/);
+  assert.equal((await f.finish(did)).status, 'sent');
+  assert.match(saved.json.draft.html, /src="https:\/\/review\.example\/api\/image\/hero%20image\.png"/);
+});
+
+test('approved queued delivery keeps its saved cart URL after shop settings change', async t => {
+  const f = await fixture(t, 'render', true, 'resend', { shopCartUrl: 'https://original.example/cart' });
+  f.db(s => {
+    const a = s.getAct(f.act.id); flow.initialize(a);
+    flow.applyChanges(a, [{ op: 'set', slot: 'offer', value: '无优惠', evidence: '无优惠' }], '无优惠');
+    s.upsertAct(a);
+  });
+  const ready = f.db(s => s.getAct(f.act.id));
+  const prepared = await f.api(`/api/act/${ready.id}/confirm`, { expected_business_version: ready.business_version });
+  assert.equal(prepared.status, 200);
+  const did = prepared.json.draft_id;
+  f.db(s => { const d = s.getDraft(did); d.image_path = 'hero.png'; s.upsertDraft(d); });
+  const saved = await f.api(`/api/draft/${did}`, { subject: 'Saved reminder', body: 'Come back whenever you are ready.', expected_business_version: prepared.json.act.business_version }, 'PUT');
+  assert.equal(saved.status, 200);
+  assert.match(saved.json.draft.html, /original\.example\/cart/);
+  f.arm();
+  const queued = await f.api(`/api/draft/${did}/send`, { expected_business_version: saved.json.act.business_version });
+  assert.equal(queued.status, 202);
+  await f.phase('render');
+  const settings = await f.api('/api/config', { shopCartUrl: 'https://replacement.example/cart' });
+  assert.equal(settings.status, 200);
+  f.release();
+  const esp = await f.phase('esp');
+  const messages = Array.isArray(esp.payload) ? esp.payload : [esp.payload];
+  assert.ok(messages.length > 0);
+  for (const m of messages) {
+    assert.match(m.html, /original\.example\/cart/);
+    assert.doesNotMatch(m.html, /replacement\.example/);
+  }
+  assert.equal((await f.finish(did)).status, 'sent');
+});
+
+test('editing legacy drafts preserves their original HTML cart link', async t => {
+  const f = await fixture(t, '', false);
+  const prepared = await f.api(`/api/act/${f.act.id}/confirm`, {});
+  const did = prepared.json.draft_id;
+  f.db(s => {
+    const d = s.getDraft(did);
+    delete d.mailgen_meta.cart_url;
+    d.html = '<a href="https://original.example/cart?a=1&amp;b=2"><img src="old.png"></a>';
+    s.upsertDraft(d);
+  });
+  await f.api('/api/config', { shopCartUrl: 'https://replacement.example/cart' });
+  const saved = await f.api(`/api/draft/${did}`, { subject: 'Updated reminder', body: 'Updated copy' }, 'PUT');
+  assert.equal(saved.status, 200);
+  assert.equal(saved.json.draft.mailgen_meta.cart_url, 'https://original.example/cart?a=1&b=2');
+  assert.match(saved.json.draft.html, /original\.example/);
+  assert.doesNotMatch(saved.json.draft.html, /replacement\.example/);
+});
+
+test('delivery without a public image base preserves a clear cart CTA', async t => {
+  const f = await fixture(t, '', true, 'resend', { publicBaseUrl: '', shopCartUrl: 'https://shop.example/cart' });
+  const cf = await f.api(`/api/act/${f.act.id}/confirm`, {});
+  const did = cf.json.draft_id;
+  f.db(s => { const d = s.getDraft(did); d.image_path = 'local-hero.png'; s.upsertDraft(d); });
+  const saved = await f.api(`/api/draft/${did}`, { subject: 'Reminder', body: 'Your order is waiting.' }, 'PUT');
+  assert.equal(saved.status, 200);
+  assert.match(saved.json.draft.html, /<img/);
+  await f.api(`/api/draft/${did}/send`, {});
+  const esp = await f.phase('esp');
+  const messages = Array.isArray(esp.payload) ? esp.payload : [esp.payload];
+  assert.ok(messages.length > 0);
+  for (const m of messages) {
+    assert.doesNotMatch(m.html, /<img|Tap the image/);
+    assert.match(m.html, /<a href="https:\/\/shop\.example\/cart"[^>]*>Return to your cart<\/a>/);
+  }
+  assert.equal((await f.finish(did)).status, 'sent');
 });
 
 test('stale generated HTML cannot override persistent merchant edits in ESP payload', async t => {
