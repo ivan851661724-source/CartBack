@@ -75,6 +75,8 @@ export function mergeReplyAct(act: Act, reply: { reply: string; act?: Act; stage
 export const TOUR_IMG: Record<string, string> = {
   '点击左侧邮件tab查看所有生成的历史邮件。': '/tour/mail-sidebar.png',
   '生成邮件预览后会出现对应的详情卡片，点击底部按钮选择你想进行的操作。': '/tour/mail-card.png',
+  '预览和编辑功能支持编辑文本内容和样式，调整图片提示词，以及调整发送策略。': '/tour/mail-editor.png',
+  '也可以直接询问我来查找特定的邮件。': '/tour/mail-search.png',
   '点击左侧数据看板来查看过往邮件获单效果的数据统计。': '/tour/data-sidebar.png',
   '优先关注这一行，初步判断近期邮件获单效果。': '/tour/data-banner.png',
   '转化漏斗哪一栏的百分比掉得最多，就优先优化哪一环。': '/tour/data-funnel.png',
