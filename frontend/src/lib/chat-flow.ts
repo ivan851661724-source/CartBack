@@ -62,3 +62,15 @@ export function mergeReplyAct(act: Act, reply: { reply: string; act?: Act; stage
     planCard: reply.planCard === undefined ? current.planCard : reply.planCard,
   };
 }
+
+/** F5 导览配图（2026-10-07）：导览话术句 → 静态示意图映射（UX 406-2671 / 616-7875）。
+ *  切图由设计导出放入 public/tour/ 即生效；缺图时 MessageBubble onError 隐藏不留白。
+ *  只做展示映射——TOUR_SCRIPTS 与 blocked 挂起逻辑零改动。 */
+export const TOUR_IMG: Record<string, string> = {
+  '点击左侧邮件tab查看所有生成的历史邮件。': '/tour/mail-sidebar.png',
+  '生成邮件预览后会出现对应的详情卡片，点击底部按钮选择你想进行的操作。': '/tour/mail-card.png',
+  '点击左侧数据看板来查看过往邮件获单效果的数据统计。': '/tour/data-sidebar.png',
+  '优先关注这一行，初步判断近期邮件获单效果。': '/tour/data-banner.png',
+  '转化漏斗哪一栏的百分比掉得最多，就优先优化哪一环。': '/tour/data-funnel.png',
+  '回流GMV，这个量化投放指标。': '/tour/data-trend.png',
+};
