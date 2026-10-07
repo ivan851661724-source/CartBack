@@ -244,7 +244,7 @@ export default function ChatView() {
               <p>活动信息已更新，请重新生成并核对当前版本。</p>
             </details>}
             {!streaming && replyChips.length > 0 && (
-              <div style={{ display: 'flex', gap: '8px', padding: '6px 16px 2px', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '8px', padding: '8px 0 0', flexWrap: 'wrap' }}>
                 {replyChips.map((c, i) => (
                   <button
                     key={`${i}-${c}`}
@@ -254,17 +254,17 @@ export default function ChatView() {
                     style={{
                       display: 'inline-flex', alignItems: 'center', gap: '6px',
                       padding: '7px 13px', borderRadius: '9px',
-                      border: '0.5px solid #DDE2E8', background: '#fff', color: 'var(--text)',
+                      border: 'none', background: '#E6E9ED', color: 'var(--text)',
                       fontSize: '12.5px', fontWeight: 500, cursor: 'pointer',
-                      whiteSpace: 'nowrap', transition: 'all .15s',
+                      whiteSpace: 'nowrap', transition: 'background .15s',
                     }}
                     onMouseEnter={(e) => {
-                      e.currentTarget.style.borderColor = '#FF7F4D';
-                      e.currentTarget.style.background = 'var(--brand-soft)';
+                      e.currentTarget.style.background = '#FF7F4D';
+                      e.currentTarget.style.color = '#FFFFFF';
                     }}
                     onMouseLeave={(e) => {
-                      e.currentTarget.style.borderColor = '#DDE2E8';
-                      e.currentTarget.style.background = '#fff';
+                      e.currentTarget.style.background = '#E6E9ED';
+                      e.currentTarget.style.color = 'var(--text)';
                     }}
                   >
                     {c}
