@@ -58,6 +58,20 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
   const tourImgs = m.role === 'assistant' && m.content
     ? Object.entries(TOUR_IMG).filter(([line]) => m.content.includes(line))
     : [];
+  // 导览穿插渲染：按 TOUR_IMG 关键句切分内容，每段文字后面紧跟对应配图
+  const tourSegments: { text: string; img?: string }[] = [];
+  if (tourImgs.length > 0 && m.content) {
+    let remaining = m.content;
+    for (const [line, src] of tourImgs) {
+      const idx = remaining.indexOf(line);
+      if (idx >= 0) {
+        tourSegments.push({ text: remaining.slice(0, idx + line.length) });
+        tourSegments.push({ text: '', img: src });
+        remaining = remaining.slice(idx + line.length);
+      }
+    }
+    if (remaining.trim()) tourSegments.push({ text: remaining });
+  }
   const parsed = m.role === 'assistant' && m.content ? splitChecklist(m.content) : null;
   if (m.role === 'user') {
     return (
@@ -79,7 +93,22 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
             }}>{badge}</span>
           </div>
         )}
-        {parsed && parsed.checklist.length >= 2 ? (
+        {tourSegments.length > 0 ? (
+          tourSegments.map((seg, idx) => (
+            <div key={idx}>
+              {seg.text && <span>{seg.text}</span>}
+              {seg.img && (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img
+                  src={seg.img}
+                  alt="导览示意图"
+                  onError={(e) => { e.currentTarget.style.display = 'none'; }}
+                  style={{ display: 'block', marginTop: 8, marginBottom: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
+                />
+              )}
+            </div>
+          ))
+        ) : parsed && parsed.checklist.length >= 2 ? (
           <>
             {parsed.before && <>{parsed.before}<br /></>}
             <Checklist items={parsed.checklist} />
@@ -88,16 +117,6 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
         ) : (
           m.content
         )}
-        {tourImgs.map(([, src], idx) => (
-          // eslint-disable-next-line @next/next/no-img-element
-          <img
-            key={idx}
-            src={src}
-            alt="导览示意图"
-            onError={(e) => { e.currentTarget.style.display = 'none'; }}
-            style={{ display: 'block', marginTop: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
-          />
-        ))}
       </div>
     </div>
   );
