@@ -324,10 +324,11 @@ async function handle(engine, act, text, opts = {}) {
   }
   act.messages.push({ role: 'user', content: text, ts: Date.now() }, { role: 'assistant', content: reply, ts: Date.now() });
   act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
-  const actions = refreshActions(act);
-  if (opts.persist) await opts.persist(act);
+  // 导览轮不更新/不下发 action 按钮与候选（用户实测：功能说明不应混入「先看邮件预览」等操作按钮）
+  const actions = tour ? (act.flow_state.actions || []) : refreshActions(act);
+  if (!tour && opts.persist) await opts.persist(act);
   return { reply, stage: act.stage, needs: act.needs, planCard: card, chips: tour?.chips || [], askedSlot: null,
-    availableActions: actions, appliedChanges: applied, pendingCandidates: act.flow_state.candidates,
+    availableActions: tour ? [] : actions, appliedChanges: applied, pendingCandidates: tour ? [] : act.flow_state.candidates,
     businessVersion: act.business_version, engine: env && !error && engine.aiEnabled ? 'online' : 'degraded', guardrailHits: [],
     agentMeta: { llmCalls: env || error ? 1 : 0, providerRequests: env || error ? 1 : 0, usage: env?.usage } };
 }
