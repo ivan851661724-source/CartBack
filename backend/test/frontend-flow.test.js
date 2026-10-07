@@ -158,7 +158,9 @@ test('exit actions require complete needs and an actionable card; conflicts supp
   assert.deepEqual(replyChipsFor(act, ['好，帮我写一封'], null), []);
   assert.deepEqual(replyChipsFor(act, ['a', 'b'], 'audience'), ['a', 'b']);
   act.memory.conflicts = []; act.needs.goal = '';
-  assert.deepEqual(replyChipsFor(act, ['好，帮我写一封'], null), []);
+  // 2026-10-07 UX 481-7578 契约更新：采集期（未齐槽）后端下发的出口 chips 照常显示（开场/中段都带出口，
+  // 「需要现在就编写邮件吗？」是 UX 稿的常驻出口）；仅冲突与故障恢复态抑制（见 replyChipsFor 注释）
+  assert.deepEqual(replyChipsFor(act, ['好，帮我写一封'], null), ['好，帮我写一封']);
 });
 test('SSE without done rejects instead of inventing empty needs and S0', async () => {
   const original = global.fetch;

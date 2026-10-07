@@ -2159,8 +2159,8 @@ const server = http.createServer(async (req, res) => {
       if (body.flow_version === 6) {
         flowV6.initialize(act);
         act.execution_snapshot = null;
-        op.reply = (hasAnyAct ? '' : '欢迎使用百客，我是你的智能邮件营销助手。\n') + '这批邮件想挽回哪拨客人？你可以直接说需求，也可以先让我写个预览。原因和量化目标暂时不知道也没关系。';
-        op.chips = [];
+        // 话术层对齐 UX 481-7578（2026-10-07）：v6 会话开场沿用 opening() 的欢迎语/recap/四槽清单/尾句/出口 chips
+        // （不再以 v6 专属开场句覆盖、不清空 chips）；v6 协议机制（initialize/refreshActions/候选流）不动。
       }
       act.messages.push({ role: 'assistant', content: op.reply, ts: Date.now() });
       // Wave 2 closed 触发点（Wave 1 遗留补齐）：新建会话时把该用户旧的无 closed act 置 stage=closed（只读归档）

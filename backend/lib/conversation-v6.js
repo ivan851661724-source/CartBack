@@ -309,6 +309,19 @@ async function handle(engine, act, text, opts = {}) {
   }
   if (!env && !tour) reply = `消息已保存，${error ? '当前模型理解暂不可用' : '当前未连接对话模型'}；你可以查看或编辑已有方案，恢复后继续。`;
   if (!reply) reply = '已保存当前信息，你可以继续补充，或先看邮件预览。';
+  // 中段递减清单（UX 481-7578 第二条气泡，2026-10-07 话术对齐）：采集期部分缺槽 → 回复尾部附 UX 原文。
+  // 只加展示行——候选/动作机制零改动；导览轮（tour）与预览轮（card）不叠加；标签与 flow-2 同源（UX 版）。
+  if (!tour && !card && (act.stage === 'S0' || act.stage === 'S1')) {
+    // v6 候选哲学：needs 空是常态（信息以 pending candidate 存在）——已填 needs ∨ 有待确认候选都算已收集
+    const pending = new Set((act.flow_state.candidates || []).map(c => String(c.slot).split('.')[0]));
+    const miss = ['audience', 'reason', 'offer', 'goal'].filter(k => !needs.slotText(act.needs, k) && !pending.has(k));
+    if (miss.length > 0 && miss.length < 4) {
+      const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
+      const names = miss.map(k => UX_LABEL[k] || k).join('、');
+      const line = `还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
+      if (!reply.includes(line)) reply += ` ${line}`;
+    }
+  }
   act.messages.push({ role: 'user', content: text, ts: Date.now() }, { role: 'assistant', content: reply, ts: Date.now() });
   act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
   const actions = refreshActions(act);
