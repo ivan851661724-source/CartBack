@@ -230,7 +230,7 @@ export default function ChatView() {
                 slice(0,3) 会把「我自己定」自由输入出口永久截掉）。
                 goal 槽 chips 走「chips+输入框」复合形态（P2-N4）：点击预填输入框补值，其余点击即发送。 */}
             {!streaming && act?.flow_version === 6 && (
-              <div style={{ display: 'flex', gap: '8px', padding: '4px 0 0', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '8px', padding: '4px 0 0', margin: '0 0 -14px', flexWrap: 'wrap' }}>
                 {(act.flow_state?.actions || []).filter(a => !['prepare_plan', 'save_preview', 'save_choices'].includes(a.kind)).map(action => (
                   <button
                     key={action.id}
@@ -269,7 +269,7 @@ export default function ChatView() {
               <p>活动信息已更新，请重新生成并核对当前版本。</p>
             </details>}
             {!streaming && replyChips.length > 0 && (
-              <div style={{ display: 'flex', gap: '8px', padding: '4px 0 0', flexWrap: 'wrap' }}>
+              <div style={{ display: 'flex', gap: '8px', padding: '4px 0 0', margin: '0 0 -14px', flexWrap: 'wrap' }}>
                 {replyChips.map((c, i) => (
                   <button
                     key={`${i}-${c}`}
