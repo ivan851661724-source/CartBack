@@ -264,7 +264,7 @@ input,textarea{font-family:inherit}
 /* agent 侧去头像+去气泡框（10-08 用户指令）：只保留文本和卡片 */
 /* agent 侧去头像+气泡透明（10-08）：布局不变，只去视觉 */
 .msg.agent.bare{gap:0}
-.msg.agent.bare .bubble{background:transparent;border:none;box-shadow:none;border-radius:0;padding:0}
+.msg.agent.bare .bubble{background:transparent;border:none;box-shadow:none;border-radius:0;padding:0 0 4px}
 .msg.user{align-self:flex-end;flex-direction:row-reverse}
 .msg.user .bubble{background:#FFF2EC;border:none;border-top-right-radius:3px;color:var(--text)}
 .typing{display:inline-flex;gap:4px;align-items:center;padding:2px 0}
