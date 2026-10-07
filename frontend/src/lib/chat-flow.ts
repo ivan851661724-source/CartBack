@@ -45,11 +45,17 @@ export function confirmationRecoveryFor(act?: Act | null): { reason: string; opt
 }
 
 export function replyChipsFor(act: Act | null, chips: Chips, askedSlot: string | null): Chips {
-  if (act?.flow_version === 6) return chips.filter(c => !EXIT_CHIPS.includes(c));
-  const ready = filledCount(act?.needs) === 4 && !hasUnresolvedConflicts(act);
-  const filtered = chips.filter(c => ready || !EXIT_CHIPS.includes(c));
-  return ready && act?.stage === 'S2' && act.planCard && !askedSlot && filtered.length === 0
-    ? EXIT_CHIPS : filtered;
+  // 2026-10-07 话术对齐 UX 481-7578：出口 chips 以后端下发为准（开场与中段都带出口，不再按就绪态过滤）。
+  // 保留两处既有契约的抑制：① 未解决冲突（C6.5② 裁决：澄清轮不引导确认，不混出口）；
+  // ② 故障恢复态（v6 resource_error / S2 建码失败——恢复选项接管，不出出口）。
+  // 就绪兜底：齐槽 + S2 + 有卡 + 本轮无追问 + 后端未发 chips 时注入出口三项。
+  if (hasUnresolvedConflicts(act) || confirmationRecoveryFor(act)) {
+    return chips.filter(c => !EXIT_CHIPS.includes(c));
+  }
+  const ready = filledCount(act?.needs) === 4;
+  const nonExit = chips.filter(c => !EXIT_CHIPS.includes(c));
+  if (ready && act?.stage === 'S2' && act.planCard && !askedSlot && nonExit.length === 0) return EXIT_CHIPS;
+  return chips;
 }
 
 export function mergeReplyAct(act: Act, reply: { reply: string; act?: Act; stage?: Act['stage']; needs?: Act['needs']; planCard?: Act['planCard'] }): Act {
