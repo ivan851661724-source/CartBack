@@ -40,16 +40,15 @@ function Checklist({ items }: { items: { label: string; desc: string }[] }) {
       {items.map((item, i) => (
         <div key={i} style={{
           display: 'inline-flex', alignItems: 'center', gap: '6px',
-          padding: '6px 12px', borderRadius: '8px',
-          background: 'var(--bg-input)', border: '0.5px solid var(--line)',
+          padding: 0, borderRadius: 0,
           fontSize: '12.5px', fontWeight: 500, color: 'var(--text)',
-          flex: '1 1 auto', minWidth: '140px', maxWidth: '100%',
+          flex: '1 1 auto', minWidth: '80px', maxWidth: '100%',
         }}>
           <span style={{
             width: '12px', height: '12px', borderRadius: '3px',
             border: '1.5px solid var(--muted)', flexShrink: 0,
           }} />
-          <span>{item.label}{item.desc ? `——${item.desc}` : ''}</span>
+          <span>{item.label}</span>
         </div>
       ))}
     </div>
