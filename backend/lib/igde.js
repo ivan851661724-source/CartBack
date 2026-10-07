@@ -611,6 +611,7 @@ class IGDE {
     }
     // 「我还需要的信息」清单（UX 481-7578 最新稿）：标签用 UX 前缀（挽回对象/流失原因/优惠方式/期待结果），
     // 不弹独立问句——清单即开场；无进度数字；extras 以可选附注呈现
+    parts.push('现在可以设计邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。');
     parts.push('我还需要的信息：');
     parts.push('· 挽回对象');
     parts.push('· 流失原因');
@@ -1271,7 +1272,7 @@ class IGDE {
       if (miss.length > 0 && miss.length < 4) {
         const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
         const names = miss.map(s => UX_LABEL[s] || s).join('、');
-        const line = `现在可以设计邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
+        const line = `还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
         if (!reply.includes(line)) reply += ` ${line}`;
       }
     }

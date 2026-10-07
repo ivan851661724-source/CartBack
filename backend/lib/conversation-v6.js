@@ -318,7 +318,7 @@ async function handle(engine, act, text, opts = {}) {
     if (miss.length > 0 && miss.length < 4) {
       const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
       const names = miss.map(k => UX_LABEL[k] || k).join('、');
-      const line = `现在可以设计邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
+      const line = `还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
       if (!reply.includes(line)) reply += ` ${line}`;
     }
   }
