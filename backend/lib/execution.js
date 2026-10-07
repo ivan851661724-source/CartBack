@@ -181,18 +181,20 @@ function resolveDiscountNum(card) {
  */
 function buildPlanCard({
   base, code = null, codeStatus = 'none', reachCount = 0, extras = [],
-  brand = '', unsubscribeOk = false, draftId = null, note = null, sendWindowText = null
+  brand = '', unsubscribeOk = false, draftId = null, note = null, sendWindowText = null, codeDefault = false
 }) {
   const b = base || {};
   const status = ['created', 'reused', 'none', 'pending'].includes(codeStatus) ? codeStatus : 'none';
   const percentOff = (status === 'created' || status === 'reused') ? (Number(b.discountNum) || 0) : 0;
   const offerText = b.offer || '';
   let text;
-  if (status === 'created') text = `折扣码 ${code}（已在你的店铺创建 ✅）`;
+  if (status === 'created' && codeDefault) text = `折扣码 ${code}（默认码 · 店铺未连接）`;
+  else if (status === 'created') text = `折扣码 ${code}（已在你的店铺创建 ✅）`;
   else if (status === 'reused') text = `折扣码 ${code}（店内现成码，已校验有效）`;
   else if (status === 'pending') text = !offerText || /待定|未决定|再想/.test(offerText) ? '优惠尚未决定' : /无优惠|不放优惠|不打折|none/i.test(offerText) ? '无优惠（无需创建折扣码）' : /%|折/.test(offerText) ? `${offerText}（折扣码将在确认后创建）` : `${offerText}（准备时核对执行方式）`;
   else text = offerText && parseOfferPercent(offerText) == null ? offerText : '本方案无折扣码';
   const discount = { text, code: code || null, code_status: status, percent_off: percentOff };
+  if (codeDefault) discount.default = true;   // 默认码标记：闸门⑤不要求店铺校验，卡面如实标注
   if (note) discount.note = note;
   const aovParsed = parseAov(extras);
   const estGmv = computeEstGmv({ reachCount, aov: aovParsed.aov, aovSource: aovParsed.source, percentOff });
@@ -233,7 +235,8 @@ function serializeSnapshot(planCard) {
       text: planCard.discount.text,
       code: planCard.discount.code || null,
       code_status: planCard.discount.code_status,
-      percent_off: planCard.discount.percent_off || 0
+      percent_off: planCard.discount.percent_off || 0,
+      ...(planCard.discount.default ? { default: true } : {})
     },
     estGmv: planCard.estGmv,
     frozen_at: Date.now()
@@ -278,6 +281,8 @@ function diffSnapshot(snapshot, draft) {
 /**
  * 频控：同收件人同活动（受众口径）72h 内不重发（PRD §3.4；窗口常量在 lib/config.js，
  * 「PRD 口径 7 天，挂起裁决先不动 72h」）。按商家（user_id）隔离。
+ * retryAt：全员被触达时，最早解除频控的时刻（= 被触达收件人中最早上次触达 + 窗口），
+ * 供闸门②「自动预约到未来时段发送」；未全员触达时为 null。
  */
 function frequencyFilter(store, recipients, draft, opts = {}) {
   const windowMs = opts.windowMs || FREQUENCY_WINDOW_MS;
@@ -286,15 +291,26 @@ function frequencyFilter(store, recipients, draft, opts = {}) {
   const campaignKey = (draft.audience || '').toLowerCase();
   const emailedEvents = store.getEvents().filter(e => e.type === 'emailed' && e.ts >= cutoff);
   const draftsById = new Map(store.getDrafts().map(d => [d.id, d]));
-  const recentlyEmailed = new Set();
+  const lastTouch = new Map();   // audience_id -> 72h 内最后触达时刻
   for (const e of emailedEvents) {
     const d = draftsById.get(e.draft_id);
     if (!d || (d.audience || '').toLowerCase() !== campaignKey) continue;
     if ((d.user_id || null) !== (draft.user_id || null)) continue;
-    recentlyEmailed.add(e.audience_id);
+    const prev = lastTouch.get(e.audience_id) || 0;
+    if (e.ts > prev) lastTouch.set(e.audience_id, e.ts);
   }
-  const allow = recipients.filter(r => !recentlyEmailed.has(r.id));
-  return { allow, skipped: recipients.length - allow.length };
+  const allow = recipients.filter(r => !lastTouch.has(r.id));
+  const skipped = recipients.length - allow.length;
+  let retryAt = null;
+  if (recipients.length > 0 && allow.length === 0 && skipped > 0) {
+    let earliest = Infinity;
+    for (const r of recipients) {
+      const t = lastTouch.get(r.id);
+      if (t && t < earliest) earliest = t;
+    }
+    if (earliest !== Infinity) retryAt = earliest + windowMs;
+  }
+  return { allow, skipped, retryAt };
 }
 
 /* --------------------------- holdout 对照组圈定（J3 前置子集） --------------------------- */
@@ -317,6 +333,13 @@ function selectHoldout(recipients, ratio = HOLDOUT_RATIO) {
 }
 
 /* ------------------------------ D4 五道发送闸门 ------------------------------ */
+/** 闸门 reason 里的时刻展示（MM-dd HH:mm，24h 制） */
+function fmtGateTime(t) {
+  if (!Number.isFinite(Number(t))) return '稍后';
+  const d = new Date(Number(t));
+  const p = n => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 const GATE_LABELS = {
   window: '时段（收件人当地时间合理时段）',
   frequency: '频次（72 小时内未被触达）',
@@ -348,14 +371,17 @@ async function evaluateChecklist(o = {}) {
     ...(windowPass ? {} : { reason: `收件人主流时区（${tz}）当地时间 ${String(hour).padStart(2, '0')}:00 不在合理发送时段（${String(SEND_WINDOW_START_HOUR).padStart(2, '0')}:00–${String(SEND_WINDOW_END_HOUR).padStart(2, '0')}:00），将缓发到下一合理时段` })
   }];
 
-  // ② 频次：72h 内未被触达（触达过的剔除出净值名单；全被剔除才判不过）
+  // ② 频次：72h 内未被触达（触达过的剔除出净值名单）。
+  //    无触达记录不判「已被触达」（修 0 人名单误报）；全员被触达不再硬拒，
+  //    改为自动预约：retryAt = 最早解除频控时刻，闸门语义与时段缓发一致。
   const freq = frequencyFilter(store, recipients, draft, { clock: now });
-  const freqPass = freq.allow.length > 0;
+  const freqPass = freq.allow.length > 0 || freq.skipped === 0;
+  const freqRetryAt = (!freqPass && freq.retryAt) ? freq.retryAt : null;
   items.push({
     gate: 'frequency', label: GATE_LABELS.frequency, pass: freqPass,
     ...(freqPass
       ? (freq.skipped ? { reason: `${freq.skipped} 名收件人 72 小时内已被触达，已剔除出本轮名单` } : {})
-      : { reason: '这批收件人 72 小时内都已被同场活动触达，先别打扰了' })
+      : { reason: `这批收件人 72 小时内已被同场活动触达，将自动预约到 ${fmtGateTime(freq.retryAt)} 解除频控后发送`, retryAt: freq.retryAt })
   });
 
   // ③ 白标：署名 = 商家品牌（草稿创建时已解析固化；'CartBack' = 工具默认名 → 未白标）
@@ -389,6 +415,9 @@ async function evaluateChecklist(o = {}) {
       amountReason = `草稿与方案卡快照不一致（${diff.fields.map(f => DIFF_LABEL[f] || f).join('、')}），已按 P0 事故拦截`;
     } else if (codeStatus === 'none') {
       amountReason = '本方案无折扣码'; // pass + 标注
+    } else if (snapshot.discount && snapshot.discount.default) {
+      // 默认码（店铺未连接时出的品牌+折扣+OFF 码）：不要求店铺校验，如实标注即可
+      amountReason = `默认码 ${code}（店铺未连接）；连接店铺后建议替换为真实店铺券`; // pass + 标注
     } else if (!connector || !connector.supportsDiscountCodes || !connector.supportsDiscountCodes()) {
       amountPass = false;
       amountReason = '店铺未连接，无法校验折扣码真实存在（宁缓发不错发）';
@@ -415,6 +444,7 @@ async function evaluateChecklist(o = {}) {
     net,
     skippedByFrequency: freq.skipped,
     windowRetryAt,
+    freqRetryAt,
     holdoutPlan,
     timezone: tz
   };

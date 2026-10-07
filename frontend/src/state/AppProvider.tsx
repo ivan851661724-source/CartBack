@@ -168,6 +168,9 @@ interface AppState {
   opportunities: Opportunities | null;
   planPushed: boolean;
   planShown: PlanShown;
+  /** 复测 10-07 需求③：用户发送普通聊天消息后，置底的方案/确认卡收起为一行记录（可展开），
+   *  不再每轮弹出打断对话；显式确认词 / 动作按钮 / 刷新恢复会重新展开 */
+  planCollapsed: boolean;
   lastSent: { res: SendResult; draft: Draft } | null;
   me: Me | null;
   engine: Engine;   // 引擎健康态：done 帧与 GET /api/state 都可能更新；初始缺省 online
@@ -240,6 +243,8 @@ interface AppContextValue extends AppState {
   setChatPlaceholder: (v: string) => void;
   setPlanShown: (p: PlanShown) => void;
   setPlanPushed: (v: boolean) => void;
+  /** 方案/确认卡被聊天收起后重新展开（一行记录上的「展开」按钮） */
+  expandPlan: () => void;
   setEditingDraft: (d: Draft | null) => void;
   setDrawerAud: (a: Audience | null) => void;
   setImportOpen: (v: boolean) => void;
@@ -265,7 +270,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState>({
     token: null, status: null, act: null, acts: [], kpis: null, trend: null, metrics: {},
     drafts: [], audience: [], opportunities: null,
-    planPushed: false, planShown: null, lastSent: null, me: null,
+    planPushed: false, planShown: null, planCollapsed: false, lastSent: null, me: null,
     engine: 'online', chips: [], askedSlot: null,
     confirmState: null, confirmFailed: null, confirmBusy: false,
     campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],
@@ -523,7 +528,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     anchoredActRef.current = next;
     patch({
       act: next, historyOpen: false, activeTab: 'chat',
-      planPushed: Boolean(next.flow_version === 6 && next.planCard), planShown: next.flow_version === 6 && next.planCard ? 'confirm' : null,
+      planPushed: Boolean(next.flow_version === 6 && next.planCard), planShown: next.flow_version === 6 && next.planCard ? 'confirm' : null, planCollapsed: false,
       confirmState: preparedStateFor(next), confirmFailed: confirmationRecoveryFor(next),
       chips: [],   // chips 属于上一会话的最新回复，切会话即失效
       askedSlot: null,   // 追问槽位同属上一会话
@@ -543,7 +548,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       patch({
         act: r.act, acts: [r.act, ...state.acts.filter(a => a.id !== r.act.id)],
         historyOpen: false, activeTab: 'chat',
-        planPushed: false, planShown: null,
+        planPushed: false, planShown: null, planCollapsed: false,
         confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
         chips: r.chips,   // P0-N4：开场白 chips 随建会话响应下发（服务端 opening 同源），不再置空丢失
         askedSlot: null,   // 新会话尚无追问
@@ -583,7 +588,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       anchoredActRef.current = nextAct;
       patch({
         act: nextAct, acts, activeTab: 'chat',
-        planPushed: false, planShown: null,
+        planPushed: false, planShown: null, planCollapsed: false,
         confirmState: null, confirmFailed: null,   // confirm 状态属于上一会话，切会话即失效
         chips: [],   // chips 属于上一会话的最新回复，切会话即失效
         askedSlot: null,   // 追问槽位同属上一会话
@@ -612,6 +617,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return;
     }
     patch({ chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER });
+    // 需求③：普通聊天消息发出即收起置底方案/确认卡（收起为一行记录，不打断对话）；
+    // 显式确认词（可以/去发…）会在 finalize 里重新展开
+    if (state.planShown === 'confirm') patch({ planCollapsed: true });
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
     const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
@@ -646,6 +654,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
           acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
           planPushed: pushConfirm ? true : prev.planPushed,
           planShown: pushConfirm ? 'confirm' : nextAct.planCard ? prev.planShown : null,
+          planCollapsed: pushConfirm ? false : prev.planCollapsed,
           ...(r.stage && r.stage !== 'S3' ? { confirmState: null, confirmFailed: null } : {}),
         };
       });
@@ -716,7 +725,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const resetData = useCallback(async () => {
     await api('/api/reset', { method: 'POST' });
     anchoredActRef.current = null;
-    patch({ act: null, acts: [], planPushed: false, planShown: null, lastSent: null, chips: [], askedSlot: null, confirmState: null, confirmFailed: null, pendingBatches: [] });
+    patch({ act: null, acts: [], planPushed: false, planShown: null, planCollapsed: false, lastSent: null, chips: [], askedSlot: null, confirmState: null, confirmFailed: null, pendingBatches: [] });
     await loadState();
     await ensureAct();
     toast_('数据已重置');
@@ -766,7 +775,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     anchoredActRef.current = null;   // 锚点属账号数据，登出即失效（否则换号登录会锚到上一账号会话）
     patch({
       me: null, act: null, acts: [], drafts: [], audience: [], opportunities: null,
-      planPushed: false, planShown: null, lastSent: null, chips: [], askedSlot: null,
+      planPushed: false, planShown: null, planCollapsed: false, lastSent: null, chips: [], askedSlot: null,
       confirmState: null, confirmFailed: null,
       campaigns: [], blackout: EMPTY_BLACKOUT, global_paused: false, pendingBatches: [],   // 批次域属账号数据，登出一并清空
       welcome: null, storeBanner: null, prefs: {}, lastPlan: null,   // Wave4 新域同属账号数据
@@ -787,7 +796,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     actIndexRef.current.set(r.act.id, r.act);
     anchoredActRef.current = r.act;
     patch({
-      act: r.act, acts: [r.act, ...state.acts.filter(a => a.id !== r.act.id)], planPushed: false, planShown: null, activeTab: 'chat',
+      act: r.act, acts: [r.act, ...state.acts.filter(a => a.id !== r.act.id)], planPushed: false, planShown: null, planCollapsed: false, activeTab: 'chat',
       confirmState: null, confirmFailed: null,   // 新会话无 confirm 状态
       chips: [],   // preset 会话开场已定向受众，opening chips（受众三项）与下一问不同源，等首轮 done 帧
       askedSlot: null,
@@ -843,7 +852,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
             acts: prev.acts.map(a => (a.id === nextAct.id ? nextAct : a)),
             confirmState: out.previewOnly ? null : { actId: nextAct.id, planCard, checklist, holdout: checklist?.holdout ?? null },
             confirmFailed: null,
-            planShown: 'confirm', planPushed: true,
+            planShown: 'confirm', planPushed: true, planCollapsed: false,
             confirmBusy: false,
           };
         });
@@ -895,7 +904,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       if (result.act) setState(prev => {
         if (prev.act?.id !== result.act.id) return prev;
         const next = withPlanCard(result.act);
-        return { ...prev, act: next, acts: prev.acts.map(a => a.id === next.id ? next : a), chips: [], askedSlot: null, confirmState: preparedStateFor(next), planShown: next.planCard ? 'confirm' : null, planPushed: Boolean(next.planCard) };
+        return { ...prev, act: next, acts: prev.acts.map(a => a.id === next.id ? next : a), chips: [], askedSlot: null, confirmState: preparedStateFor(next), planShown: next.planCard ? 'confirm' : null, planPushed: Boolean(next.planCard), planCollapsed: false };
       });
       await loadState();
     } catch (e: any) { toast_(e?.message || '操作失败'); await loadState().catch(() => {}); }
@@ -1053,6 +1062,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     setChatPlaceholder: (v) => patch({ chatPlaceholder: v }),
     setPlanShown: (p) => patch({ planShown: p }),
     setPlanPushed: (v) => patch({ planPushed: v }),
+    expandPlan: () => patch({ planCollapsed: false }),
     setEditingDraft: (d) => patch({ editingDraft: d }),
     setDrawerAud: (a) => patch({ drawerAud: a }),
     setImportOpen: (v) => patch({ importOpen: v }),

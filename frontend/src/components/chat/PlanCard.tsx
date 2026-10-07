@@ -20,9 +20,22 @@ function money(n: number | undefined | null): string {
   return '$' + (Number(n) || 0).toFixed(2);
 }
 
-/** 折扣码徽标：code_status 三态 */
+/** 折扣码徽标：code_status 三态 + 默认码（店铺未连接）变体 */
 function DiscountBadge({ dis }: { dis?: PlanCardDiscount }) {
   if (!dis) return null;
+  if (dis.code_status === 'created' && dis.default && dis.code) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{
+          background: 'var(--bg-input)', color: 'var(--text)', border: '.5px solid var(--line)',
+          borderRadius: 999, padding: '4px 12px', fontSize: '12.5px', fontWeight: 700,
+        }}>
+          🎟 折扣码 {dis.code} · 默认码（店铺未连接）
+        </span>
+        <span style={{ color: 'var(--muted)', fontSize: '12.5px' }}>连接店铺后可替换为真实店铺券</span>
+      </div>
+    );
+  }
   if (dis.code_status === 'created' && dis.code) {
     return (
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>

@@ -81,6 +81,8 @@ export interface PlanCardDiscount {
   text: string;
   code: string | null;
   code_status: CodeStatus;
+  default?: boolean;      // 默认码（店铺未连接时出的 品牌+折扣+OFF 码，不要求店铺校验）
+  note?: string;
 }
 
 /** estGmv 算式（方案卡点击展开）：people 人 × 客单 aov × 挽回率 rate% − 折扣成本 discount_cost */
@@ -108,6 +110,7 @@ export interface ChecklistItem {
   pass: boolean;
   blocking?: boolean;   // false = 检测结果保留，但不拦截发送
   reason?: string;        // 未过原因（中文，红字展示）
+  retryAt?: number;       // 频控全员被触达时的自动预约时刻（不阻断，前端展示为定时发送）
 }
 
 /** 对照组（holdout）：frozen=false 时以 note 说明不设组原因 */

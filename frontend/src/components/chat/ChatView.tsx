@@ -32,7 +32,7 @@ export default function ChatView() {
   const {
     act, acts, drafts, opportunities, streaming, streamingText, planShown, lastSent,
     chatInput, chatPlaceholder, chips, askedSlot, engine, sendMsg, setChatInput, setChatPlaceholder,
-    setPlanShown, setPlanPushed, switchTab, setHistoryOpen,
+    setPlanShown, setPlanPushed, switchTab, setHistoryOpen, planCollapsed, expandPlan,
     confirmState, confirmFailed, confirmBusy, confirmPlan, runAction,
     campaigns, pendingBatches,
     lastPlan, notifications,
@@ -123,7 +123,7 @@ export default function ChatView() {
 
   // 确认卡（新契约）：四槽优先读 act.needs（三态对象走 needsValue），planCard 字段兜底；
   // source==='inferred' 的槽在该行显示「（我推断的，可改）」小标。
-  const confirmCard = !streaming && (act?.flow_version === 6 || (!hasUnresolvedConflicts(act) && !askedSlot)) && planShown === 'confirm' && act?.planCard ? act.planCard : null;
+  const confirmCard = !streaming && !planCollapsed && (act?.flow_version === 6 || (!hasUnresolvedConflicts(act) && !askedSlot)) && planShown === 'confirm' && act?.planCard ? act.planCard : null;
   const needsNow = act?.needs ?? null;
   // planCard reason 兜底：新契约为 reason；旧后端历史数据仍是 pain（键已删，运行时兜底读一次）
   const cardReason = confirmCard ? (confirmCard.reason || (confirmCard as { pain?: string }).pain) : undefined;
@@ -372,7 +372,14 @@ export default function ChatView() {
               </div>
             )}
             {/* 方案卡（confirm 200 后渲染在确认卡之后）：折扣徽标 / estGmv 算式 / 五项核对单 / 确认发送 */}
-            {confirmedHere && <PlanCardView />}
+            {confirmedHere && !planCollapsed && <PlanCardView />}
+            {/* 需求③：方案/确认卡聊天后收起为一行记录，可随时展开；不再每轮弹出打断对话 */}
+            {!streaming && planCollapsed && planShown === 'confirm' && act?.planCard && !hasSentForAct && (
+              <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', padding: '10px 16px 2px', fontSize: '12.5px', color: 'var(--muted)' }}>
+                <span>📋 {act.stage === 'S3' ? '发送方案卡已收起（未发送，不影响继续聊天）' : '邮件预览卡已收起'}——记录保留在对话流中</span>
+                <button className="btn sm ghost" onClick={expandPlan}>展开核对 / 发送</button>
+              </div>
+            )}
             {planShown === 'sent' && lastSent && (
               <SentBanner res={lastSent.res} draft={lastSent.draft} onSeeFlow={() => switchTab('data')} />
             )}

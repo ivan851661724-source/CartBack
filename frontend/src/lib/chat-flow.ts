@@ -13,10 +13,17 @@ export function planSendState(checklist?: Checklist | null) {
   if (!checklist || !Array.isArray(checklist.items)) {
     return { items: [], failItems: [], canSend: false as const, scheduled: false };
   }
-  const scheduled = Boolean(checklist.items.some(i => i.gate === 'window' && !i.pass));
-  const items = checklist.items.filter(i => i.gate !== 'unsubscribe').map(i => i.gate === 'window'
-    ? { ...i, pass: true, label: '定时发送', reason: undefined }
-    : i);
+  // 时段外 / 频控全员被触达（带 retryAt）→ 服务端会自动预约到未来时刻，不算阻断：
+  // 核对单内展示为「定时发送」通过项，按钮变「确认定时发送」（提交后 202 预约）
+  const scheduled = Boolean(
+    checklist.items.some(i => i.gate === 'window' && !i.pass) ||
+    checklist.items.some(i => i.gate === 'frequency' && !i.pass && i.retryAt)
+  );
+  const items = checklist.items.filter(i => i.gate !== 'unsubscribe').map(i => {
+    if (i.gate === 'window' && !i.pass) return { ...i, pass: true, label: '定时发送', reason: undefined };
+    if (i.gate === 'frequency' && !i.pass && i.retryAt) return { ...i, pass: true, label: '定时发送（频控解除后自动发送）', reason: undefined };
+    return i;
+  });
   const failItems = items.filter(i => !i.pass && i.blocking !== false);
   return { items, failItems, canSend: !failItems.length, scheduled };
 }

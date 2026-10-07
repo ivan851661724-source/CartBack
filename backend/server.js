@@ -1038,8 +1038,11 @@ async function sendDraft(draft, opts = {}) {
   if (!sendActCurrent(act, draft)) return failChangedSend(draft, checklist);
   if (!checklist.all_pass) {
     const failing = checklist.items.filter(i => !i.pass && i.blocking !== false);
-    if (failing.length === 1 && failing[0].gate === 'window' && !opts.noReschedule) {
-      return { deferred: true, retryAt: checklist.windowRetryAt, checklist: checklist.items };
+    // 可缓发闸门：时段（原有）+ 频次全员被触达（带 retryAt → 自动预约到解除时刻）
+    const deferrable = failing.length > 0 && failing.every(i => i.gate === 'window' || (i.gate === 'frequency' && i.retryAt));
+    if (deferrable && !opts.noReschedule) {
+      const times = [checklist.windowRetryAt, checklist.freqRetryAt].filter(Boolean);
+      return { deferred: true, retryAt: times.length ? Math.max(...times) : (Date.now() + 3600 * 1000), checklist: checklist.items };
     }
     return failDraftByGates(draft, checklist);
   }
@@ -1587,9 +1590,16 @@ async function createDraftFromCard(card, { actId = null, userId = null, authorit
 // 时序前置：S2 确认通过后、D3 出卡前，先调店铺 API 真实建码；
 //   成功（created/reused）或无钩子（none）→ 服务端同源序列化 planCard + 冻结 execution_snapshot + 建 draft，stage→S3；
 //   建码失败 → 409（不出卡、不建 draft、停留 S2，明示原因与三条出口）；
-//   未连接店铺 → 过渡期出无钩子卡（明示「未创建折扣码：连接店铺后可补」）。
-// 共同红线：卡面上绝不出现未真实存在的折扣码（code 一律取店铺连接器真实回执）。
+//   未连接店铺 → v6 给默认码（品牌+折扣+OFF，如 LEOSPHONECASE10OFF，卡面明示默认），店铺可用后换真实券。
+// 共同红线：卡面上不出现冒充店铺真实回执的码（默认码显式标注 default，闸门⑤按默认码口径放行）。
 const CONFIRM_FAIL_OPTIONS = ['重试建码', '改用店内现成码', '改发无钩子提醒信'];
+
+/** 默认折扣码：品牌字母数字 + 折扣 + OFF（用户口径示例 LEOSPHONECASE10OFF）；无品牌回落 COMEBACK */
+function defaultDiscountCode(brand, percent) {
+  const key = String(brand || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 20) || 'COMEBACK';
+  const p = Math.max(1, Math.round(Number(percent) || 10));
+  return `${key}${p}OFF`;
+}
 
 function checklistContract(raw, { frozen = false, note = null } = {}) {
   const holdout = {
@@ -1691,6 +1701,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     if (named) body = { ...body, reuse_code: named };
   }
   let note = null;
+  let defaultCode = false;   // 店铺未连接时出的默认码（卡面/闸门⑤按默认码口径明示）
   let createError = null;
   if (v6 && !body.nohook && !body.reuse_code && /免邮|包邮|赠品|满\s*\d+\s*减/.test(offerText)) createError = '当前店铺执行器尚不支持该优惠资源；预览和优惠选择已保留，请核对履约方式或选择支持的优惠';
 
@@ -1700,11 +1711,19 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     percent = 0;
     note = '改发无钩子提醒信：未创建折扣码';
   } else if (body && typeof body.reuse_code === 'string' && body.reuse_code.trim()) {
-    // 自带码出口：校验存在且有效后出卡（code_status=reused）
+    // 自带码出口：校验存在且有效后出卡（code_status=reused）；未连店铺 → 按用户给的码名出默认码
     const want = body.reuse_code.trim().toUpperCase();
     if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
-      if (v6) createError = '店铺未连接，当前优惠不能执行；请连接店铺或明确选择无优惠';
-      createError = '店铺未连接，无法校验现成折扣码「' + want + '」';
+      if (v6) {
+        // 未连店铺：按用户给的码名出默认码（SAVE20 → 20% off 口径，取码名数字，无则回落 10）
+        code = want;
+        codeStatus = 'created';
+        defaultCode = true;
+        percent = percent || parseInt(want.replace(/\D+/g, ''), 10) || 10;
+        note = `默认码（店铺未连接）：${want}；连接店铺后会替换为真实店铺券`;
+      } else {
+        createError = '店铺未连接，无法校验现成折扣码「' + want + '」';
+      }
     } else {
       try {
         const hit = await connectors.verifyDiscountCode(want);
@@ -1720,11 +1739,18 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     }
   } else if (percent != null && percent > 0) {
     if (!connectors || !connectors.supportsDiscountCodes || !connectors.supportsDiscountCodes()) {
-      if (v6) createError = '店铺未连接，当前优惠不能执行；请连接店铺或明确选择无优惠';
-      // 未连接店铺 → 过渡期：允许出无钩子 planCard（不含折扣码，卡上明示），发送入口保留
-      codeStatus = 'none';
-      percent = 0;
-      note = '未创建折扣码：连接店铺后可补';
+      if (v6) {
+        // 未连接店铺 → 默认码（品牌+折扣+OFF），卡面与闸门⑤按「默认码」口径明示，连接店铺后可换真实券
+        code = defaultDiscountCode(resolveMerchantBrand(act), percent);
+        codeStatus = 'created';
+        defaultCode = true;
+        note = `默认码（店铺未连接）：连接店铺后会替换为真实店铺券`;
+      } else {
+        // 旧协议过渡期：允许出无钩子 planCard（不含折扣码，卡上明示），发送入口保留
+        codeStatus = 'none';
+        percent = 0;
+        note = '未创建折扣码：连接店铺后可补';
+      }
     } else {
       // E2 主路径：先建码后出卡；每次方案新建码不复用历史码；code 必须来自店铺真实回执
       const named = execution.parseOfferCodeName(offerText);
@@ -1784,7 +1810,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
   const planCard = execution.buildPlanCard({
     base, code, codeStatus, reachCount, extras, brand,
     unsubscribeOk: Boolean(config.publicBaseUrl), draftId, note,
-    sendWindowText: null
+    sendWindowText: null, codeDefault: defaultCode
   });
   if (!config.visionKey) planCard.skip_image = true; // 未配图像 AI：出卡不跑图片生成（离线确定性）
   planCard.brand = brand;                            // 草稿/mailgen 品牌链消费（内部键）
@@ -2723,8 +2749,11 @@ const server = http.createServer(async (req, res) => {
       const gateCheck = await execution.evaluateChecklist({ act, draft, store, config, connector: connectors, recipients });
       const failing = gateCheck.items.filter(i => !i.pass && i.blocking !== false);
       if (failing.length) {
-        if (failing.length === 1 && failing[0].gate === 'window') {
-          const retryAt = gateCheck.windowRetryAt || (Date.now() + 3600 * 1000);
+        // 可缓发：时段（原有）+ 频次全员被触达（retryAt → 202 自动预约，不再 409 硬拒）
+        const deferrable = failing.every(i => i.gate === 'window' || (i.gate === 'frequency' && i.retryAt));
+        if (deferrable) {
+          const times = [gateCheck.windowRetryAt, gateCheck.freqRetryAt].filter(Boolean);
+          const retryAt = times.length ? Math.max(...times) : (Date.now() + 3600 * 1000);
           const { job } = queue.enqueue({
             type: 'send_draft', payload: { draftId: draft.id },
             dedupeKey: 'send:sched:' + draft.id + ':' + retryAt, runAfter: retryAt
@@ -2732,10 +2761,11 @@ const server = http.createServer(async (req, res) => {
           draft.status = 'queued';
           draft.scheduled_at = retryAt;
           store.upsertDraft(draft);
-          logEvent('send_deferred_window', { draft_id: draft.id, retry_at: retryAt, job_id: job.id, timezone: gateCheck.timezone });
+          const freqOnly = failing.some(i => i.gate === 'frequency' && i.retryAt);
+          logEvent(freqOnly ? 'send_deferred_frequency' : 'send_deferred_window', { draft_id: draft.id, retry_at: retryAt, job_id: job.id, timezone: gateCheck.timezone });
           return sendJson(res, 202, {
-            job_id: job.id, queued: true, scheduled_at: retryAt, deferred: 'window',
-            checklist: checklistContract(gateCheck, { frozen: false, note: '时段闸缓发，将在下一合理时段自动发送' }),
+            job_id: job.id, queued: true, scheduled_at: retryAt, deferred: freqOnly ? 'frequency' : 'window',
+            checklist: checklistContract(gateCheck, { frozen: false, note: '频控/时段缓发，将自动预约到可发送时刻' }),
             draft
           });
         }

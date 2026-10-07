@@ -115,17 +115,18 @@ test('D4② 频次闸：72h 内同活动已触达 → 第二场 409（demo 仿�
   assert.ok(sends1.every(r => r.status === 'sent' && r.gate_snapshot && r.tz), 'gate_snapshot/tz 留痕');
   db.close();
 
-  // 第二场：同受众新会话新方案 → 频次闸 409
+  // 第二场：同受众新会话新方案 → 频控全员被触达 → 202 自动预约到频控解除时刻（2026-10-07 需求①，不再 409 硬拒）
   const c2 = await fillAndConfirm(api, '加购未付');
   assert.equal(c2.planCard.discount.code_status, 'created');
   const s2 = await api(`/api/draft/${c2.draft_id}/send`, { method: 'POST', body: {} });
-  assert.equal(s2.status, 409, '第二场被频次闸拦截');
-  assert.equal(s2.json.ok, false);
-  assert.deepEqual(s2.json.checklist.items.map(i => i.gate), ['window', 'frequency', 'whitelabel', 'unsubscribe', 'amount_code']);
-  const freq = s2.json.checklist.items.find(i => i.gate === 'frequency');
-  assert.equal(freq.pass, false);
-  assert.ok(/72 小时/.test(freq.reason));
-  assert.ok(s2.json.checklist.all_pass === false);
+  assert.equal(s2.status, 202, '第二场自动预约（频控缓发，非 409 永久拒绝）');
+  assert.equal(s2.json.deferred, 'frequency');
+  assert.ok(Number.isFinite(s2.json.scheduled_at) && s2.json.scheduled_at > Date.now(), '预约到未来时刻');
+  const freq2 = s2.json.checklist.items.find(i => i.gate === 'frequency');
+  assert.equal(freq2.pass, false);
+  assert.ok(freq2.retryAt > Date.now(), '频次项携带 retryAt');
+  assert.ok(/自动预约/.test(freq2.reason), 'reason 说明自动预约');
+  assert.equal(s2.json.checklist.all_pass === false, true);
 });
 
 test('D4① 时段外且退订配置缺失 → 202 定时发送（不落 sends、不冻 holdout）', async (t) => {

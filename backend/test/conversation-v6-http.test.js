@@ -76,14 +76,33 @@ test('saving draft copy persists text, rendered preview and revision without sen
   const stale = await api(`/api/draft/${id}`, { expected_business_version: prepared.data.act.business_version, subject: 'Stale', body: 'Stale' }, 'PUT');
   assert.equal(stale.status, 409);
 });
-test('v6 preparation keeps requested discount without a connected shop and optional fields stay empty', async t => {
+test('v6 preparation without a connected shop issues a default code and keeps optional fields empty', async t => {
   const { api, update } = await fixture(t);
   const a = (await api('/api/act', { flow_version: 6 })).data.act;
-  const ready = update(a.id, x => flow.applyChanges(x, [{ op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' }, { op: 'set', slot: 'offer', value: '10% off', evidence: '10% off' }], '加购未付客户，10% off'));
+  const ready = update(a.id, x => flow.applyChanges(x, [
+    { op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' },
+    { op: 'set', slot: 'offer', value: '10% off', evidence: '10% off' },
+    { op: 'set', slot: 'category', value: '手机壳', evidence: '手机壳' },
+  ], '加购未付客户，10% off，手机壳'));
   const out = await api(`/api/act/${a.id}/confirm`, { expected_business_version: ready.business_version });
-  assert.equal(out.status, 409); assert.match(out.data.reason || out.data.error, /店铺|优惠/);
+  assert.equal(out.status, 200);
+  const dis = out.data.planCard.discount;
+  // 需求②：未连接店铺 → 默认码（品牌+折扣+OFF，如 TESTSHOP10OFF），显式标注 default
+  assert.equal(dis.code_status, 'created');
+  assert.equal(dis.default, true);
+  assert.equal(dis.code, 'TESTSHOP10OFF');
+  assert.match(dis.text, /默认码/);
   const saved = (await api('/api/state')).data.acts.find(x => x.id === a.id);
   assert.equal(saved.needs.offer.value, '10% off'); assert.equal(saved.needs.reason, null); assert.equal(saved.needs.goal, null);
+  // 闸门⑤：默认码不要求店铺校验（核对单放行，标注默认码）
+  const cl = await api(`/api/act/${a.id}/checklist`);
+  assert.equal(cl.status, 200);
+  const amount = cl.data.checklist.items.find(i => i.gate === 'amount_code');
+  assert.equal(amount.pass, true);
+  assert.match(amount.reason, /默认码/);
+  // 需求①：无触达记录时频次闸不再误判「已被触达」（0 人名单 → pass）
+  const freq = cl.data.checklist.items.find(i => i.gate === 'frequency');
+  assert.equal(freq.pass, true);
 });
 
 test('v6 preview edits persist, advance revision, and cannot be submitted with an old action', async t => {
@@ -123,12 +142,16 @@ test('v6 high-discount send requires risk acknowledgement before queueing or edi
   assert.notEqual(state.drafts.find(d => d.id === out.data.draft_id).subject, 'Do not save before approval');
 });
 
-test('v6 a saved existing coupon must be verified, never silently replaced with no coupon', async t => {
+test('v6 a saved existing coupon is kept as a default code without a store, never replaced with no coupon', async t => {
   const { api, update } = await fixture(t); const a = (await api('/api/act', { flow_version: 6 })).data.act;
   const ready = update(a.id, x => flow.applyChanges(x, [{ op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' }, { op: 'set', slot: 'offer', value: 'SAVE20', evidence: 'SAVE20' }], '加购未付客户，SAVE20'));
+  // 需求②：未连接店铺 → 用户指定码名按默认码放行（显式标注 default），不再 409 / 降级无优惠
   const out = await api(`/api/act/${a.id}/confirm`, { expected_business_version: ready.business_version });
-  assert.equal(out.status, 409); assert.match(out.data.reason || out.data.error, /校验|店铺/);
-  assert.equal((await api('/api/state')).data.drafts.filter(d => d.act_id === a.id).length, 0);
+  assert.equal(out.status, 200);
+  assert.equal(out.data.planCard.discount.code, 'SAVE20');
+  assert.equal(out.data.planCard.discount.default, true);
+  assert.equal(out.data.planCard.discount.percent_off, 20);
+  assert.equal(out.data.draft.coupon, 'SAVE20');
 });
 
 test('v6 manual choices work offline; preparation preserves approved HTML and image writes exclude sends', async t => {
@@ -177,9 +200,10 @@ test('profile management deletes only the selected policy and never repopulates 
 test('no-offer recovery returns a reviewable neutral preview before preparing a new draft', async t => {
   const { api, update } = await fixture(t, {}, true);
   const a = (await api('/api/act', { flow_version: 6 })).data.act;
+  // 触发准备失败改用「免邮」这类尚不支持的优惠资源（10% off 未连店铺现在出默认码，不再 409）
   const ready = update(a.id, x => {
-    flow.applyChanges(x, [{ op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' }, { op: 'set', slot: 'offer', value: '10% off', evidence: '10% off' }], '加购未付客户，10% off');
-    x.plan_card = { subject: 'Enjoy 10% off', body: 'Your 10% off is automatically applied.' }; x.stage = 'S2'; flow.refreshActions(x);
+    flow.applyChanges(x, [{ op: 'set', slot: 'audience', value: '加购未付客户', evidence: '加购未付客户' }, { op: 'set', slot: 'offer', value: '免邮', evidence: '免邮' }], '加购未付客户，免邮');
+    x.plan_card = { subject: 'Enjoy free shipping', body: 'Free shipping automatically applied.' }; x.stage = 'S2'; flow.refreshActions(x);
   });
   const failed = await api(`/api/act/${a.id}/confirm`, { expected_business_version: ready.business_version }); assert.equal(failed.status, 409);
   const recovery = await api(`/api/act/${a.id}/confirm`, { expected_business_version: failed.data.act.business_version, nohook: true });
