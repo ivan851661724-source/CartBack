@@ -618,8 +618,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     }
     patch({ chatInput: '', chatPlaceholder: CHAT_PLACEHOLDER });
     // 需求③：普通聊天消息发出即收起置底方案/确认卡（收起为一行记录，不打断对话）；
-    // 显式确认词（可以/去发…）会在 finalize 里重新展开
-    if (state.planShown === 'confirm') patch({ planCollapsed: true });
+    // 显式确认词（可以/去发…）会在 finalize 里重新展开。
+    // 函数式 setState：sendMsg 依赖数组不含 planShown（刷新恢复后闭包是旧值 → 收起失效，线上实测根因）
+    setState(prev => (prev.planShown === 'confirm' ? { ...prev, planCollapsed: true } : prev));
     // 乐观追加用户消息
     const userMsg = { role: 'user' as const, content: t };
     const actWithUser: Act = { ...act, messages: [...act.messages, userMsg] };
