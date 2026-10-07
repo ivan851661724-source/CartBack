@@ -67,9 +67,10 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
       </div>
     );
   }
-  // agent 侧去掉头像和气泡框——内容直接渲染（10-08 用户指令：只保留文本和卡片，不带聊天 UI 元素）
+  // agent 侧去掉头像，气泡背景透明（10-08 用户指令：布局不变、去聊天 UI 视觉元素）
   return (
     <div className="msg agent bare">
+      <div className="bubble">
         {badge && (
           <div style={{ marginBottom: 4 }}>
             <span style={{
@@ -96,6 +97,7 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
             style={{ display: 'block', marginTop: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
           />
         )}
+      </div>
     </div>
   );
 }
