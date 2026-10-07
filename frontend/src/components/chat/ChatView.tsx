@@ -128,10 +128,10 @@ export default function ChatView() {
   // planCard reason 兜底：新契约为 reason；旧后端历史数据仍是 pain（键已删，运行时兜底读一次）
   const cardReason = confirmCard ? (confirmCard.reason || (confirmCard as { pain?: string }).pain) : undefined;
   const confirmRaw: [string, string | undefined, boolean][] = confirmCard ? [
-    ['针对谁*必填', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
-    ['为什么挽回*必填', needsValue(needsNow?.reason) || cardReason, needsSource(needsNow?.reason) === 'inferred'],
-    ['要什么结果*必填', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
-    ['给什么钩子*必填', needsValue(needsNow?.offer)
+    ['挽回对象*必填', needsValue(needsNow?.audience) || confirmCard.audience, needsSource(needsNow?.audience) === 'inferred'],
+    ['流失原因*必填', needsValue(needsNow?.reason) || cardReason, needsSource(needsNow?.reason) === 'inferred'],
+    ['期待结果*必填', needsValue(needsNow?.goal) || confirmCard.goal, needsSource(needsNow?.goal) === 'inferred'],
+    ['优惠方式*必填', needsValue(needsNow?.offer)
       || (typeof confirmCard.discount === 'string' ? confirmCard.discount : confirmCard.discount?.text)
       || confirmCard.offer, needsSource(needsNow?.offer) === 'inferred'],
   ] : [];
@@ -292,7 +292,7 @@ export default function ChatView() {
                 {act?.flow_version === 6 && <PreviewEditor key={`${act.id}:${act.business_version}`} card={confirmCard} action={act.flow_state?.actions.find(a => a.kind === 'save_preview')} choicesDirty={choicesDirty} />}
                 <div style={{display:'flex',flexDirection:'column',gap:'6px',marginBottom:'14px'}}>
                   {confirmRows.map(([label, value, inferred]) => (
-                    <div key={label} style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'12px',padding:'7px 0',borderBottom: label === '给什么钩子' ? 'none' : '.5px dashed #DDE2E8',fontSize:'13px'}}>
+                    <div key={label} style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:'12px',padding:'7px 0',borderBottom: label === '优惠方式' ? 'none' : '.5px dashed #DDE2E8',fontSize:'13px'}}>
                       <span style={{color:'#8A95A0',flexShrink:0}}>{label}</span>
                       <span style={{textAlign:'right'}}>
                         {value}
