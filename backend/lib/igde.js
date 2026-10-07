@@ -596,7 +596,7 @@ class IGDE {
     const hasData = Boolean(banner && banner.connected && (banner.store_name || count > 0));
     const cur = banner && String(banner.currency) === 'USD' ? '$' : '¥';
     const parts = [];
-    if (!opts.hasAnyAct) parts.push('欢迎使用百客，我是你的专属智能邮件营销助手。');
+    if (!opts.hasAnyAct) { parts.push('欢迎使用百客，我是你的专属智能邮件营销助手。'); parts.push(''); }
     if (hasData) {
       // recap 句（UX 481-7578 更新版）：品牌名已知 → 以「我了解到…」承接欢迎语（替换旧「已连接…」句）；
       // 数据句照旧（F1 数据先于提问），尾句引出清单。无名不硬编。
