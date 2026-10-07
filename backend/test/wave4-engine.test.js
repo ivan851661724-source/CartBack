@@ -51,10 +51,10 @@ test('F1 opening：无任何 act → 欢迎语一次性拼接 + 清单 + 出口 
   assert.ok(first.reply.startsWith('欢迎使用百客，我是你的专属智能邮件营销助手。'), '欢迎语在首条气泡开头');
   assert.equal(first.welcome, true);
   assert.equal(first.stage, 'S0');
-  assert.ok(first.reply.includes('召回谁'), '无店铺数据 → 问一句话开场（C1 定稿话术）');
+  assert.ok(first.reply.includes('挽回对象'), '无店铺数据 → 清单即开场（UX 481-7578 标签）');
   assert.ok(first.reply.includes('我还需要的信息'), '首条气泡含「我还需要的信息」清单');
-  assert.ok(first.reply.includes('发给谁') && first.reply.includes('想拿到什么结果'), '清单覆盖缺失四槽（价值化话术）');
-  assert.ok(first.reply.includes('可选'), 'extras 可选项以附注呈现（C5 口径）');
+  assert.ok(first.reply.includes('挽回对象') && first.reply.includes('期待结果') && first.reply.includes('发送时段') && first.reply.includes('产品特色'), '清单覆盖 6 项（四槽+extras 入清单）');
+
   assert.ok(first.reply.includes('需要现在就编写邮件吗'), '编写邮件出口句');
   assert.ok(!/\d\s*\/\s*4/.test(first.reply), '清单无进度数字（F4 口径）');
   assert.deepEqual(first.chips, ['好，帮我写一封', '介绍一下其他功能', '其他需求'], '出口 chips 3 项（剧本 #23）');

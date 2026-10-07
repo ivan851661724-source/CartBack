@@ -568,7 +568,7 @@ class IGDE {
    *  C1/C3 的「有店铺数据 / 有历史数据」变体由 opening() 数据式开场与 F2 历史建议承载。 */
   probeFor(field) {
     const map = {
-      audience: '这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。',
+      audience: '挽回对象——想召回哪拨客人？加购未付的、逛了没买的，还是好久没来的老客？',
       reason: '你认为顾客流失的原因是哪一个？',
       goal: '你希望拿到什么结果？挽回多少单、多少金额，还是先跑通流程？',
       offer: '这封给客人什么钩子？'
@@ -607,18 +607,17 @@ class IGDE {
         const fmt = (n) => (Number.isInteger(n) ? String(n) : String(+n.toFixed(2)));
         parts.push(`本周${count}个加购未付（客单${cur}${fmt(aov)}，弃购总额${cur}${fmt(total)}）。`);
       }
-      if (banner.store_name) parts.push('现在可以设计第一批邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。');
-    } else {
-      // 无店铺数据：开场改问一句话（不弹表单、不硬编数据），清单照常
-      parts.push('这批信你想先召回谁？说个大概就行，比如「上个月加购没付的」。');
+
     }
-    // 「我还需要的信息」清单：缺失四槽按 B4 价值优先级排列，价值化话术、只列文字状态（无进度数字）
+    // 「我还需要的信息」清单（UX 481-7578 最新稿）：标签用 UX 前缀（挽回对象/流失原因/优惠方式/期待结果），
+    // 不弹独立问句——清单即开场；无进度数字；extras 以可选附注呈现
     parts.push('我还需要的信息：');
-    parts.push('· 发给谁——想召回哪拨客人');
-    parts.push('· 为什么流失——顾客卡在了哪一步');
-    parts.push('· 给什么钩子——折扣、免邮还是小赠品');
-    parts.push('· 想拿到什么结果——挽回多少单，还是先跑通流程');
-    parts.push('（发送时段、产品特色这些想说也可以说——可选，能提升回流率。）');
+    parts.push('· 挽回对象');
+    parts.push('· 流失原因');
+    parts.push('· 优惠方式');
+    parts.push('· 期待结果');
+    parts.push('· 发送时段');
+    parts.push('· 产品特色');
     parts.push('需要现在就编写邮件吗？');
     const chips = ['好，帮我写一封', '介绍一下其他功能', '其他需求'];
     return { reply: parts.join('\n'), stage: 'S0', chips, welcome: !opts.hasAnyAct };
@@ -1272,7 +1271,7 @@ class IGDE {
       if (miss.length > 0 && miss.length < 4) {
         const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
         const names = miss.map(s => UX_LABEL[s] || s).join('、');
-        const line = `还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
+        const line = `现在可以设计邮件了，不过完整的信息可以帮助我们更精准地针对目标客户生成内容。还有这 ${miss.length} 个信息可以提升邮件回流率：${names}。可以通过后续回流效果来完善，需要现在就编写邮件吗？`;
         if (!reply.includes(line)) reply += ` ${line}`;
       }
     }
