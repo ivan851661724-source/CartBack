@@ -1266,7 +1266,8 @@ class IGDE {
     // 回复尾部附价值化剩余清单（话术 UX 原文；剩余项 = 缺失四槽，标签用 UX 版：挽回对象/流失原因/优惠方式/期待结果）。
     // 从用户首条消息后的第一条回复即出现（UX 口径：handle 轮即用户已发言，无需另计 messages——
     // 本轮用户消息此刻尚未 push）。只加展示行——B4/B5 判定零改动（探问仍由上方承担；冲突澄清轮不叠加）。
-    if (act.stage === 'S1' && question.kind !== 'conflict') {
+    if ((act.stage === 'S0' || act.stage === 'S1') && question.kind !== 'conflict') {
+      // S0 首轮：阶段推进（S0→S1）在本插入点之后，首轮组装时 stage 仍为 S0——UX 要求清单从首条回复即现
       const miss = this.missingFields(act);
       if (miss.length > 0 && miss.length < 4) {
         const UX_LABEL = { audience: '挽回对象', reason: '流失原因', offer: '优惠方式', goal: '期待结果' };
