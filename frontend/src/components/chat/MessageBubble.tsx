@@ -55,9 +55,9 @@ function Checklist({ items }: { items: { label: string; desc: string }[] }) {
 }
 
 export default function MessageBubble({ m, badge }: { m: Message; badge?: string }) {
-  const tourImg = m.role === 'assistant' && m.content
-    ? Object.entries(TOUR_IMG).find(([line]) => m.content.includes(line))?.[1]
-    : undefined;
+  const tourImgs = m.role === 'assistant' && m.content
+    ? Object.entries(TOUR_IMG).filter(([line]) => m.content.includes(line))
+    : [];
   const parsed = m.role === 'assistant' && m.content ? splitChecklist(m.content) : null;
   if (m.role === 'user') {
     return (
@@ -88,15 +88,16 @@ export default function MessageBubble({ m, badge }: { m: Message; badge?: string
         ) : (
           m.content
         )}
-        {tourImg && (
+        {tourImgs.map(([, src], idx) => (
           // eslint-disable-next-line @next/next/no-img-element
           <img
-            src={tourImg}
+            key={idx}
+            src={src}
             alt="导览示意图"
             onError={(e) => { e.currentTarget.style.display = 'none'; }}
             style={{ display: 'block', marginTop: 8, maxWidth: 300, borderRadius: 8, border: '0.5px solid var(--line)' }}
           />
-        )}
+        ))}
       </div>
     </div>
   );

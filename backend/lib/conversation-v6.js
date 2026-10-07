@@ -324,9 +324,10 @@ async function handle(engine, act, text, opts = {}) {
   }
   act.messages.push({ role: 'user', content: text, ts: Date.now() }, { role: 'assistant', content: reply, ts: Date.now() });
   act.updated_at = Math.max(Date.now(), (Number(act.updated_at) || 0) + 1);
-  // 导览轮不更新/不下发 action 按钮与候选（用户实测：功能说明不应混入「先看邮件预览」等操作按钮）
+  // 导览轮不更新/不下发 action 按钮与候选（用户实测：功能说明不应混入「先看邮件预览」等操作按钮）；
+  // 但 pending_tour 状态变更必须 persist（否则菜单挂起态丢失、点菜单项走不进导览分支）
   const actions = tour ? (act.flow_state.actions || []) : refreshActions(act);
-  if (!tour && opts.persist) await opts.persist(act);
+  if (opts.persist) await opts.persist(act);
   return { reply, stage: act.stage, needs: act.needs, planCard: card, chips: tour?.chips || [], askedSlot: null,
     availableActions: tour ? [] : actions, appliedChanges: applied, pendingCandidates: tour ? [] : act.flow_state.candidates,
     businessVersion: act.business_version, engine: env && !error && engine.aiEnabled ? 'online' : 'degraded', guardrailHits: [],

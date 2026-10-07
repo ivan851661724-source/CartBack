@@ -676,7 +676,7 @@ class IGDE {
       const script = TOUR_SCRIPTS[picked];
       const lines = script ? [...script.lines] : [];
       const reply = lines.length
-        ? `${picked}是这样用的：\n${lines.map(l => `· ${l}`).join('\n')}`
+        ? `${picked}是这样用的：\n${lines.join('\n')}`
         : `${picked}在左侧导航里，点开就能用。`;
       return { reply, chips: (script && script.exampleChips) || [] };
     }
