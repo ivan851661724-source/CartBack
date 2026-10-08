@@ -80,5 +80,5 @@ export const TOUR_IMG: Record<string, string> = {
   '点击左侧数据看板来查看过往邮件获单效果的数据统计。': '/tour/data-sidebar.png',
   '优先关注这一行，初步判断近期邮件获单效果。': '/tour/data-banner.png',
   '转化漏斗哪一栏的百分比掉得最多，就优先优化哪一环。': '/tour/data-funnel.png',
-  '回流GMV，这个量化投放指标。': '/tour/data-trend.png',
+  '回流GMV，这个是北极星指标。': '/tour/data-trend.png',
 };
