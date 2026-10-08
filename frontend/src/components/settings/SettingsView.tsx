@@ -156,7 +156,6 @@ export default function SettingsView() {
       </div>
       <div className="setup-wrap">
         <div className="setup-card glass-card">
-          <div className="s-no">2</div>
           <div className="s-body">
             <div className="s-head"><h3>连接发信服务（ESP）</h3><Tag kind={s.espConfigured ? 'intent' : 'price'}>{s.espConfigured ? '已连接' : '待配置'}</Tag></div>
             <div className="s-desc">配置完成后才能发送邮件；未配置时可以准备和编辑草稿。</div>
@@ -171,7 +170,6 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">3</div>
           <div className="s-body">
             <div className="s-head"><h3>品牌名称（白标）</h3><Tag kind={s.shopBrand && s.shopBrand !== 'CartBack' ? 'intent' : 'gray'}>{s.shopBrand && s.shopBrand !== 'CartBack' ? '已配置' : '待配置'}</Tag></div>
             <div className="s-desc">邮件落款、页脚版权、发件人名称统一用你的品牌（M4 白标）。未配置时回退方案卡品牌。</div>
@@ -184,7 +182,6 @@ export default function SettingsView() {
 
         {/* —— 商品库（批次 1）：上传/列表/删除；图片 ≤2MB 前端压图 base64 提交，零新依赖 —— */}
         <div className="setup-card glass-card">
-          <div className="s-no">3</div>
           <div className="s-body">
             <div className="s-head"><h3>商品库（商品图）</h3><Tag kind={products.length ? 'intent' : 'gray'}>{products.length ? `${products.length} 张商品图` : '待上传'}</Tag></div>
             <div className="s-desc">上传你的商品图，邮件主图可直接选用（自动叠折扣/CTA）。图片自动压缩至 1024px；品类用于生图构图（留空由 AI 读图推断）。</div>
@@ -234,7 +231,6 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">4</div>
           <div className="s-body">
             <div className="s-head"><h3>连接店铺（真实收件人源）</h3><Tag kind="default">即将支持</Tag></div>
             <div className="s-desc">Shopify / 店匠 / 通用 REST 统一连接器 · 接入后自动拉取真实顾客，语种跟随客户 locale。</div>
@@ -243,7 +239,6 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">7</div>
           <div className="s-body">
             <div className="s-head"><h3>AI 助手偏好</h3><Tag kind={hasAnyPref ? 'intent' : 'gray'}>{hasAnyPref ? '已设置' : '默认'}</Tag></div>
             <div className="s-desc">语气 / 折扣习惯 / 署名——助手写邮件时沿用；留空 = 跟随对话推断。</div>
@@ -274,7 +269,6 @@ export default function SettingsView() {
         </div>
 
         <div className="setup-card glass-card">
-          <div className="s-no">6</div>
           <div className="s-body">
             <div className="s-head"><h3>中文白名单（G0 语种护栏）</h3><Tag kind="default">{g0Terms.length} 个词条</Tag></div>
             <div className="s-desc">发往消费者的邮件默认零中文；品牌名 / 专有名词加进白名单后不拦截（店铺品牌名已自动包含）。</div>
