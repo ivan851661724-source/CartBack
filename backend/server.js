@@ -348,6 +348,12 @@ function getMailgen() {
 // opts（编辑态「生成图片」重跑时使用）：
 //   imagePromptOverride：提示词覆盖（空 = 按 draft.image_prompt / 标签画像构建）
 //   copyPassthrough：跳过文案 LLM，直接透传 card.subject/body
+// 图像 Key 有效值：显式 visionKey 优先，未单独配置时与万相共享（与下方 ai_config 兜底同口径）。
+// skip_image 门禁（出卡/预览包装）与 posters 队列都必须用它判断，否则会出现
+// 「mailgen 拿得到 Key 却被上游 skip_image 拦下、邮件恒无图」的口径分裂。
+function effectiveVisionKey() {
+  return config.visionKey || config.wanxKey || '';
+}
 async function generateMailHtml(draft, card, opts = {}) {
   const imagePromptOverride = String(opts.imagePromptOverride || draft.image_prompt || '').trim();
   const copyPassthrough = Boolean(opts.copyPassthrough);
@@ -1607,7 +1613,7 @@ function withAuthoritativePreview(act, planCard, codeStatus = 'pending') {
     brand: resolveMerchantBrand(act),
     unsubscribeOk: Boolean(config.publicBaseUrl)
   });
-  if (!config.visionKey) wrapped.skip_image = true;
+  if (!effectiveVisionKey()) wrapped.skip_image = true;
   wrapped.brand = resolveMerchantBrand(act);
   if (act.flow_version === 6) { wrapped.business_version = act.business_version; wrapped.template_preview = planCard.template_preview; }
   return wrapped;
@@ -1783,7 +1789,7 @@ async function confirmActToStage3(act, body = {}, userId = null) {
     unsubscribeOk: Boolean(config.publicBaseUrl), draftId, note,
     sendWindowText: null, codeDefault: defaultCode
   });
-  if (!config.visionKey) planCard.skip_image = true; // 未配图像 AI：出卡不跑图片生成（离线确定性）
+  if (!effectiveVisionKey()) planCard.skip_image = true; // 未配图像 AI：出卡不跑图片生成（离线确定性）
   planCard.brand = brand;                            // 草稿/mailgen 品牌链消费（内部键）
   act.execution_snapshot = execution.serializeSnapshot(planCard); // D3 四字段快照冻结（闸门⑤ diff 依据）
   act.plan_card = planCard;
@@ -1843,10 +1849,10 @@ async function processPosterJob({ job, payload }) {
   const draft = store.getDraft(payload.draftId);
   if (!draft) return { skipped: 'draft not found' };
   const t2i = async (prompt) => breakers.get('poster').exec(() => postersMod.wanxText2Image({
-    prompt, apiKey: config.visionKey, baseUrl: config.visionBaseUrl || 'https://dashscope.aliyuncs.com/api/v1',
+    prompt, apiKey: effectiveVisionKey(), baseUrl: config.visionBaseUrl || 'https://dashscope.aliyuncs.com/api/v1',
     model: config.visionModel || 'wan2.6-t2i'
   }));
-  const r = await postersMod.generatePosters({ draft, config, outDir: POSTERS_DIR, t2iFn: config.visionKey ? t2i : null });
+  const r = await postersMod.generatePosters({ draft, config, outDir: POSTERS_DIR, t2iFn: effectiveVisionKey() ? t2i : null });
   draft.posters = r.posters;
   store.upsertDraft(draft);
   metricsAdd({ posters_generated: r.posters.filter(p => p.method === 'wanx').length, posters_placeholder: r.posters.filter(p => p.method === 'placeholder').length });
@@ -2416,7 +2422,7 @@ const server = http.createServer(async (req, res) => {
             brand: resolveMerchantBrand(act),
             unsubscribeOk: Boolean(config.publicBaseUrl)
           });
-          if (!config.visionKey) card.skip_image = true;
+          if (!effectiveVisionKey()) card.skip_image = true;
           card.brand = resolveMerchantBrand(act);
         }
       } else if (body.planCard) {
