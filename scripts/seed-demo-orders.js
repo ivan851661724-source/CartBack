@@ -80,7 +80,10 @@ for (const s of SENDS) {
     status: hasConvert ? 'recovering' : 'sent',
     estGmv: Math.round(s.recipients * 38.5), matchedCount: s.recipients,
     sendTiming: 'Send within 24h', created_at: created, sent_at: sentAt,
-    esp_message_id: null, cost: +(s.recipients * 0.02).toFixed(2),
+    esp_message_id: null,
+    // 演示口径：每封全成本 ¥6（AI 文案 + 产图 + 发送 + 折扣/赠品摊销）——
+    // 若按生产发送流的 ¥0.0004/封，ROI 会跑到几千倍；压到 ¥6/封让 ROI 落回 2-5 的正常业务区间
+    cost: +(s.recipients * 6).toFixed(2),
     user_id: TARGET_USER, locale: 'en',
     html: emailHtml(s.subject, s.code),
     image_path: null, image_prompt: null, brand: null, product: null,
