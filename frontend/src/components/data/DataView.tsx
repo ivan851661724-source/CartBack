@@ -27,7 +27,7 @@ export default function DataView() {
       <KpiGrid k={k} />
       <div className="charts-row">
         <div className="glass-card" style={{ padding: '17px 19px' }}>
-          <div className="card-title">转化漏斗</div>
+          <div className="card-title">转化漏斗（按收件人）</div>
           <Funnel k={k} />
         </div>
         <div className="glass-card" style={{ padding: '17px 19px' }}>

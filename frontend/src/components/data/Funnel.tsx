@@ -10,10 +10,12 @@ const TIER_FILLS = ['rgba(249,111,58,1)', 'rgba(249,111,58,.78)', 'rgba(249,111,
  * 转化漏斗：真梯形漏斗（对齐 Figma 406:397）—— 4 层居中梯形 + 右侧「步骤 数值 / 百分比」标签列
  * + 层间贯穿虚线分割（619:9555/57/59）。宽度数据驱动：每层顶宽 = 数值占发送量的比例（下限 4%
  * 保底可见），层底宽 = 下一层顶宽，末层再收窄 ~45%；preserveAspectRatio="none" 随卡片宽度自适应。
+ * 口径（走查 1008 方案②）：全链路按收件人——发送 = 实发人数 k.sentRcpt，打开/点击 = 批次×收件人
+ * 去重对数，转化 = 订单数；分母统一为实发人数，四层百分比都不会超 100%。
  */
 export default function Funnel({ k }: { k: Kpis }) {
-  const steps: [string, number][] = [['发送', k.sent || 0], ['打开', k.open || 0], ['点击', k.click || 0], ['转化', k.convert || 0]];
-  const max = Math.max(k.sent || 0, 1);
+  const steps: [string, number][] = [['发送', k.sentRcpt || 0], ['打开', k.open || 0], ['点击', k.click || 0], ['转化', k.convert || 0]];
+  const max = Math.max(k.sentRcpt || 0, 1);
   const tops = steps.map(([, v]) => Math.min(100, Math.max((v / max) * 100, 4)));
   return (
     <div className="funnel" id="funnel">

@@ -281,6 +281,8 @@ export interface Audience {
 /** 数据看板北极星 KPI（/api/state 的 kpis） */
 export interface Kpis {
   sent: number;
+  /** 实发人数（sends 流水 → emailed 回执 → matchedCount 兜底；漏斗/开点率分母，走查 1008 方案②） */
+  sentRcpt: number;
   openRate: number;
   clickRate: number;
   convert: number;

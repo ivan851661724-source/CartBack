@@ -924,9 +924,22 @@ class Store {
     const sentIds = new Set(sent.map(d => d.id));
     const sentAt = {}; sent.forEach(d => { sentAt[d.id] = d.sent_at || d.created_at; });
     const ev = events.filter(e => sentIds.has(e.draft_id));
-    // 分子按草稿去重（一封邮件开/点 N 次仍算 1），与分母「已发送草稿数」同口径 —— 否则打开率能超 100%（走查 P1-2）
-    const open = new Set(ev.filter(e => e.type === 'open').map(e => e.draft_id)).size;
-    const click = new Set(ev.filter(e => e.type === 'click').map(e => e.draft_id)).size;
+    // 漏斗收件人口径（走查 1008 方案②，替代 P1-2 的「按草稿去重」）：同一批次混口径曾致「转化率 167%」。
+    // 发送 = 实发人数（sends 实发流水 → emailed 回执 → matchedCount 兜底；sim_ 模拟批次无收件事实，不计入）；
+    // 打开/点击 = 「批次×收件人」去重对数（一人一批开/点 N 次仍算 1，绝不超发送人数）；转化保持订单事件数
+    // （KPI 卡「转化订单」口径不变），打开率/点击率/转化率分母同步改为实发人数。
+    const isSim = (d) => String(d.esp_message_id || '').startsWith('sim_');
+    const sendsRows = this._read('sends');
+    let sentRcpt = 0;
+    for (const d of sent) {
+      if (isSim(d)) continue;
+      const real = sendsRows.filter(r => r.campaign_id === d.id && r.status === 'sent').length;
+      sentRcpt += real
+        || ev.filter(e => e.draft_id === d.id && e.type === 'emailed').length
+        || (d.matchedCount || 0);
+    }
+    const open = new Set(ev.filter(e => e.type === 'open').map(e => `${e.draft_id}|${e.audience_id || 'na'}`)).size;
+    const click = new Set(ev.filter(e => e.type === 'click').map(e => `${e.draft_id}|${e.audience_id || 'na'}`)).size;
     // 归因窗口：仅计「点击/发送后 N 天内」的转化（PRD §5⑤ / 算法 v1 环节⑤）
     const convert = ev.filter(e => e.type === 'convert' && (e.ts - (sentAt[e.draft_id] || e.ts)) <= windowMs);
     const gmv = convert.reduce((s, e) => s + (e.value || 0), 0);
@@ -938,10 +951,10 @@ class Store {
     const estTotal = audience.reduce((s, a) => s + (a.estGmv || 0), 0); // 全量预估可挽回 GMV
     return {
       audienceSize: audience.length,
-      sent: sent.length, recovering, open, click, convert: convert.length,
-      openRate: sent.length ? +(open / sent.length).toFixed(3) : 0,
-      clickRate: sent.length ? +(click / sent.length).toFixed(3) : 0,
-      convertRate: sent.length ? +(convert.length / sent.length).toFixed(3) : 0,
+      sent: sent.length, sentRcpt, recovering, open, click, convert: convert.length,
+      openRate: sentRcpt ? +(open / sentRcpt).toFixed(3) : 0,
+      clickRate: sentRcpt ? +(click / sentRcpt).toFixed(3) : 0,
+      convertRate: sentRcpt ? +(convert.length / sentRcpt).toFixed(3) : 0,
       gmv: +gmv.toFixed(2),
       cost: +cost.toFixed(2),
       roi: +roi.toFixed(2),
